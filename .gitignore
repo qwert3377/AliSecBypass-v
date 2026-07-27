@@ -1,0 +1,15 @@
+# Theos
+.theos/
+packages/
+obj/
+
+# Dobby build artifacts
+dobby/build*/
+dobby/cmake-build-*/
+
+# macOS
+.DS_Store
+
+# Xcode
+*.xcworkspace
+*.xcodeproj
