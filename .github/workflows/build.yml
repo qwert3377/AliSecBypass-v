@@ -22,6 +22,11 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
+      - name: Setup Dobby
+        run: |
+          git clone --recursive https://github.com/jmpews/Dobby.git dobby
+        working-directory: ${{ github.workspace }}
+
       - name: Build
         run: |
           export THEOS=${{ github.workspace }}/theos
