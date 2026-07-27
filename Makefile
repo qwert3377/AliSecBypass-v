@@ -5,38 +5,31 @@
 TARGET := iphone:clang:latest:15.0
 ARCHS = arm64
 
-# 自动检测 Theos 路径
 THEOS ?= $(HOME)/theos
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = AliSecBypass_v4
 
-# ========== 主文件 ==========
 AliSecBypass_v4_FILES = AliSecBypass_v4.mm
 
-# ========== C/C++ 编译选项 ==========
-AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11
-AliSecBypass_v4_CCFLAGS = -std=c++11
+# C/C++ 编译选项 - 关闭 C++ modules 避免 dobby.h 编译错误
+AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11 -fno-modules -fno-implicit-modules
+AliSecBypass_v4_CCFLAGS = -std=c++11 -fno-modules -fno-implicit-modules
 
-# ========== Dobby 路径 ==========
-# 本地: DOBBY_PATH 环境变量或默认 ./dobby
+# Dobby 路径
 DOBBY_PATH ?= $(PWD)/dobby
-
-# 头文件
 AliSecBypass_v4_CFLAGS += -I$(DOBBY_PATH)/include
 
-# 静态库路径（自动查找）
+# 自动查找 Dobby 静态库
 DOBBY_LIB = $(shell find $(DOBBY_PATH) -name "libdobby.a" | head -1)
 
 ifeq ($(DOBBY_LIB),)
-  $(warning Dobby static library not found! Run: ./setup.sh)
-  $(warning Or set DOBBY_PATH env variable)
+  $(warning Dobby static library not found!)
 else
   AliSecBypass_v4_LDFLAGS += $(DOBBY_LIB)
   $(info Using Dobby library: $(DOBBY_LIB))
 endif
 
-# ========== 其他链接选项 ==========
 AliSecBypass_v4_LDFLAGS += -Wl,-segalign,4000
 
 include $(THEOS_MAKE_PATH)/tweak.mk
