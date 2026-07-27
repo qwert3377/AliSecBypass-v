@@ -1,5 +1,3 @@
-
-
 // AliSecBypass_v4.mm
 // 番茄畅听/番茄小说 通用脱壳检测绕过插件 v4
 // 基于头文件精确类名 (字节+百度+阿里) + Dobby inline hook C函数
@@ -13,9 +11,18 @@
 #include <unistd.h>
 
 // iOS SDK 没有 sys/ptrace.h，手动声明 ptrace 和常量
-extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
+// 关键修复：在 .mm (C++) 文件中，C 符号必须用 extern "C" 包裹，否则链接失败
+typedef char *caddr_t;
 #define PT_DENY_ATTACH 0
 #define P_TRACED 0x00000800
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
+#ifdef __cplusplus
+}
+#endif
 
 #pragma mark - Logger
 
