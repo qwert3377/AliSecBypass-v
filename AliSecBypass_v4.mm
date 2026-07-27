@@ -1,17 +1,19 @@
-// AliSecBypass_v4.mm
-// 番茄畅听/番茄小说 通用脱壳检测绕过插件 v4
-// 基于头文件精确类名 (字节+百度+阿里) + Dobby inline hook C函数
+// AliSecBypass_v4_scan.mm
+// 番茄畅听/番茄小说 通用脱壳检测绕过插件 v4.2
+// 扫描模式：检测 App 主二进制中是否使用 svc #0x80 内联汇编
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 // 日志: App Documents/AliBypass.log
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#include "dobby.h"
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
 // iOS SDK 没有 sys/ptrace.h，手动声明 ptrace 和常量
-// 关键修复：在 .mm (C++) 文件中，C 符号必须用 extern "C" 包裹，否则链接失败
 typedef char *caddr_t;
 #define PT_DENY_ATTACH 0
 #define P_TRACED 0x00000800
@@ -53,51 +55,61 @@ static void BYPASS_LOG(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - Dobby C Function Hook
+#pragma mark - Scan svc #0x80 in App binary
 
-static int (*orig_ptrace)(int request, pid_t pid, caddr_t addr, int data);
-static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
-    if (request == PT_DENY_ATTACH) {
-        BYPASS_LOG(@"[DOBBY] ptrace(PT_DENY_ATTACH) blocked");
-        return 0;
+static void scanSvc80() {
+    BYPASS_LOG(@"[SCAN] start scanning main binary for svc #0x80...");
+
+    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!header) {
+        BYPASS_LOG(@"[SCAN] failed to get image header");
+        return;
     }
-    return orig_ptrace(request, pid, addr, data);
-}
 
-static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
-    if (namelen >= 4 && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
-        if (oldp) {
-            struct kinfo_proc *info = (struct kinfo_proc *)oldp;
-            if (info->kp_proc.p_flag & P_TRACED) {
-                info->kp_proc.p_flag &= ~P_TRACED;
-                BYPASS_LOG(@"[DOBBY] sysctl P_TRACED cleared");
+    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    uintptr_t textStart = 0;
+    size_t textSize = 0;
+
+    struct load_command *lc = (struct load_command *)((uintptr_t)header + sizeof(struct mach_header_64));
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            struct segment_command_64 *seg = (struct segment_command_64 *)lc;
+            if (strcmp(seg->segname, "__TEXT") == 0) {
+                textStart = seg->vmaddr + slide;
+                textSize = seg->vmsize;
+                BYPASS_LOG(@"[SCAN] __TEXT segment: start=%p size=%zu", (void *)textStart, textSize);
+                break;
             }
         }
+        lc = (struct load_command *)((uintptr_t)lc + lc->cmdsize);
     }
-    return ret;
-}
 
-static int (*orig_access)(const char *path, int mode);
-static int my_access(const char *path, int mode) {
-    if (path) {
-        NSString *p = [NSString stringWithUTF8String:path];
-        if ([p containsString:@"Cydia"] || [p containsString:@"cydia"] ||
-            [p containsString:@"MobileSubstrate"] || [p containsString:@"substrate"] ||
-            [p containsString:@"apt"] || [p containsString:@"dpkg"] ||
-            [p containsString:@"bin/bash"] || [p containsString:@"usr/sbin/sshd"] ||
-            [p containsString:@"etc/apt"] || [p containsString:@"Library/MobileSubstrate"] ||
-            [p containsString:@"var/lib/dpkg"] || [p containsString:@"var/cache/apt"] ||
-            [p containsString:@"var/tmp/cydia"] || [p containsString:@"usr/bin/ssh"] ||
-            [p containsString:@"usr/libexec/ssh"] || [p containsString:@"Sileo"] ||
-            [p containsString:@"Zebra"] || [p containsString:@"TrollStore"] ||
-            [p containsString:@"trollstore"]) {
-            BYPASS_LOG(@"[DOBBY] access blocked: %s", path);
-            return -1;
+    if (!textStart || !textSize) {
+        BYPASS_LOG(@"[SCAN] __TEXT segment not found");
+        return;
+    }
+
+    uint32_t *ptr = (uint32_t *)textStart;
+    int count = 0;
+    for (size_t i = 0; i < textSize / 4; i++) {
+        // svc #0x80 = 0xd4001001
+        // svc #0x80 with different imm16 variations
+        if ((ptr[i] & 0xFFE0001F) == 0xd4000001) {
+            BYPASS_LOG(@"[SCAN] found svc instruction at %p: 0x%08x", &ptr[i], ptr[i]);
+            count++;
         }
     }
-    return orig_access(path, mode);
+
+    BYPASS_LOG(@"[SCAN] total svc instructions found: %d", count);
+
+    // 同时扫描常见的反调试字符串
+    const char *patterns[] = {"ptrace", "sysctl", "PT_DENY_ATTACH", "isDebuggerAttached", nil};
+    for (int p = 0; patterns[p]; p++) {
+        char *found = (char *)memmem((void *)textStart, textSize, patterns[p], strlen(patterns[p]));
+        if (found) {
+            BYPASS_LOG(@"[SCAN] found string \"%s\" at %p", patterns[p], found);
+        }
+    }
 }
 
 #pragma mark - Hook Helpers
@@ -718,18 +730,73 @@ static void hookSystemClasses() {
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4 (Headfile + Dobby) loaded ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.2 (Scan Mode) loaded ===");
 
-        DobbyHook((void *)ptrace, (void *)my_ptrace, (void **)&orig_ptrace);
-        DobbyHook((void *)sysctl, (void *)my_sysctl, (void **)&orig_sysctl);
-        DobbyHook((void *)access, (void *)my_access, (void **)&orig_access);
-        BYPASS_LOG(@"[DOBBY] ptrace/sysctl/access hooked");
+        // 第一步：扫描 App 主二进制中的 svc #0x80 和反调试字符串
+        scanSvc80();
 
+        // 第二步：执行所有 ObjC Runtime hook
         hookAliSDK();
         hookBaiduSDK();
         hookByteDanceSDK();
         hookSystemClasses();
 
-        BYPASS_LOG(@"=== AliSecBypass v4 init complete ===");
+        // 第三步：Dobby hook 系统 C 函数（暂时注释，等扫描结果决定）
+        // 如果 scanSvc80 发现 svc #0x80 在 App 代码段，取消注释并修改目标地址
+        // 如果没发现，改用 fishhook 改 GOT 表
+        /*
+        #include "dobby.h"
+        static int (*orig_ptrace)(int request, pid_t pid, caddr_t addr, int data);
+        static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+            if (request == PT_DENY_ATTACH) {
+                BYPASS_LOG(@"[DOBBY] ptrace(PT_DENY_ATTACH) blocked");
+                return 0;
+            }
+            return orig_ptrace(request, pid, addr, data);
+        }
+
+        static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+        static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+            int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+            if (namelen >= 4 && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
+                if (oldp) {
+                    struct kinfo_proc *info = (struct kinfo_proc *)oldp;
+                    if (info->kp_proc.p_flag & P_TRACED) {
+                        info->kp_proc.p_flag &= ~P_TRACED;
+                        BYPASS_LOG(@"[DOBBY] sysctl P_TRACED cleared");
+                    }
+                }
+            }
+            return ret;
+        }
+
+        static int (*orig_access)(const char *path, int mode);
+        static int my_access(const char *path, int mode) {
+            if (path) {
+                NSString *p = [NSString stringWithUTF8String:path];
+                if ([p containsString:@"Cydia"] || [p containsString:@"cydia"] ||
+                    [p containsString:@"MobileSubstrate"] || [p containsString:@"substrate"] ||
+                    [p containsString:@"apt"] || [p containsString:@"dpkg"] ||
+                    [p containsString:@"bin/bash"] || [p containsString:@"usr/sbin/sshd"] ||
+                    [p containsString:@"etc/apt"] || [p containsString:@"Library/MobileSubstrate"] ||
+                    [p containsString:@"var/lib/dpkg"] || [p containsString:@"var/cache/apt"] ||
+                    [p containsString:@"var/tmp/cydia"] || [p containsString:@"usr/bin/ssh"] ||
+                    [p containsString:@"usr/libexec/ssh"] || [p containsString:@"Sileo"] ||
+                    [p containsString:@"Zebra"] || [p containsString:@"TrollStore"] ||
+                    [p containsString:@"trollstore"]) {
+                    BYPASS_LOG(@"[DOBBY] access blocked: %s", path);
+                    return -1;
+                }
+            }
+            return orig_access(path, mode);
+        }
+
+        DobbyHook((void *)ptrace, (void *)my_ptrace, (void **)&orig_ptrace);
+        DobbyHook((void *)sysctl, (void *)my_sysctl, (void **)&orig_sysctl);
+        DobbyHook((void *)access, (void *)my_access, (void **)&orig_access);
+        BYPASS_LOG(@"[DOBBY] ptrace/sysctl/access hooked");
+        */
+
+        BYPASS_LOG(@"=== AliSecBypass v4.2 init complete ===");
     }
 }
