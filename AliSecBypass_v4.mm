@@ -7,9 +7,14 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #include "dobby.h"
-#include <sys/ptrace.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+
+// iOS SDK 没有 sys/ptrace.h，手动定义
+#define PT_DENY_ATTACH 0
+#define P_TRACED 0x00000800
+
+typedef void *caddr_t;
 
 #pragma mark - Logger
 
@@ -74,11 +79,12 @@ static int my_access(const char *path, int mode) {
             [p containsString:@"MobileSubstrate"] || [p containsString:@"substrate"] ||
             [p containsString:@"apt"] || [p containsString:@"dpkg"] ||
             [p containsString:@"bin/bash"] || [p containsString:@"usr/sbin/sshd"] ||
-            [p containsString:@"etc/apt"] || [p containsString:@"var/lib/dpkg"] ||
-            [p containsString:@"var/cache/apt"] || [p containsString:@"var/tmp/cydia"] ||
-            [p containsString:@"usr/bin/ssh"] || [p containsString:@"usr/libexec/ssh"] ||
-            [p containsString:@"Sileo"] || [p containsString:@"Zebra"] ||
-            [p containsString:@"TrollStore"] || [p containsString:@"trollstore"]) {
+            [p containsString:@"etc/apt"] || [p containsString:@"Library/MobileSubstrate"] ||
+            [p containsString:@"var/lib/dpkg"] || [p containsString:@"var/cache/apt"] ||
+            [p containsString:@"var/tmp/cydia"] || [p containsString:@"usr/bin/ssh"] ||
+            [p containsString:@"usr/libexec/ssh"] || [p containsString:@"Sileo"] ||
+            [p containsString:@"Zebra"] || [p containsString:@"TrollStore"] ||
+            [p containsString:@"trollstore"]) {
             BYPASS_LOG(@"[DOBBY] access blocked: %s", path);
             return -1;
         }
@@ -118,7 +124,6 @@ static NSUInteger fake_ret_0ul(id self, SEL _cmd) { return 0; }
 #pragma mark - Module A: 阿里 SDK (头文件精确类名)
 
 static void hookAliSDK() {
-    // === AliSecXSafeUtils ===
     const char *safeUtils[] = {
         "AliSecXSafeUtilsMXXTIY", "AliSecXSafeUtilsZZZX",
         "AliSecXSafeUtils", nil
@@ -143,7 +148,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(initSafeGuard), (IMP)fake_ret_void);
     }
 
-    // === AliSecXReachability ===
     const char *reachClasses[] = {
         "AliSecXReachabilityMXXTIY", "AliSecXReachabilityZZZX",
         "AliSecXReachability", nil
@@ -158,7 +162,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(networkStatusForFlags:), (IMP)fake_ret_0ll);
     }
 
-    // === AliSecXDeviceInfo / PhoneInfoHolder ===
     const char *devInfoClasses[] = {
         "AliSecXDeviceInfoMXXTIY", "AliSecXDeviceInfoZZZX",
         "AliSecXDeviceInfo", "AliDeviceInfo",
@@ -185,7 +188,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(ipAddress), (IMP)fake_ret_empty);
     }
 
-    // === AliSecXSSKeychain ===
     const char *keychainClasses[] = {
         "AliSecXSSKeychainQuery", "AliSecXSSKeychainQueryMXXT",
         "AliSecXSSKeychain", "AliKeychain", nil
@@ -199,7 +201,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(fetch:), (IMP)fake_ret_NO);
     }
 
-    // === AliSecXLocalStorage ===
     const char *storageClasses[] = {
         "AliSecXLocalStorage", "AliSecXLocalStorageMXXT",
         "AliSecXLocalStorageUtils", "AliLocalStorage", nil
@@ -214,7 +215,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(load:), (IMP)fake_ret_nil);
     }
 
-    // === AliSecXFileOp ===
     const char *fileOpClasses[] = {
         "AliSecXFileOp", "AliSecXFileOpMXXT", "AliFileOp", nil
     };
@@ -226,7 +226,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(writeFile:data:), (IMP)fake_ret_YES);
     }
 
-    // === AMap Monitor / Crash (禁用监控) ===
     const char *monitorClasses[] = {
         "AMapMonitorSingal", "AMapMonitorNSException",
         "AMapMonitorMachException", "AMapCrashReporter",
@@ -265,7 +264,6 @@ static void hookAliSDK() {
         safeHookNoOrig(crashCfg, @selector(isFilter), (IMP)fake_ret_YES);
     }
 
-    // === AMapAnalyticsManager (拦截上报) ===
     Class analytics = objc_getClass("AMapAnalyticsManager");
     if (analytics) {
         BYPASS_LOG(@"[ALI] found AMapAnalyticsManager");
@@ -284,7 +282,6 @@ static void hookAliSDK() {
         safeHookNoOrig(analytics, @selector(uploadLogWithType:component:complete:), (IMP)fake_ret_void_id_id_id);
     }
 
-    // === AMapNetFlowManager (isBlock 返回 NO) ===
     Class netFlow = objc_getClass("AMapNetFlowManager");
     if (netFlow) {
         BYPASS_LOG(@"[ALI] found AMapNetFlowManager");
@@ -307,7 +304,6 @@ static void hookAliSDK() {
         safeHookNoOrig(errCodeStrategy, @selector(isVaild), (IMP)fake_ret_NO);
     }
 
-    // === AMapADIUManager (重置设备标识) ===
     Class adiuMgr = objc_getClass("AMapADIUManager");
     if (adiuMgr) {
         BYPASS_LOG(@"[ALI] found AMapADIUManager");
@@ -317,7 +313,6 @@ static void hookAliSDK() {
         safeHookNoOrig(adiuMgr, @selector(requestADIU), (IMP)fake_ret_void);
     }
 
-    // === AliyunIdentityManager ===
     Class identityMgr = objc_getClass("AliyunIdentityManager");
     if (identityMgr) {
         BYPASS_LOG(@"[ALI] found AliyunIdentityManager");
@@ -331,7 +326,6 @@ static void hookAliSDK() {
         safeHookNoOrig(identityMgr, @selector(getlogArray), (IMP)fake_ret_array);
     }
 
-    // === AliyunFaceAuthRPC ===
     Class faceAuth = objc_getClass("AliyunFaceAuthRPC");
     if (faceAuth) {
         safeHookNoOrig(faceAuth, @selector(zimInit:completionBlock:), (IMP)fake_ret_void_id_id);
@@ -342,14 +336,12 @@ static void hookAliSDK() {
         safeHookNoOrig(faceAuth, @selector(zimFileUpload:completionBlock:), (IMP)fake_ret_void_id_id);
     }
 
-    // === AliyunEncryptorforTech ===
     Class encryptor = objc_getClass("AliyunEncryptorforTech");
     if (encryptor) {
         safeHookNoOrig(encryptor, @selector(encrypt:), (IMP)fake_ret_empty);
         safeHookNoOrig(encryptor, @selector(encryptData:), (IMP)fake_ret_nil);
     }
 
-    // === AMapStatistics (设备信息伪装) ===
     Class stats = objc_getClass("AMapStatistics");
     if (stats) {
         BYPASS_LOG(@"[ALI] found AMapStatistics");
@@ -372,7 +364,6 @@ static void hookAliSDK() {
         safeHookNoOrig(stats, @selector(keyAuthorized), (IMP)fake_ret_YES);
     }
 
-    // === AMapSystemInfo ===
     Class sysInfo = objc_getClass("AMapSystemInfo");
     if (sysInfo) {
         safeHookNoOrig(sysInfo, @selector(extractMemoryTotalSize), (IMP)fake_ret_empty);
@@ -386,7 +377,6 @@ static void hookAliSDK() {
         safeHookNoOrig(sysInfo, @selector(sysctlUint64ForName:), (IMP)fake_ret_0ull);
     }
 
-    // === AMapMacAddressFinder ===
     Class macFinder = objc_getClass("AMapMacAddressFinder");
     if (macFinder) {
         safeHookNoOrig(macFinder, @selector(AMF_macAddress), (IMP)fake_ret_empty);
@@ -394,7 +384,6 @@ static void hookAliSDK() {
         safeHookNoOrig(macFinder, @selector(_getMacAddressWithIP:), (IMP)fake_ret_empty);
     }
 
-    // === AMapServices ===
     Class services = objc_getClass("AMapServices");
     if (services) {
         safeHookNoOrig(services, @selector(validatingAPIKey), (IMP)fake_ret_void);
@@ -410,7 +399,6 @@ static void hookAliSDK() {
         safeHookNoOrig(services, @selector(uploadAnalyticsInfo), (IMP)fake_ret_void);
     }
 
-    // === Request Reformers (签名/请求篡改) ===
     const char *reformerClasses[] = {
         "AMapAuthRequestReformer", "AMapAOSRequestReformer",
         "AMapConcreteRequestReformer", "AMapRESTRequestReformer",
@@ -429,7 +417,6 @@ static void hookAliSDK() {
         safeHookNoOrig(cls, @selector(v6BaseURL), (IMP)fake_ret_nil);
     }
 
-    // === AMapFoundationRSA / AES ===
     Class rsa = objc_getClass("AMapFoundationRSA");
     if (rsa) {
         safeHookNoOrig(rsa, @selector(encryptWithData:), (IMP)fake_ret_nil);
@@ -518,7 +505,6 @@ static void hookBaiduSDK() {
 #pragma mark - Module C: 字节 SDK (头文件精确类名)
 
 static void hookByteDanceSDK() {
-    // 头文件中发现的字节监控/上报类
     const char *ttMonitorClasses[] = {
         "AnnieXMonitorModule",
         "AnnieXMonitorAbilityDelegate",
@@ -545,7 +531,6 @@ static void hookByteDanceSDK() {
         safeHookNoOrig(cls, @selector(traceInstantWithName:), (IMP)fake_ret_void);
     }
 
-    // BDADSDK / Gecko (广告资源监控)
     Class geckoMgr = objc_getClass("BDADSDKGeckoManager");
     if (geckoMgr) {
         safeHookNoOrig(geckoMgr, @selector(registerAndPreloadCommerceGecko), (IMP)fake_ret_void);
@@ -558,14 +543,12 @@ static void hookByteDanceSDK() {
         safeHookNoOrig(bdAdStrategy, @selector(track:), (IMP)fake_ret_void_id);
     }
 
-    // Salamander Heimdallr (监控)
     Class heimdallr = objc_getClass("SalamanderBDFoundationSLHeimdallr");
     if (heimdallr) {
         safeHookNoOrig(heimdallr, @selector(start), (IMP)fake_ret_void);
         safeHookNoOrig(heimdallr, @selector(stop), (IMP)fake_ret_void);
     }
 
-    // 通用安全类（保留v3兼容性）
     const char *ttSecurityClasses[] = {
         "TTSecurity", "TTAppSecurity", "TTDeviceHelper",
         "TTEnvChecker", "TTAntiSpam", "TTSecurityManager",
