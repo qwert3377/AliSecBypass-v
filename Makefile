@@ -12,9 +12,11 @@ TWEAK_NAME = AliSecBypass_v4
 
 AliSecBypass_v4_FILES = AliSecBypass_v4.mm
 
-# C/C++ 编译选项 - 关闭 C++ modules 避免 dobby.h 编译错误
-AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11 -fno-modules -fno-implicit-modules
-AliSecBypass_v4_CCFLAGS = -std=c++11 -fno-modules -fno-implicit-modules
+# C/C++ 编译选项
+# -fno-modules: 关闭 C++ modules，避免 dobby.h 编译错误
+# -Wno-unused-function: 关闭未使用函数警告（预留函数不报错）
+AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11 -fno-modules -fno-implicit-modules -Wno-unused-function -Wno-unused-variable
+AliSecBypass_v4_CCFLAGS = -std=c++11 -fno-modules -fno-implicit-modules -Wno-unused-function -Wno-unused-variable
 
 # Dobby 路径
 DOBBY_PATH ?= $(PWD)/dobby
