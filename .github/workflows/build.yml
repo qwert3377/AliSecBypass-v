@@ -12,12 +12,18 @@ jobs:
         run: git clone --recursive https://github.com/theos/theos.git $HOME/theos && echo "THEOS=$HOME/theos" >> $GITHUB_ENV
       - name: Install Dependencies
         run: brew install cmake ldid || true
-      - name: Clone and fix Dobby
-        run: git clone --depth=1 https://github.com/jmpews/Dobby.git dobby && cd dobby && sed -i '' 's/import pipes/import shlex/g' scripts/platform_builder.py && sed -i '' 's/pipes.quote/shlex.quote/g' scripts/platform_builder.py
-      - name: Build Dobby
-        run: cd dobby && python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
+      - name: Clone and build fishhook
+        run: |
+          git clone --depth=1 https://github.com/facebook/fishhook.git fishhook
+          cd fishhook
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          clang -c fishhook.c -o fishhook.o -arch arm64 -isysroot "$IOS_SDK" -I.
+          ar rcs libfishhook.a fishhook.o
+          echo "fishhook built"
+          file libfishhook.a
+        working-directory: ${{ github.workspace }}
       - name: Build Tweak
-        run: export THEOS=$HOME/theos && export DOBBY_PATH=$(pwd)/dobby && make clean || true && make package FINALPACKAGE=1
+        run: export THEOS=$HOME/theos && export FISHHOOK_PATH=$(pwd)/fishhook && make clean || true && make package FINALPACKAGE=1
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
