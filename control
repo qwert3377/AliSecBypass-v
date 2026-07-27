@@ -1,0 +1,8 @@
+Package: com.qwert3377.alisecbypassv4
+Name: AliSecBypass v4
+Version: 4.0.0
+Architecture: iphoneos-arm64
+Description: 番茄畅听/番茄小说 通用脱壳检测绕过 (Dobby inline hook + Runtime)
+Maintainer: qwert3377
+Author: qwert3377
+Section: Tweaks
