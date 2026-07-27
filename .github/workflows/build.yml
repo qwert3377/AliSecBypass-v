@@ -26,7 +26,7 @@ jobs:
       - name: Install Dependencies
         run: |
           brew install cmake
-          pip3 install lief
+          pip3 install lief --break-system-packages
 
       - name: Clone & Build Dobby
         run: |
