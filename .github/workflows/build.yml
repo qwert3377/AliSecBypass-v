@@ -1,28 +1,36 @@
-name: Build AliSecBypass v4
+name: Build Tweak
+
 on:
   push:
-    branches: [main, master]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Theos
-        run: git clone --recursive https://github.com/theos/theos.git $HOME/theos && echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-      - name: Install Dependencies
-        run: brew install cmake ldid || true
-      - name: Clone and fix Dobby
-        run: git clone --depth=1 https://github.com/jmpews/Dobby.git dobby && cd dobby && sed -i '' 's/import pipes/import shlex/g' scripts/platform_builder.py && sed -i '' 's/pipes.quote/shlex.quote/g' scripts/platform_builder.py
-      - name: Build Dobby
-        run: cd dobby && python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
-      - name: Build Tweak
-        run: export THEOS=$HOME/theos && export DOBBY_PATH=$(pwd)/dobby && make clean || true && make package FINALPACKAGE=1
-      - name: Upload Artifact
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Theos
+        uses: Randomblock1/setup-theos@main
+        with:
+          theos-dir: ${{ github.workspace }}/theos
+
+      - name: Build
+        run: |
+          export THEOS=${{ github.workspace }}/theos
+          make clean
+          make
+        working-directory: ${{ github.workspace }}
+
+      - name: Upload dylib only
         uses: actions/upload-artifact@v4
         with:
           name: AliSecBypass_v4-dylib
-          path: |
-            .theos/obj/**/*.dylib
-            .theos/obj/**/*.deb
-            packages/*.deb
+          path: .theos/obj/AliSecBypass_v4.dylib
+          if-no-files-found: error
