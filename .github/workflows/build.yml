@@ -1,64 +1,25 @@
-name: Build Tweak
-
+name: Build AliSecBypass v4
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [main, master]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup Theos
-        run: |
-          git clone --recursive https://github.com/theos/theos.git $THEOS
-        env:
-          THEOS: ${{ github.workspace }}/theos
-
-      - name: Setup Dobby (iOS cross-compile)
-        run: |
-          git clone --recursive https://github.com/jmpews/Dobby.git dobby
-          cd dobby
-          mkdir -p build && cd build
-          # 用 iOS SDK 交叉编译，避免链接 macOS 对象文件
-          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          IOS_CC=$(xcrun --sdk iphoneos -f clang)
-          IOS_CXX=$(xcrun --sdk iphoneos -f clang++)
-          cmake .. \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
-            -DCMAKE_C_COMPILER="$IOS_CC" \
-            -DCMAKE_CXX_COMPILER="$IOS_CXX" \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DDOBBY_BUILD_STATIC_LIBRARY=ON \
-            -DDOBBY_BUILD_SHARED_LIBRARY=OFF
-          make -j$(sysctl -n hw.ncpu)
-          # 验证架构
-          echo "=== Dobby library info ==="
-          file libdobby.a
-          lipo -info libdobby.a || true
-          otool -l libdobby.a | grep -E "(LC_BUILD_VERSION|platform)" | head -5 || true
-          # 复制到 Makefile 能找到的位置
-          cp libdobby.a ../
-        working-directory: ${{ github.workspace }}
-
-      - name: Build
-        run: |
-          export THEOS=${{ github.workspace }}/theos
-          make clean
-          make
-        working-directory: ${{ github.workspace }}
-
-      - name: Upload dylib only
+      - uses: actions/checkout@v4
+      - name: Install Theos
+        run: git clone --recursive https://github.com/theos/theos.git $HOME/theos && echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+      - name: Install Dependencies
+        run: brew install cmake ldid || true
+      - name: Clone and fix Dobby
+        run: git clone --depth=1 https://github.com/jmpews/Dobby.git dobby && cd dobby && sed -i '' 's/import pipes/import shlex/g' scripts/platform_builder.py && sed -i '' 's/pipes.quote/shlex.quote/g' scripts/platform_builder.py
+      - name: Build Dobby
+        run: cd dobby && python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
+      - name: Build Tweak
+        run: export THEOS=$HOME/theos && export DOBBY_PATH=$(pwd)/dobby && make clean || true && make package FINALPACKAGE=1
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: AliSecBypass_v4-dylib
           path: .theos/obj/AliSecBypass_v4.dylib
-          if-no-files-found: error
