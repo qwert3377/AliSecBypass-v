@@ -1,3 +1,5 @@
+文件路径: AliSecBypass_v4.mm
+
 // AliSecBypass_v4.mm
 // 番茄畅听/番茄小说 通用脱壳检测绕过插件 v4
 // 基于头文件精确类名 (字节+百度+阿里) + Dobby inline hook C函数
@@ -10,11 +12,10 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
-// iOS SDK 没有 sys/ptrace.h，手动定义
+// iOS SDK 没有 sys/ptrace.h，手动声明 ptrace 和常量
+extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
 #define PT_DENY_ATTACH 0
 #define P_TRACED 0x00000800
-
-typedef void *caddr_t;
 
 #pragma mark - Logger
 
@@ -121,7 +122,7 @@ static int fake_ret_0i(id self, SEL _cmd) { return 0; }
 static unsigned long long fake_ret_0ull(id self, SEL _cmd) { return 0; }
 static NSUInteger fake_ret_0ul(id self, SEL _cmd) { return 0; }
 
-#pragma mark - Module A: 阿里 SDK (头文件精确类名)
+#pragma mark - Module A: 阿里 SDK
 
 static void hookAliSDK() {
     const char *safeUtils[] = {
@@ -502,7 +503,7 @@ static void hookBaiduSDK() {
     }
 }
 
-#pragma mark - Module C: 字节 SDK (头文件精确类名)
+#pragma mark - Module C: 字节 SDK
 
 static void hookByteDanceSDK() {
     const char *ttMonitorClasses[] = {
