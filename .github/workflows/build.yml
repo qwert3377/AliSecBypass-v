@@ -22,19 +22,31 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Setup Dobby
+      - name: Setup Dobby (iOS cross-compile)
         run: |
           git clone --recursive https://github.com/jmpews/Dobby.git dobby
           cd dobby
           mkdir -p build && cd build
-          cmake .. -DDOBBY_BUILD_STATIC_LIBRARY=ON -DDOBBY_BUILD_SHARED_LIBRARY=OFF
+          # 用 iOS SDK 交叉编译，避免链接 macOS 对象文件
+          IOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          IOS_CC=$(xcrun --sdk iphoneos -f clang)
+          IOS_CXX=$(xcrun --sdk iphoneos -f clang++)
+          cmake .. \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT="$IOS_SDK" \
+            -DCMAKE_C_COMPILER="$IOS_CC" \
+            -DCMAKE_CXX_COMPILER="$IOS_CXX" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DDOBBY_BUILD_STATIC_LIBRARY=ON \
+            -DDOBBY_BUILD_SHARED_LIBRARY=OFF
           make -j$(sysctl -n hw.ncpu)
-          # 找到生成的 .a 文件，复制到 dobby/ 根目录，确保 Makefile 的 find 能搜到
-          LIB=$(find . -name "*.a" -type f | head -1)
-          if [ -z "$LIB" ]; then echo "ERROR: Dobby static library not built!"; exit 1; fi
-          cp "$LIB" ../libdobby.a
-          echo "Built: $LIB -> ../libdobby.a"
-          file ../libdobby.a
+          # 验证架构
+          echo "=== Dobby library info ==="
+          file libdobby.a
+          lipo -info libdobby.a || true
+          otool -l libdobby.a | grep -E "(LC_BUILD_VERSION|platform)" | head -5 || true
+          # 复制到 Makefile 能找到的位置
+          cp libdobby.a ../
         working-directory: ${{ github.workspace }}
 
       - name: Build
