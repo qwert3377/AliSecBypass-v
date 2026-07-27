@@ -25,6 +25,16 @@ jobs:
       - name: Setup Dobby
         run: |
           git clone --recursive https://github.com/jmpews/Dobby.git dobby
+          cd dobby
+          mkdir -p build && cd build
+          cmake .. -DDOBBY_BUILD_STATIC_LIBRARY=ON -DDOBBY_BUILD_SHARED_LIBRARY=OFF
+          make -j$(sysctl -n hw.ncpu)
+          # 找到生成的 .a 文件，复制到 dobby/ 根目录，确保 Makefile 的 find 能搜到
+          LIB=$(find . -name "*.a" -type f | head -1)
+          if [ -z "$LIB" ]; then echo "ERROR: Dobby static library not built!"; exit 1; fi
+          cp "$LIB" ../libdobby.a
+          echo "Built: $LIB -> ../libdobby.a"
+          file ../libdobby.a
         working-directory: ${{ github.workspace }}
 
       - name: Build
