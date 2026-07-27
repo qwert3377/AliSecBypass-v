@@ -1,6 +1,5 @@
 # AliSecBypass v4 - Theos Makefile
-# 支持本地编译 + GitHub Actions 远程编译
-# TrollStore / 非越狱注入
+# 纯库文件编译，无 Logos，TrollStore / 非越狱注入
 
 TARGET := iphone:clang:latest:15.0
 ARCHS = arm64
@@ -8,13 +7,12 @@ ARCHS = arm64
 THEOS ?= $(HOME)/theos
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = AliSecBypass_v4
+# 用 library.mk 代替 tweak.mk，纯 dylib 不需要 plist
+LIBRARY_NAME = AliSecBypass_v4
 
 AliSecBypass_v4_FILES = AliSecBypass_v4.mm
 
 # C/C++ 编译选项
-# -fno-modules: 关闭 C++ modules，避免 dobby.h 编译错误
-# -Wno-unused-function: 关闭未使用函数警告（预留函数不报错）
 AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11 -fno-modules -fno-implicit-modules -Wno-unused-function -Wno-unused-variable
 AliSecBypass_v4_CCFLAGS = -std=c++11 -fno-modules -fno-implicit-modules -Wno-unused-function -Wno-unused-variable
 
@@ -34,4 +32,4 @@ endif
 
 AliSecBypass_v4_LDFLAGS += -Wl,-segalign,4000
 
-include $(THEOS_MAKE_PATH)/tweak.mk
+include $(THEOS_MAKE_PATH)/library.mk
