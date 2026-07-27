@@ -10,8 +10,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Theos
         run: git clone --recursive https://github.com/theos/theos.git $HOME/theos && echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-      - name: Install cmake
-        run: brew install cmake || true
+      - name: Install Dependencies
+        run: brew install cmake ldid || true
       - name: Clone and fix Dobby
         run: git clone --depth=1 https://github.com/jmpews/Dobby.git dobby && cd dobby && sed -i '' 's/import pipes/import shlex/g' scripts/platform_builder.py && sed -i '' 's/pipes.quote/shlex.quote/g' scripts/platform_builder.py
       - name: Build Dobby
