@@ -1,3 +1,5 @@
+文件路径: .github/workflows/build.yml
+
 name: Build AliSecBypass v4
 
 on:
@@ -33,11 +35,13 @@ jobs:
           echo "Cloning Dobby..."
           git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
           cd dobby
-          echo "Building Dobby iOS static library..."
-          python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
+          echo "Building Dobby iOS static library with CMake..."
+          mkdir -p build_ios && cd build_ios
+          cmake ..             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0             -DDOBBY_GENERATE_SHARED=OFF             -DCMAKE_OSX_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+          make -j$(sysctl -n hw.ncpu)
           echo "Dobby build done."
           echo "Listing artifacts:"
-          find . -name "*.a" -o -name "*.framework" | head -20
+          find . -name "*.a" | head -20
 
       - name: Build Tweak
         run: |
