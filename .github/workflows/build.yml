@@ -1,56 +1,23 @@
-文件路径: .github/workflows/build.yml
-
 name: Build AliSecBypass v4
-
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
+      - uses: actions/checkout@v4
       - name: Install Theos
-        run: |
-          echo "Installing Theos..."
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "Installed Theos at $HOME/theos"
-
-      - name: Install Dependencies
-        run: |
-          brew install cmake
-          pip3 install lief --break-system-packages
-
-      - name: Clone & Build Dobby
-        run: |
-          echo "Cloning Dobby..."
-          git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
-          cd dobby
-          echo "Building Dobby iOS static library with CMake..."
-          mkdir -p build_ios && cd build_ios
-          cmake ..             -DCMAKE_SYSTEM_NAME=iOS             -DCMAKE_OSX_ARCHITECTURES=arm64             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0             -DDOBBY_GENERATE_SHARED=OFF             -DCMAKE_OSX_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path)
-          make -j$(sysctl -n hw.ncpu)
-          echo "Dobby build done."
-          echo "Listing artifacts:"
-          find . -name "*.a" | head -20
-
+        run: git clone --recursive https://github.com/theos/theos.git $HOME/theos && echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+      - name: Install cmake
+        run: brew install cmake || true
+      - name: Clone and fix Dobby
+        run: git clone --depth=1 https://github.com/jmpews/Dobby.git dobby && cd dobby && sed -i '' 's/import pipes/import shlex/g' scripts/platform_builder.py && sed -i '' 's/pipes.quote/shlex.quote/g' scripts/platform_builder.py
+      - name: Build Dobby
+        run: cd dobby && python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
       - name: Build Tweak
-        run: |
-          export THEOS=$HOME/theos
-          export DOBBY_PATH=$(pwd)/dobby
-          echo "DOBBY_PATH=$DOBBY_PATH"
-          make clean || true
-          make package FINALPACKAGE=1
-
+        run: export THEOS=$HOME/theos && export DOBBY_PATH=$(pwd)/dobby && make clean || true && make package FINALPACKAGE=1
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -59,11 +26,3 @@ jobs:
             .theos/obj/**/*.dylib
             .theos/obj/**/*.deb
             packages/*.deb
-          if-no-files-found: warn
-
-      - name: Upload Log
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: .theos/build.log
-          if-no-files-found: ignore
