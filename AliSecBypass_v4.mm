@@ -1,10 +1,21 @@
 // FanqieBypass.mm
-// 番茄小说/番茄畅听/红果 专用反检测插件 v1.1
-// 修复 v1.0 UIDevice identifierForVendor 类型错误导致的崩溃
+// 番茄小说/番茄畅听/红果 专用反检测插件 v1.2
+// 新增：__interpose C函数层hook（access/stat/dlopen/dlsym/getenv/ptrace/syscall/sysctl/fopen/open）
+// 零外部依赖，适用于 TrollStore / 非越狱注入
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <dlfcn.h>
+#import <sys/stat.h>
+#import <sys/syscall.h>
+#import <sys/sysctl.h>
+#import <unistd.h>
+#import <stdio.h>
+#import <stdlib.h>
+#import <string.h>
+#import <errno.h>
+#import <mach/mach.h>
 
 #pragma mark - 日志系统
 
@@ -35,7 +46,334 @@ static void BYPASS_LOG(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - Hook 工具
+#pragma mark - __interpose 宏
+
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static struct { \
+        const void *replacement; \
+        const void *replacee; \
+    } _interpose_##_replacee \
+    __attribute__((section("__DATA,__interpose"))) = { \
+        (const void *)(unsigned long)&_replacement, \
+        (const void *)(unsigned long)&_replacee \
+    };
+
+#pragma mark - 越狱路径检测
+
+static BOOL isJailbreakPath(const char *path) {
+    if (!path) return NO;
+    return (
+        strstr(path, "/Applications/Cydia.app") ||
+        strstr(path, "/Library/MobileSubstrate") ||
+        strstr(path, "/var/jb") ||
+        strstr(path, "/usr/sbin/sshd") ||
+        strstr(path, "/etc/apt") ||
+        strstr(path, "/var/lib/dpkg") ||
+        strstr(path, "/bin/bash") ||
+        strstr(path, "/usr/bin/ssh") ||
+        strstr(path, "/var/containers/Bundle/tweaks") ||
+        strstr(path, "/var/mobile/Library/Preferences/") ||
+        strstr(path, ".dylib")
+    );
+}
+
+static BOOL isInjectedPath(const char *path) {
+    if (!path) return NO;
+    return (
+        strstr(path, "/var/jb") ||
+        strstr(path, "tweak") ||
+        strstr(path, ".dylib") ||
+        strstr(path, "AliSecBypass") ||
+        strstr(path, "FanqieBypass") ||
+        strstr(path, "substrate") ||
+        strstr(path, "dobby") ||
+        strstr(path, "ellekit")
+    );
+}
+
+static BOOL isBlockedEnv(const char *name) {
+    if (!name) return NO;
+    return (
+        strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
+        strcmp(name, "DYLD_FRAMEWORK_PATH") == 0 ||
+        strcmp(name, "DYLD_LIBRARY_PATH") == 0 ||
+        strcmp(name, "MSSafeMode") == 0 ||
+        strcmp(name, "_MSSafeMode") == 0 ||
+        strcmp(name, "_DYLD_INSERT_LIBRARIES") == 0 ||
+        strcmp(name, "DYLD_FORCE_FLAT_NAMESPACE") == 0 ||
+        strcmp(name, "DYLD_PRINT_OPTS") == 0 ||
+        strcmp(name, "DYLD_PRINT_ENV") == 0
+    );
+}
+
+#pragma mark - C函数 Hook 实现
+
+// access
+static int my_access(const char *path, int mode) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"access blocked: %s", path);
+        errno = ENOENT;
+        return -1;
+    }
+    return access(path, mode);
+}
+DYLD_INTERPOSE(my_access, access);
+
+// stat
+static int my_stat(const char *path, struct stat *buf) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"stat blocked: %s", path);
+        errno = ENOENT;
+        return -1;
+    }
+    return stat(path, buf);
+}
+DYLD_INTERPOSE(my_stat, stat);
+
+// stat64
+static int my_stat64(const char *path, struct stat64 *buf) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"stat64 blocked: %s", path);
+        errno = ENOENT;
+        return -1;
+    }
+    return stat64(path, buf);
+}
+DYLD_INTERPOSE(my_stat64, stat64);
+
+// lstat
+static int my_lstat(const char *path, struct stat *buf) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"lstat blocked: %s", path);
+        errno = ENOENT;
+        return -1;
+    }
+    return lstat(path, buf);
+}
+DYLD_INTERPOSE(my_lstat, lstat);
+
+// lstat64
+static int my_lstat64(const char *path, struct stat64 *buf) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"lstat64 blocked: %s", path);
+        errno = ENOENT;
+        return -1;
+    }
+    return lstat64(path, buf);
+}
+DYLD_INTERPOSE(my_lstat64, lstat64);
+
+// fopen
+static FILE *my_fopen(const char *path, const char *mode) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"fopen blocked: %s", path);
+        errno = ENOENT;
+        return NULL;
+    }
+    return fopen(path, mode);
+}
+DYLD_INTERPOSE(my_fopen, fopen);
+
+// open
+static int my_open(const char *path, int oflag, ...) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"open blocked: %s", path);
+        errno = ENOENT;
+        return -1;
+    }
+    if (oflag & O_CREAT) {
+        va_list ap;
+        va_start(ap, oflag);
+        mode_t mode = va_arg(ap, int);
+        va_end(ap);
+        return open(path, oflag, mode);
+    }
+    return open(path, oflag);
+}
+DYLD_INTERPOSE(my_open, open);
+
+// dlopen
+static void *my_dlopen(const char *path, int mode) {
+    if (path && isInjectedPath(path)) {
+        BYPASS_LOG(@"dlopen blocked: %s", path);
+        return NULL;
+    }
+    return dlopen(path, mode);
+}
+DYLD_INTERPOSE(my_dlopen, dlopen);
+
+// dlopen_preflight
+static BOOL my_dlopen_preflight(const char *path) {
+    if (path && isInjectedPath(path)) {
+        BYPASS_LOG(@"dlopen_preflight blocked: %s", path);
+        return NO;
+    }
+    return dlopen_preflight(path);
+}
+DYLD_INTERPOSE(my_dlopen_preflight, dlopen_preflight);
+
+// dlsym
+static void *my_dlsym(void *handle, const char *symbol) {
+    if (!symbol) return dlsym(handle, symbol);
+    if (strstr(symbol, "substrate") || strstr(symbol, "dobby") ||
+        strstr(symbol, "ellekit") || strstr(symbol, "MSHook") ||
+        strstr(symbol, "DobbyHook")) {
+        BYPASS_LOG(@"dlsym blocked: %s", symbol);
+        return NULL;
+    }
+    return dlsym(handle, symbol);
+}
+DYLD_INTERPOSE(my_dlsym, dlsym);
+
+// getenv
+static char *my_getenv(const char *name) {
+    if (isBlockedEnv(name)) {
+        BYPASS_LOG(@"getenv blocked: %s", name);
+        return NULL;
+    }
+    return getenv(name);
+}
+DYLD_INTERPOSE(my_getenv, getenv);
+
+// setenv
+static int my_setenv(const char *name, const char *value, int overwrite) {
+    if (isBlockedEnv(name)) {
+        BYPASS_LOG(@"setenv blocked: %s", name);
+        return 0;
+    }
+    return setenv(name, value, overwrite);
+}
+DYLD_INTERPOSE(my_setenv, setenv);
+
+// unsetenv
+static int my_unsetenv(const char *name) {
+    if (isBlockedEnv(name)) {
+        BYPASS_LOG(@"unsetenv blocked: %s", name);
+        return 0;
+    }
+    return unsetenv(name);
+}
+DYLD_INTERPOSE(my_unsetenv, unsetenv);
+
+// ptrace
+static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+    if (request == PT_DENY_ATTACH) {
+        BYPASS_LOG(@"ptrace PT_DENY_ATTACH blocked");
+        return 0;
+    }
+    return ptrace(request, pid, addr, data);
+}
+DYLD_INTERPOSE(my_ptrace, ptrace);
+
+// syscall
+static int my_syscall(int number, ...) {
+    if (number == SYS_ptrace) {
+        BYPASS_LOG(@"syscall SYS_ptrace blocked");
+        return 0;
+    }
+    if (number == SYS_access) {
+        va_list ap;
+        va_start(ap, number);
+        const char *path = va_arg(ap, const char *);
+        int mode = va_arg(ap, int);
+        va_end(ap);
+        return my_access(path, mode);
+    }
+    if (number == SYS_open) {
+        va_list ap;
+        va_start(ap, number);
+        const char *path = va_arg(ap, const char *);
+        int oflag = va_arg(ap, int);
+        va_end(ap);
+        return my_open(path, oflag);
+    }
+    if (number == SYS_stat) {
+        va_list ap;
+        va_start(ap, number);
+        const char *path = va_arg(ap, const char *);
+        struct stat *buf = va_arg(ap, struct stat *);
+        va_end(ap);
+        return my_stat(path, buf);
+    }
+    if (number == SYS_lstat) {
+        va_list ap;
+        va_start(ap, number);
+        const char *path = va_arg(ap, const char *);
+        struct stat *buf = va_arg(ap, struct stat *);
+        va_end(ap);
+        return my_lstat(path, buf);
+    }
+    // fallback: 直接调用原始syscall（无法转发变参，用汇编或dlsym）
+    // 对于非ptrace/access/open/stat/lstat的syscall，直接调用原始函数
+    // 由于syscall是变参，这里用dlsym获取原始地址
+    static int (*orig_syscall)(int, ...) = NULL;
+    if (!orig_syscall) {
+        orig_syscall = dlsym(RTLD_DEFAULT, "syscall");
+    }
+    if (orig_syscall) {
+        va_list ap;
+        va_start(ap, number);
+        // 提取前6个参数（x86_64/aarch64最多6个寄存器参数）
+        long a1 = va_arg(ap, long);
+        long a2 = va_arg(ap, long);
+        long a3 = va_arg(ap, long);
+        long a4 = va_arg(ap, long);
+        long a5 = va_arg(ap, long);
+        long a6 = va_arg(ap, long);
+        va_end(ap);
+        return orig_syscall(number, a1, a2, a3, a4, a5, a6);
+    }
+    return -1;
+}
+DYLD_INTERPOSE(my_syscall, syscall);
+
+// sysctl
+static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    // 拦截调试相关查询
+    if (namelen >= 4 && name[0] == CTL_KERN && name[1] == KERN_PROC) {
+        BYPASS_LOG(@"sysctl KERN_PROC blocked");
+        if (oldlenp) *oldlenp = 0;
+        return 0;
+    }
+    return sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+}
+DYLD_INTERPOSE(my_sysctl, sysctl);
+
+// sysctlbyname
+static int my_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    if (!name) return sysctlbyname(name, oldp, oldlenp, newp, newlen);
+    if (strstr(name, "kern.proc") || strstr(name, "security.mac") ||
+        strstr(name, "vm.mmap") || strstr(name, "hw.machine")) {
+        BYPASS_LOG(@"sysctlbyname blocked: %s", name);
+        if (oldlenp) *oldlenp = 0;
+        return 0;
+    }
+    return sysctlbyname(name, oldp, oldlenp, newp, newlen);
+}
+DYLD_INTERPOSE(my_sysctlbyname, sysctlbyname);
+
+// opendir
+static DIR *my_opendir(const char *path) {
+    if (isJailbreakPath(path)) {
+        BYPASS_LOG(@"opendir blocked: %s", path);
+        errno = ENOENT;
+        return NULL;
+    }
+    return opendir(path);
+}
+DYLD_INTERPOSE(my_opendir, opendir);
+
+// readdir
+static struct dirent *my_readdir(DIR *dirp) {
+    struct dirent *entry = readdir(dirp);
+    while (entry && isJailbreakPath(entry->d_name)) {
+        entry = readdir(dirp);
+    }
+    return entry;
+}
+DYLD_INTERPOSE(my_readdir, readdir);
+
+#pragma mark - ObjC Hook 工具
 
 static inline void safeHook(Class cls, SEL sel, IMP fake, IMP *orig) {
     if (!cls) return;
@@ -723,26 +1061,9 @@ static void hookByteDanceKeyClasses() {
 
 #pragma mark - 系统 API 层 Hook（关键兜底）
 
-static BOOL isJailbreakPath(NSString *path) {
-    if (!path) return NO;
-    return (
-        [path containsString:@"/Applications/Cydia.app"] ||
-        [path containsString:@"/Library/MobileSubstrate"] ||
-        [path containsString:@"/var/jb"] ||
-        [path containsString:@"/usr/sbin/sshd"] ||
-        [path containsString:@"/etc/apt"] ||
-        [path containsString:@"/var/lib/dpkg"] ||
-        [path containsString:@"/bin/bash"] ||
-        [path containsString:@"/usr/bin/ssh"] ||
-        [path containsString:@"/var/containers/Bundle/tweaks"] ||
-        [path containsString:@"/var/mobile/Library/Preferences/"] ||
-        [path containsString:@".dylib"]
-    );
-}
-
 static BOOL (*orig_fileExistsAtPath)(id, SEL, NSString*);
 static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
-    if (isJailbreakPath(path)) {
+    if (path && isJailbreakPath(path.UTF8String)) {
         BYPASS_LOG(@"NSFileManager blocked: %@", path);
         return NO;
     }
@@ -751,7 +1072,7 @@ static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
 
 static BOOL (*orig_fileExistsAtPath_isDirectory)(id, SEL, NSString*, BOOL*);
 static BOOL hook_fileExistsAtPath_isDirectory(id self, SEL _cmd, NSString *path, BOOL *isDir) {
-    if (isJailbreakPath(path)) {
+    if (path && isJailbreakPath(path.UTF8String)) {
         BYPASS_LOG(@"NSFileManager blocked(isDir): %@", path);
         if (isDir) *isDir = NO;
         return NO;
@@ -761,7 +1082,7 @@ static BOOL hook_fileExistsAtPath_isDirectory(id self, SEL _cmd, NSString *path,
 
 static NSArray *(*orig_contentsOfDirectoryAtPath_error)(id, SEL, NSString*, NSError**);
 static NSArray *hook_contentsOfDirectoryAtPath_error(id self, SEL _cmd, NSString *path, NSError **error) {
-    if (isJailbreakPath(path)) {
+    if (path && isJailbreakPath(path.UTF8String)) {
         BYPASS_LOG(@"NSFileManager blocked dir: %@", path);
         return @[];
     }
@@ -770,7 +1091,7 @@ static NSArray *hook_contentsOfDirectoryAtPath_error(id self, SEL _cmd, NSString
 
 static NSArray *(*orig_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error)(id, SEL, NSURL*, NSArray*, NSUInteger, NSError**);
 static NSArray *hook_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error(id self, SEL _cmd, NSURL *url, NSArray *keys, NSUInteger mask, NSError **error) {
-    if (url && url.path && isJailbreakPath(url.path)) {
+    if (url && url.path && isJailbreakPath(url.path.UTF8String)) {
         BYPASS_LOG(@"NSFileManager blocked URL dir: %@", url.path);
         return @[];
     }
@@ -787,27 +1108,13 @@ static void hookNSFileManager() {
     BYPASS_LOG(@"NSFileManager hooked");
 }
 
-static BOOL isInjectedBundle(NSString *path) {
-    if (!path) return NO;
-    return (
-        [path containsString:@"/var/jb"] ||
-        [path containsString:@"tweak"] ||
-        [path containsString:@".dylib"] ||
-        [path containsString:@"AliSecBypass"] ||
-        [path containsString:@"FanqieBypass"] ||
-        [path containsString:@"substrate"] ||
-        [path containsString:@"dobby"] ||
-        [path containsString:@"ellekit"]
-    );
-}
-
 static NSArray *(*orig_allBundles)(Class, SEL);
 static NSArray *hook_allBundles(Class self, SEL _cmd) {
     NSArray *orig = orig_allBundles(self, _cmd);
     NSMutableArray *filtered = [NSMutableArray array];
     for (NSBundle *bundle in orig) {
         NSString *path = bundle.bundlePath;
-        if (isInjectedBundle(path)) {
+        if (path && isInjectedPath(path.UTF8String)) {
             BYPASS_LOG(@"NSBundle filtered: %@", path);
             continue;
         }
@@ -822,7 +1129,7 @@ static NSArray *hook_allFrameworks(Class self, SEL _cmd) {
     NSMutableArray *filtered = [NSMutableArray array];
     for (NSBundle *bundle in orig) {
         NSString *path = bundle.bundlePath;
-        if (isInjectedBundle(path)) {
+        if (path && isInjectedPath(path.UTF8String)) {
             BYPASS_LOG(@"NSFramework filtered: %@", path);
             continue;
         }
@@ -834,7 +1141,7 @@ static NSArray *hook_allFrameworks(Class self, SEL _cmd) {
 static NSString *(*orig_bundlePath)(id, SEL);
 static NSString *hook_bundlePath(id self, SEL _cmd) {
     NSString *orig = orig_bundlePath(self, _cmd);
-    if (orig && isInjectedBundle(orig)) {
+    if (orig && isInjectedPath(orig.UTF8String)) {
         return @"/System/Library/Frameworks/Foundation.framework";
     }
     return orig;
@@ -995,7 +1302,7 @@ static void hookNSURLSession() {
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"FanqieBypass v1.1 loaded");
+        BYPASS_LOG(@"FanqieBypass v1.2 loaded (C+ObjC dual layer)");
 
         hookAliSecXSafeUtilsVariants();
         hookAliSecXReachability();
@@ -1020,6 +1327,6 @@ static void init() {
         hookUIApplication();
         hookNSURLSession();
 
-        BYPASS_LOG(@"FanqieBypass v1.1 init complete");
+        BYPASS_LOG(@"FanqieBypass v1.2 init complete");
     }
 }
