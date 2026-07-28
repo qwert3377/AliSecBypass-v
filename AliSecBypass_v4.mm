@@ -8,7 +8,6 @@
 #import <dlfcn.h>
 #import <sys/stat.h>
 #import <sys/sysctl.h>
-#import <sys/ptrace.h>
 #import <unistd.h>
 #import <stdio.h>
 #import <stdlib.h>
@@ -221,6 +220,8 @@ static int my_unsetenv(const char *name) {
     return unsetenv(name);
 }
 DYLD_INTERPOSE(my_unsetenv, unsetenv);
+
+extern int ptrace(int, pid_t, void *, int);
 
 static int my_ptrace(int request, pid_t pid, void *addr, int data) {
     if (request == 0) { // PT_DENY_ATTACH = 0 on iOS
