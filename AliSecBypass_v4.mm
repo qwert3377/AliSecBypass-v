@@ -14,6 +14,37 @@
 #import <string.h>
 #import <errno.h>
 
+#pragma mark - Fishhook Setup
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef struct rebinding {
+    const char *name;
+    void *replacement;
+    void **replaced;
+} rebinding;
+int rebind_symbols(rebinding rebindings[], size_t rebindings_nel);
+#ifdef __cplusplus
+}
+#endif
+
+static int  (*orig_access)(const char*, int) = NULL;
+static int  (*orig_stat)(const char*, struct stat*) = NULL;
+static int  (*orig_lstat)(const char*, struct stat*) = NULL;
+static FILE*(*orig_fopen)(const char*, const char*) = NULL;
+static int  (*orig_open)(const char*, int, ...) = NULL;
+static void*(*orig_dlopen)(const char*, int) = NULL;
+static BOOL (*orig_dlopen_preflight)(const char*) = NULL;
+static void*(*orig_dlsym)(void*, const char*) = NULL;
+static char*(*orig_getenv)(const char*) = NULL;
+static int  (*orig_setenv)(const char*, const char*, int) = NULL;
+static int  (*orig_unsetenv)(const char*) = NULL;
+static int  (*orig_ptrace)(int, pid_t, void*, int) = NULL;
+static int  (*orig_sysctl)(int*, u_int, void*, size_t*, void*, size_t) = NULL;
+static int  (*orig_sysctlbyname)(const char*, void*, size_t*, void*, size_t) = NULL;
+
+
 #pragma mark - Fishhook forward decl (ptrace rebind)
 
 struct _rebinding {
@@ -57,15 +88,6 @@ static void BYPASS_LOG(NSString *fmt, ...) {
 
 #pragma mark - __interpose 宏
 
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-    __attribute__((section("__DATA,__interpose"))) = { \
-        (const void *)(unsigned long)&_replacement, \
-        (const void *)(unsigned long)&_replacee \
-    };
 
 #pragma mark - 越狱路径检测
 
@@ -123,42 +145,32 @@ static int my_access(const char *path, int mode) {
         errno = ENOENT;
         return -1;
     }
-    return access(path, mode);
+    return orig_access(path, mode);
 }
-DYLD_INTERPOSE(my_access, access);
-
 static int my_stat(const char *path, struct stat *buf) {
     if (isJailbreakPath(path)) {
         BYPASS_LOG(@"stat blocked: %s", path);
         errno = ENOENT;
         return -1;
     }
-    return stat(path, buf);
+    return orig_stat(path, buf);
 }
-DYLD_INTERPOSE(my_stat, stat);
-
-
 static int my_lstat(const char *path, struct stat *buf) {
     if (isJailbreakPath(path)) {
         BYPASS_LOG(@"lstat blocked: %s", path);
         errno = ENOENT;
         return -1;
     }
-    return lstat(path, buf);
+    return orig_lstat(path, buf);
 }
-DYLD_INTERPOSE(my_lstat, lstat);
-
-
 static FILE *my_fopen(const char *path, const char *mode) {
     if (isJailbreakPath(path)) {
         BYPASS_LOG(@"fopen blocked: %s", path);
         errno = ENOENT;
         return NULL;
     }
-    return fopen(path, mode);
+    return orig_fopen(path, mode);
 }
-DYLD_INTERPOSE(my_fopen, fopen);
-
 static int my_open(const char *path, int oflag, ...) {
     if (isJailbreakPath(path)) {
         BYPASS_LOG(@"open blocked: %s", path);
@@ -170,69 +182,55 @@ static int my_open(const char *path, int oflag, ...) {
         va_start(ap, oflag);
         mode_t mode = va_arg(ap, int);
         va_end(ap);
-        return open(path, oflag, mode);
+        return orig_open(path, oflag, mode);
     }
-    return open(path, oflag);
+    return orig_open(path, oflag);
 }
-DYLD_INTERPOSE(my_open, open);
-
 static void *my_dlopen(const char *path, int mode) {
     if (path && isInjectedPath(path)) {
         BYPASS_LOG(@"dlopen blocked: %s", path);
         return NULL;
     }
-    return dlopen(path, mode);
+    return orig_dlopen(path, mode);
 }
-DYLD_INTERPOSE(my_dlopen, dlopen);
-
 static BOOL my_dlopen_preflight(const char *path) {
     if (path && isInjectedPath(path)) {
         BYPASS_LOG(@"dlopen_preflight blocked: %s", path);
         return NO;
     }
-    return dlopen_preflight(path);
+    return orig_dlopen_preflight(path);
 }
-DYLD_INTERPOSE(my_dlopen_preflight, dlopen_preflight);
-
 static void *my_dlsym(void *handle, const char *symbol) {
-    if (!symbol) return dlsym(handle, symbol);
+    if (!symbol) return orig_dlsym(handle, symbol);
     if (strstr(symbol, "substrate") || strstr(symbol, "dobby") ||
         strstr(symbol, "ellekit") || strstr(symbol, "MSHook") ||
         strstr(symbol, "DobbyHook")) {
         BYPASS_LOG(@"dlsym blocked: %s", symbol);
         return NULL;
     }
-    return dlsym(handle, symbol);
+    return orig_dlsym(handle, symbol);
 }
-DYLD_INTERPOSE(my_dlsym, dlsym);
-
 static char *my_getenv(const char *name) {
     if (isBlockedEnv(name)) {
         BYPASS_LOG(@"getenv blocked: %s", name);
         return NULL;
     }
-    return getenv(name);
+    return orig_getenv(name);
 }
-DYLD_INTERPOSE(my_getenv, getenv);
-
 static int my_setenv(const char *name, const char *value, int overwrite) {
     if (isBlockedEnv(name)) {
         BYPASS_LOG(@"setenv blocked: %s", name);
         return 0;
     }
-    return setenv(name, value, overwrite);
+    return orig_setenv(name, value, overwrite);
 }
-DYLD_INTERPOSE(my_setenv, setenv);
-
 static int my_unsetenv(const char *name) {
     if (isBlockedEnv(name)) {
         BYPASS_LOG(@"unsetenv blocked: %s", name);
         return 0;
     }
-    return unsetenv(name);
+    return orig_unsetenv(name);
 }
-DYLD_INTERPOSE(my_unsetenv, unsetenv);
-
 extern int ptrace(int, pid_t, void *, int);
 
 static int my_ptrace(int request, pid_t pid, void *addr, int data) {
@@ -252,22 +250,18 @@ static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void
         if (oldlenp) *oldlenp = 0;
         return 0;
     }
-    return sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+    return orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
 }
-DYLD_INTERPOSE(my_sysctl, sysctl);
-
 static int my_sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    if (!name) return sysctlbyname(name, oldp, oldlenp, newp, newlen);
+    if (!name) return orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
     if (strstr(name, "kern.proc") || strstr(name, "security.mac") ||
         strstr(name, "vm.mmap") || strstr(name, "hw.machine")) {
         BYPASS_LOG(@"sysctlbyname blocked: %s", name);
         if (oldlenp) *oldlenp = 0;
         return 0;
     }
-    return sysctlbyname(name, oldp, oldlenp, newp, newlen);
+    return orig_sysctlbyname(name, oldp, oldlenp, newp, newlen);
 }
-DYLD_INTERPOSE(my_sysctlbyname, sysctlbyname);
-
 #pragma mark - ObjC Hook 工具
 
 static inline void safeHook(Class cls, SEL sel, IMP fake, IMP *orig) {
@@ -1197,7 +1191,7 @@ static void hookNSURLSession() {
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"FanqieBypass v1.3-fix loaded (C+ObjC dual layer)");
+        BYPASS_LOG(@"FanqieBypass v1.4-fix loaded (C+ObjC dual layer)");
 
         hookAliSecXSafeUtilsVariants();
         hookAliSecXReachability();
@@ -1222,9 +1216,6 @@ static void init() {
         hookUIApplication();
         hookNSURLSession();
 
-        // ptrace is not exported by iOS SDK, use fishhook instead of DYLD_INTERPOSE
-        struct _rebinding ptrace_rebind = {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace};
-        rebind_symbols(&ptrace_rebind, 1);
 
         BYPASS_LOG(@"FanqieBypass v1.3-fix init complete");
     }
