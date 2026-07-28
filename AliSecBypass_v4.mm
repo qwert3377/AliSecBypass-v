@@ -1,12 +1,11 @@
-// AliSecBypass.mm
-// 阿里/高德/字节/百度 SDK 脱壳检测绕过插件 v2.1
+// FanqieBypass.mm
+// 番茄小说/番茄畅听/红果 专用反检测插件 v1.0
+// 覆盖：阿里/高德/百度/字节(Salamander/AnnieX/BDADSDK/BDAResourceKit/IES/TempoiOS)
 // 纯库文件，零外部依赖，适用于 TrollStore / 非越狱注入
-// 按头文件增强：AliSecX / AMap / Aliyun / Salamander / AnnieX / BDADSDK / BDAResourceKit / TempoiOS / Bind
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <stdlib.h>
-#import <string.h>
+#import <objc/message.h>
 
 #pragma mark - 日志系统
 
@@ -15,7 +14,7 @@ static NSString *logPath() {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        path = [paths.firstObject stringByAppendingPathComponent:@"AliBypass.log"];
+        path = [paths.firstObject stringByAppendingPathComponent:@"FanqieBypass.log"];
     });
     return path;
 }
@@ -78,8 +77,6 @@ static void hookSelectorsOnClass(const char *clsName, const char **sels, IMP imp
     }
 }
 
-// 自动扫描类的方法列表并 hook（仅处理 @objc 暴露的方法）
-// 跳过 init/dealloc/struct 返回等高风险方法
 static void autoHookClassMethodsSafe(const char *clsName) {
     Class cls = objc_getClass(clsName);
     if (!cls) return;
@@ -93,7 +90,6 @@ static void autoHookClassMethodsSafe(const char *clsName) {
         SEL sel = method_getName(m);
         const char *selName = sel_getName(sel);
 
-        // 跳过生命周期和初始化方法，避免破坏对象状态
         if (strcmp(selName, "init") == 0 ||
             strcmp(selName, "dealloc") == 0 ||
             strcmp(selName, ".cxx_destruct") == 0 ||
@@ -102,7 +98,11 @@ static void autoHookClassMethodsSafe(const char *clsName) {
             strcmp(selName, "new") == 0 ||
             strcmp(selName, "copy") == 0 ||
             strcmp(selName, "copyWithZone:") == 0 ||
-            strcmp(selName, "mutableCopyWithZone:") == 0) {
+            strcmp(selName, "mutableCopyWithZone:") == 0 ||
+            strcmp(selName, "description") == 0 ||
+            strcmp(selName, "debugDescription") == 0 ||
+            strcmp(selName, "hash") == 0 ||
+            strcmp(selName, "superclass") == 0) {
             continue;
         }
 
@@ -125,15 +125,14 @@ static void autoHookClassMethodsSafe(const char *clsName) {
                 stub = (IMP)ret_empty_arr;
             } else if (strstr(selName, "Dict") || strstr(selName, "Map") || strstr(selName, "dictionary")) {
                 stub = (IMP)ret_empty_dict;
-            } else if (strstr(selName, "String") || strstr(selName, "str") || strstr(selName, "Name") || strstr(selName, "Text") || strstr(selName, "URL")) {
+            } else if (strstr(selName, "String") || strstr(selName, "str") || strstr(selName, "Name") || strstr(selName, "Text") || strstr(selName, "URL") || strstr(selName, "Path") || strstr(selName, "Key")) {
                 stub = (IMP)ret_empty_str;
             } else {
                 stub = (IMP)ret_nil;
             }
-        } else if (retType == '*' || retType == ':' || retType == '^') {
+        } else if (retType == '*' || retType == ':' || retType == '^' || retType == '?') {
             stub = (IMP)ret_zero_ll;
         } else {
-            // struct / union / complex，跳过避免崩溃
             continue;
         }
 
@@ -148,18 +147,19 @@ static void autoHookClassMethodsSafe(const char *clsName) {
     }
 }
 
-#pragma mark - 阿里安全 Utils
+static void batchAutoHook(const char **classNames) {
+    for (int i = 0; classNames[i] != nil; i++) {
+        autoHookClassMethodsSafe(classNames[i]);
+    }
+}
+
+#pragma mark - 阿里系
 
 static void hookAliSecXSafeUtilsVariants() {
-    const char *variants[] = {
-        "AliSecXSafeUtilsMXXTIY",
-        "AliSecXSafeUtilsZZZX",
-        nil
-    };
+    const char *variants[] = { "AliSecXSafeUtilsMXXTIY", "AliSecXSafeUtilsZZZX", nil };
     const char *strSels[] = {
         "descriptor", "secStatus", "safeDescriptor", "securityStatus",
-        "checkStatus", "deviceFingerprint", "riskToken", "envInfo",
-        nil
+        "checkStatus", "deviceFingerprint", "riskToken", "envInfo", nil
     };
     const char *boolSels[] = {
         "isJailbreak", "isJailbroken", "isDebug", "isDebuggerAttached",
@@ -170,8 +170,6 @@ static void hookAliSecXSafeUtilsVariants() {
         hookSelectorsOnClass(variants[i], boolSels, (IMP)ret_NO);
     }
 }
-
-#pragma mark - 阿里 Reachability
 
 static void hookAliSecXReachability() {
     const char *clses[] = { "AliSecXReachabilityMXXTIY", "AliSecXReachabilityZZZX", nil };
@@ -186,13 +184,10 @@ static void hookAliSecXReachability() {
     }
 }
 
-#pragma mark - 阿里 Keychain & Storage
-
 static void hookAliSecXKeychain() {
     const char *clses[] = {
         "AliSecXSSKeychain", "AliSecXSSKeychainMXXT",
-        "AliSecXSSKeychainQuery", "AliSecXSSKeychainQueryMXXT",
-        nil
+        "AliSecXSSKeychainQuery", "AliSecXSSKeychainQueryMXXT", nil
     };
     for (int i = 0; clses[i] != nil; i++) {
         Class cls = objc_getClass(clses[i]);
@@ -209,17 +204,11 @@ static void hookAliSecXKeychain() {
 
 static void hookAliSecXCryptoAndStorage() {
     const char *clses[] = {
-        "AliSecXCryptoGTMBase64",
-        "AliSecXFileOp", "AliSecXFileOpMXXT",
-        "AliSecXLocalStorage", "AliSecXLocalStorageMXXT", "AliSecXLocalStorageUtils",
-        nil
+        "AliSecXCryptoGTMBase64", "AliSecXFileOp", "AliSecXFileOpMXXT",
+        "AliSecXLocalStorage", "AliSecXLocalStorageMXXT", "AliSecXLocalStorageUtils", nil
     };
-    for (int i = 0; clses[i] != nil; i++) {
-        autoHookClassMethodsSafe(clses[i]);
-    }
+    batchAutoHook(clses);
 }
-
-#pragma mark - 阿里云身份认证
 
 static void (*orig_verifyWith)(id, SEL, id, id, id);
 static void hook_verifyWith(id self, SEL _cmd, id arg1, id arg2, id completion) {
@@ -246,7 +235,6 @@ static void hook_quitAliyun(id self, SEL _cmd, id arg1, id completion) {
 static void hookAliyunIdentity() {
     Class cls = objc_getClass("AliyunIdentityManager");
     if (!cls) return;
-    BYPASS_LOG(@"hooking AliyunIdentityManager");
     safeHook(cls, sel_getUid("verifyWith:extParams:onCompletion:"), (IMP)hook_verifyWith, (IMP *)&orig_verifyWith);
     safeHook(cls, sel_getUid("verifyTechWith:extParams:onCompletion:"), (IMP)hook_verifyTechWith, (IMP *)&orig_verifyTechWith);
     safeHook(cls, sel_getUid("quit:onCompletion:"), (IMP)hook_quitAliyun, (IMP *)&orig_quitAliyun);
@@ -263,8 +251,6 @@ static void hookAliyunIdentity() {
     safeHookNoOrig(cls, sel_getUid("finalPathForFile:"), (IMP)ret_empty_str);
     safeHookNoOrig(cls, sel_getUid("setDataProtocolVersion:"), (IMP)ret_void);
 }
-
-#pragma mark - 阿里云人脸认证 RPC
 
 static void (*orig_zimInit)(id, SEL, id, id);
 static void hook_zimInit(id self, SEL _cmd, id params, id completion) {
@@ -293,37 +279,19 @@ static void hookAliyunFaceAuth() {
     safeHookNoOrig(cls, sel_getUid("zimFileUpload:completionBlock:"), (IMP)hook_zimInit);
     safeHookNoOrig(cls, sel_getUid("dictionaryIsContainKey:key:"), (IMP)ret_NO);
     safeHookNoOrig(cls, sel_getUid("getValueFromeDict:forKey:defaultStr:"), (IMP)ret_empty_str);
-
     Class facade = objc_getClass("AliyunFaceAuthFacade");
     if (facade) autoHookClassMethodsSafe("AliyunFaceAuthFacade");
 }
 
-#pragma mark - 设备标识符 Hook
-
 static void hookDeviceIdentifiers() {
     const char *classes[] = {
-        "AidManager",
-        "AMapADIUManager",
-        "AMapDeviceInfo",
-        "UTDevice",
-        "UTDID",
-        "OpenUDID",
-        "AliSecuritySDK",
-        "AliSecXDeviceInfoMXXTIY",
-        "AliSecXDeviceInfoZZZX",
-        "AliSecXPhoneInfoHolderMXXTIY",
-        "AliSecXPhoneInfoHolderZZZX",
-        nil
+        "AidManager", "AMapADIUManager", "AMapDeviceInfo", "UTDevice", "UTDID",
+        "OpenUDID", "AliSecuritySDK", "AliSecXDeviceInfoMXXTIY", "AliSecXDeviceInfoZZZX",
+        "AliSecXPhoneInfoHolderMXXTIY", "AliSecXPhoneInfoHolderZZZX", nil
     };
     const char *selectors[] = {
-        "getAid", "aid",
-        "getUtdid", "utdid",
-        "getAdiu", "adiu",
-        "openUDIDValue",
-        "deviceId", "uniqueDeviceIdentifier",
-        "getUUID", "uuid",
-        "ADIU",
-        nil
+        "getAid", "aid", "getUtdid", "utdid", "getAdiu", "adiu",
+        "openUDIDValue", "deviceId", "uniqueDeviceIdentifier", "getUUID", "uuid", "ADIU", nil
     };
     for (int i = 0; classes[i] != nil; i++) {
         Class cls = objc_getClass(classes[i]);
@@ -337,11 +305,8 @@ static void hookDeviceIdentifiers() {
     }
 }
 
-#pragma mark - 高德监控与崩溃
-
 static void hookMonitors() {
     Class cls;
-
     cls = objc_getClass("AMapMonitorSingal");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("startMonitor"), (IMP)ret_void);
@@ -351,29 +316,24 @@ static void hookMonitors() {
         safeHookNoOrig(cls, sel_getUid("installSingalHandle"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("uninstallSingalHandle"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapMonitorNSException");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("installNSExceptionHandle"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("uninstallNSExceptionHandle"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("handleUncaughtException:"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapMonitorMachException");
     if (cls) autoHookClassMethodsSafe("AMapMonitorMachException");
-
     cls = objc_getClass("AMapCrashReporter");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("startCrashReporter"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("enableCrashReporter"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapExceptionHandler");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("registerExceptionHandler"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("setupExceptionHandler"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapCrashManager");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("installMonitor"), (IMP)ret_void);
@@ -397,14 +357,11 @@ static void hookMonitors() {
     }
 }
 
-#pragma mark - 高德分析与日志
-
 static void (*orig_sendLog)(id, SEL, id);
 static void hook_sendLog(id self, SEL _cmd, id log) {}
 
 static void hookAnalytics() {
     Class cls;
-
     cls = objc_getClass("AMapAnalyticsManager");
     if (cls) {
         safeHook(cls, sel_getUid("sendLog:"), (IMP)hook_sendLog, (IMP *)&orig_sendLog);
@@ -414,19 +371,16 @@ static void hookAnalytics() {
         safeHookNoOrig(cls, sel_getUid("uploadLog"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("flush"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapNetworkManager");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("sendRequest:"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("sendReport:"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapLogUploader");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("upload"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("startUpload"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapNetFlowManager");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("isBlock"), (IMP)ret_NO);
@@ -434,7 +388,6 @@ static void hookAnalytics() {
         safeHookNoOrig(cls, sel_getUid("checkBlock"), (IMP)ret_NO);
         safeHookNoOrig(cls, sel_getUid("checkNetworkBlock"), (IMP)ret_NO);
     }
-
     cls = objc_getClass("AMapLog");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("_log:message:level:component:file:function:line:session:"), (IMP)ret_void);
@@ -444,12 +397,9 @@ static void hookAnalytics() {
         safeHookNoOrig(cls, sel_getUid("logError:errorInfo:component:"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("logCrash:crashInfo:component:"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapLogManager");
     if (cls) autoHookClassMethodsSafe("AMapLogManager");
 }
-
-#pragma mark - 高德系统信息与统计
 
 static void hookAMapSystemInfoAndStats() {
     Class cls = objc_getClass("AMapSystemInfo");
@@ -466,7 +416,6 @@ static void hookAMapSystemInfoAndStats() {
         safeHookNoOrig(cls, sel_getUid("resignActive:"), (IMP)ret_void);
         safeHookNoOrig(cls, sel_getUid("updateLastSwitchActiveTime:"), (IMP)ret_void);
     }
-
     cls = objc_getClass("AMapStatistics");
     if (cls) {
         safeHookNoOrig(cls, sel_getUid("xinfo"), (IMP)ret_empty_str);
@@ -480,114 +429,11 @@ static void hookAMapSystemInfoAndStats() {
     }
 }
 
-#pragma mark - 字节跳动 Swift 类（自动扫描 @objc 方法）
-
-static void hookByteDanceSwiftClasses() {
-    const char *swiftClasses[] = {
-        // Salamander 基础
-        "_TtC10Salamander8SLDevice",
-        "_TtC10Salamander8SLScreen",
-        "_TtC10Salamander8SLThread",
-        "_TtC10Salamander13SLApplication",
-        "_TtC10Salamander16DeviceSystemImpl",
-        "_TtC10Salamander10ScreenImpl",
-        "_TtC10Salamander11SwiftOCTool",
-        "_TtC10Salamander12EventBusImpl",
-        "_TtC10Salamander15ApplicationImpl",
-        // Salamander BD Foundation
-        "_TtC22SalamanderBDFoundation11SLHeimdallr",
-        "_TtC22SalamanderBDFoundation11SLJSONUtils",
-        "_TtC22SalamanderBDFoundation15SLBDApplication",
-        // AnnieX
-        "_TtC6AnnieX11APMReporter",
-        "_TtC6AnnieX11NetworkImpl",
-        "_TtC6AnnieX13HeimdallrImpl",
-        "_TtC6AnnieX14HybridSettings",
-        "_TtC6AnnieX15AnnieXJSONUtils",
-        "_TtC6AnnieX15AnnieXUUIDUtils",
-        "_TtC6AnnieX17AnnieXApplication",
-        "_TtC6AnnieX17AnnieXStringUtils",
-        "_TtC6AnnieX7LogImpl",
-        "_TtC6AnnieX8Switches",
-        // Bind
-        "_TtC4Bind10BindConfig",
-        "_TtC4Bind9BindUtils",
-        // TempoiOS
-        "_TtC8TempoiOS10TempoTrace",
-        "_TtC8TempoiOS8TempoApp",
-        "_TtC8TempoiOS15TempoSwiperCell",
-        "_TtC8TempoiOS15TempoViewWidget",
-        "_TtC8TempoiOS16TempoBorderLayer",
-        "_TtC8TempoiOS16TempoImageWidget",
-        "_TtC8TempoiOS17TempoBuiltInClass",
-        "_TtC8TempoiOS17TempoLottieWidget",
-        "_TtC8TempoiOS17TempoPipeLineTask",
-        "_TtC8TempoiOS17TempoSwiperWidget",
-        "_TtC8TempoiOS19TempoSwiperItemView",
-        "_TtC8TempoiOS20TempoCountDownWidget",
-        "_TtC8TempoiOS20TempoMethodAppModule",
-        "_TtC8TempoiOS21TempoBounceViewWidget",
-        "_TtC8TempoiOS21TempoDebugRetainCount",
-        "_TtC8TempoiOS21TempoScrollViewWidget",
-        "_TtC8TempoiOS21TempoSwiperItemWidget",
-        "_TtC8TempoiOS25TempoTapGestureRecognizer",
-        "_TtC8TempoiOS31TempoLongPressGestureRecognizer",
-        // BDADSDK
-        "_TtC7BDADSDK12GeckoManager",
-        "_TtC7BDADSDK21GeckoEventDelegateImp",
-        // BDAResourceKit
-        "_TtC18BDAResourceKit_iOS14AdResourceUtil",
-        "_TtC18BDAResourceKit_iOS16AdResourceLoader",
-        "_TtC18BDAResourceKit_iOS17AdPromiseDeferred",
-        "_TtC18BDAResourceKit_iOS19AdStrategyTrackUtil",
-        "_TtC18BDAResourceKit_iOS23AdWebViewResourceLoader",
-        "_TtC18BDAResourceKit_iOS35AdResourceLoaderEnvironmentStrategy",
-        // SalamanderAnnieX
-        "_TtC16SalamanderAnnieX13BridgeHandler",
-        "_TtC16SalamanderAnnieX15BridgeHandlerV2",
-        nil
-    };
-
-    for (int i = 0; swiftClasses[i] != nil; i++) {
-        autoHookClassMethodsSafe(swiftClasses[i]);
-    }
-}
-
-#pragma mark - 字节跳动精确 Hook（头文件中有明确方法的类）
-
-static void hookByteDanceGeckoManager() {
-    Class cls = objc_getClass("_TtC7BDADSDK12GeckoManager");
-    if (!cls) return;
-    BYPASS_LOG(@"hooking GeckoManager");
-    safeHookNoOrig(cls, sel_getUid("registerAndPreloadCommerceGecko"), (IMP)ret_void);
-    safeHookNoOrig(cls, sel_getUid("gurdKitDidSetup"), (IMP)ret_void);
-    safeHookNoOrig(cls, sel_getUid("updateGurdPollWith:"), (IMP)ret_void);
-    safeHookNoOrig(cls, sel_getUid("updateGurdPollWith:completion:"), (IMP)ret_void);
-    safeHookNoOrig(cls, sel_getUid("dataFor:channel:"), (IMP)ret_nil);
-    safeHookNoOrig(cls, sel_getUid("hasGeckoResourceFor:"), (IMP)ret_NO);
-    safeHookNoOrig(cls, sel_getUid("clearGeckoResourceFor:"), (IMP)ret_void);
-    safeHookNoOrig(cls, sel_getUid("geckoAccessKey"), (IMP)ret_empty_str);
-}
-
-static void hookByteDanceResourceKit() {
-    Class cls = objc_getClass("_TtC18BDAResourceKit_iOS23AdWebViewResourceLoader");
-    if (cls) {
-        safeHookNoOrig(cls, sel_getUid("didReceiveMemoryWarningNotification"), (IMP)ret_void);
-        safeHookNoOrig(cls, sel_getUid("didReceiveApplicationWillTerminalNotification"), (IMP)ret_void);
-    }
-}
-
-#pragma mark - 百度系通用 Hook
+#pragma mark - 百度系
 
 static void hookBaiduCommon() {
-    // 百度常见风控/统计类（防御性 hook，类不存在时自动跳过）
     const char *baiduClasses[] = {
-        "BaiduMobStat",
-        "BDTuring",
-        "BDTuringConfig",
-        "BDTuringVerify",
-        "BaiduLocation",
-        nil
+        "BaiduMobStat", "BDTuring", "BDTuringConfig", "BDTuringVerify", "BaiduLocation", nil
     };
     const char *boolSels[] = {
         "isJailbreak", "isJailbroken", "isDebug", "isDebuggerAttached",
@@ -604,12 +450,547 @@ static void hookBaiduCommon() {
     }
 }
 
+#pragma mark - 字节系 Swift 类全面 autoHook
+
+static void hookByteDanceSwiftClasses() {
+    const char *salamander[] = {
+        "_TtC10Salamander8SLDevice", "_TtC10Salamander8SLScreen", "_TtC10Salamander8SLThread",
+        "_TtC10Salamander13SLApplication", "_TtC10Salamander16DeviceSystemImpl",
+        "_TtC10Salamander10ScreenImpl", "_TtC10Salamander11SwiftOCTool",
+        "_TtC10Salamander12EventBusImpl", "_TtC10Salamander15ApplicationImpl",
+        "_TtC22SalamanderBDFoundation11SLHeimdallr", "_TtC22SalamanderBDFoundation11SLJSONUtils",
+        "_TtC22SalamanderBDFoundation15SLBDApplication", nil
+    };
+    batchAutoHook(salamander);
+
+    const char *annieX[] = {
+        "_TtC6AnnieX11APMReporter", "_TtC6AnnieX11NetworkImpl", "_TtC6AnnieX13HeimdallrImpl",
+        "_TtC6AnnieX14HybridSettings", "_TtC6AnnieX15AnnieXJSONUtils", "_TtC6AnnieX15AnnieXUUIDUtils",
+        "_TtC6AnnieX17AnnieXApplication", "_TtC6AnnieX17AnnieXStringUtils", "_TtC6AnnieX7LogImpl",
+        "_TtC6AnnieX8Switches", nil
+    };
+    batchAutoHook(annieX);
+
+    const char *bdad[] = {
+        "_TtC7BDADSDK12GeckoManager", "_TtC7BDADSDK21GeckoEventDelegateImp", nil
+    };
+    batchAutoHook(bdad);
+
+    const char *bdar[] = {
+        "_TtC18BDAResourceKit_iOS14AdResourceUtil", "_TtC18BDAResourceKit_iOS16AdResourceLoader",
+        "_TtC18BDAResourceKit_iOS17AdPromiseDeferred", "_TtC18BDAResourceKit_iOS19AdStrategyTrackUtil",
+        "_TtC18BDAResourceKit_iOS23AdWebViewResourceLoader",
+        "_TtC18BDAResourceKit_iOS35AdResourceLoaderEnvironmentStrategy", nil
+    };
+    batchAutoHook(bdar);
+
+    const char *tempo[] = {
+        "_TtC8TempoiOS10TempoTrace", "_TtC8TempoiOS8TempoApp", "_TtC8TempoiOS15TempoSwiperCell",
+        "_TtC8TempoiOS15TempoViewWidget", "_TtC8TempoiOS16TempoBorderLayer",
+        "_TtC8TempoiOS16TempoImageWidget", "_TtC8TempoiOS17TempoBuiltInClass",
+        "_TtC8TempoiOS17TempoLottieWidget", "_TtC8TempoiOS17TempoPipeLineTask",
+        "_TtC8TempoiOS17TempoSwiperWidget", "_TtC8TempoiOS19TempoSwiperItemView",
+        "_TtC8TempoiOS20TempoCountDownWidget", "_TtC8TempoiOS20TempoMethodAppModule",
+        "_TtC8TempoiOS21TempoBounceViewWidget", "_TtC8TempoiOS21TempoDebugRetainCount",
+        "_TtC8TempoiOS21TempoScrollViewWidget", "_TtC8TempoiOS21TempoSwiperItemWidget",
+        "_TtC8TempoiOS25TempoTapGestureRecognizer", "_TtC8TempoiOS31TempoLongPressGestureRecognizer", nil
+    };
+    batchAutoHook(tempo);
+
+    const char *bind[] = { "_TtC4Bind10BindConfig", "_TtC4Bind9BindUtils", nil };
+    batchAutoHook(bind);
+
+    const char *bridge[] = {
+        "_TtC16SalamanderAnnieX13BridgeHandler", "_TtC16SalamanderAnnieX15BridgeHandlerV2", nil
+    };
+    batchAutoHook(bridge);
+
+    const char *ies[] = {
+        "_TtC14IESIMGroupImpl13GroupInfoUtil", "_TtC14IESIMGroupImpl13GroupMuteUtil",
+        "_TtC14IESIMGroupImpl18GroupBasicInfoUtil", "_TtC14IESIMGroupImpl18GroupLinkComponent",
+        "_TtC14IESIMGroupImpl24ChatSettingsCheckService", "_TtC14IESIMGroupImpl25GroupAvatarPreviewService",
+        "_TtC14IESIMGroupImpl26GroupParticipantController", "_TtC14IESIMGroupImpl29GroupOtherSceneStorageService",
+        "_TtC19IESLiveServiceSwift16IESLiveDCEventID", "_TtC19IESLiveServiceSwift21IESLiveDCSharedDataID",
+        "_TtC26IESIMConversationSwiftImpl21IMB2CQuestionsService",
+        "_TtC33IESIMConversationSettingSwiftImpl20GroupSettingsService", nil
+    };
+    batchAutoHook(ies);
+
+    const char *yata[] = {
+        "_TtC14YataEventChain14ToastEventImpl", "_TtC14YataEventChain16RequestEventImpl",
+        "_TtC14YataEventChain16TrackerEventImpl", "_TtC14YataEventChain19OpenSchemaEventImpl", nil
+    };
+    batchAutoHook(yata);
+
+    const char *iap[] = { "_TtC15CJSwiftIAPStore14CJSwiftIAPTool", "_TtC15CJSwiftIAPStore14CJSwiftIAPUtil", nil };
+    batchAutoHook(iap);
+
+    const char *fq[] = {
+        "_TtC18FQOriginalSaaSImpl17FQOriginalManager",
+        "_TtC18FQOriginalSaaSImpl24SSOriginaUISimpleLoading",
+        "_TtC18FQOriginalSaaSImpl29FQOriginalImageCropperManager", nil
+    };
+    batchAutoHook(fq);
+
+    const char *other[] = {
+        "_TtC12FQHybridImpl20FQHybridDefaultTheme",
+        "_TtC10rts2native10JsonHelper", "_TtC10rts2native10Uint8Array",
+        "_TtC10rts2native4Math", "_TtC10rts2native4Type",
+        "_TtC10rts2native6Arrays", "_TtC10rts2native6Object",
+        "_TtC10rts2native7console", nil
+    };
+    batchAutoHook(other);
+}
+
+#pragma mark - 字节系关键类精确 hook
+
+static void (*orig_AnnieCheckPermission_call)(id, SEL, id, id);
+static void hook_AnnieCheckPermission_call(id self, SEL _cmd, id param, id completion) {
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{@"status": @1});
+    }
+}
+
+static void (*orig_AnnieRequestPermission_call)(id, SEL, id, id);
+static void hook_AnnieRequestPermission_call(id self, SEL _cmd, id param, id completion) {
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{@"status": @1});
+    }
+}
+
+static void (*orig_AnnieGetUserInfo_call)(id, SEL, id, id);
+static void hook_AnnieGetUserInfo_call(id self, SEL _cmd, id param, id completion) {
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{
+            @"isLogin": @YES,
+            @"userInfo": @{
+                @"shortID": @"12345",
+                @"userID": @"12345",
+                @"secUserID": @"sec12345",
+                @"nickName": @"User",
+                @"avatarURL": @"",
+                @"isBoundPhone": @YES
+            }
+        });
+    }
+}
+
+static void (*orig_AnnieTraceEvent_traceBegin)(id, SEL, id, id);
+static void hook_AnnieTraceEvent_traceBegin(id self, SEL _cmd, id name, id info) {}
+
+static void (*orig_AnnieTraceEvent_traceEnd)(id, SEL, id);
+static void hook_AnnieTraceEvent_traceEnd(id self, SEL _cmd, id name) {}
+
+static void (*orig_AnnieTraceEvent_traceInstant)(id, SEL, id);
+static void hook_AnnieTraceEvent_traceInstant(id self, SEL _cmd, id name) {}
+
+static void hookByteDanceKeyClasses() {
+    Class cls;
+
+    cls = objc_getClass("_TtC7BDADSDK12GeckoManager");
+    if (cls) {
+        BYPASS_LOG(@"hooking GeckoManager");
+        safeHookNoOrig(cls, sel_getUid("registerAndPreloadCommerceGecko"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("gurdKitDidSetup"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("updateGurdPollWith:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("updateGurdPollWith:completion:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("dataFor:channel:"), (IMP)ret_nil);
+        safeHookNoOrig(cls, sel_getUid("hasGeckoResourceFor:"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("clearGeckoResourceFor:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("geckoAccessKey"), (IMP)ret_empty_str);
+    }
+
+    cls = objc_getClass("_TtC18BDAResourceKit_iOS23AdWebViewResourceLoader");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("didReceiveMemoryWarningNotification"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("didReceiveApplicationWillTerminalNotification"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AnnieCheckPermissionMethodImpl");
+    if (cls) safeHook(cls, sel_getUid("callWithParamModel:completionHandler:"), (IMP)hook_AnnieCheckPermission_call, (IMP *)&orig_AnnieCheckPermission_call);
+
+    cls = objc_getClass("AnnieRequestPermissionMethodImpl");
+    if (cls) safeHook(cls, sel_getUid("callWithParamModel:completionHandler:"), (IMP)hook_AnnieRequestPermission_call, (IMP *)&orig_AnnieRequestPermission_call);
+
+    cls = objc_getClass("AnnieGetUserInfoMethodImpl");
+    if (cls) safeHook(cls, sel_getUid("callWithParamModel:completionHandler:"), (IMP)hook_AnnieGetUserInfo_call, (IMP *)&orig_AnnieGetUserInfo_call);
+
+    cls = objc_getClass("AnnieTraceEventImpl");
+    if (cls) {
+        safeHook(cls, sel_getUid("traceBeginSectionWithName:debugInfo:"), (IMP)hook_AnnieTraceEvent_traceBegin, (IMP *)&orig_AnnieTraceEvent_traceBegin);
+        safeHook(cls, sel_getUid("traceEndSectionWithName:"), (IMP)hook_AnnieTraceEvent_traceEnd, (IMP *)&orig_AnnieTraceEvent_traceEnd);
+        safeHook(cls, sel_getUid("traceInstantWithName:"), (IMP)hook_AnnieTraceEvent_traceInstant, (IMP *)&orig_AnnieTraceEvent_traceInstant);
+    }
+
+    cls = objc_getClass("AnnieSendLogV3Impl");
+    if (cls) safeHookNoOrig(cls, sel_getUid("methodName"), (IMP)ret_empty_str);
+
+    cls = objc_getClass("AnnieLiveReportAggregateALogMethodImpl");
+    if (cls) safeHookNoOrig(cls, sel_getUid("callWithParamModel:completionHandler:"), (IMP)ret_void);
+
+    cls = objc_getClass("AnnieWebViewInterceptor");
+    if (cls) autoHookClassMethodsSafe("AnnieWebViewInterceptor");
+
+    cls = objc_getClass("AnnieXAccount");
+    if (cls) safeHookNoOrig(cls, sel_getUid("accessTokenForAuthPlatform"), (IMP)ret_empty_str);
+
+    cls = objc_getClass("AnnieGlobalProps");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("netType"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("osLanguage"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("resolverWithSchema:context:"), (IMP)ret_nil);
+    }
+
+    cls = objc_getClass("AnnieXContainerContextModel");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("collectContainerContext:value:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("annieXIsAsyncCreateData"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("annieXEngineIsFromCache"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("annieXEngineIsWarmup"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("annieXEngineIsReuse"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("annieXCardModelIsReuse"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("annieXPageIsConcurrentLoad"), (IMP)ret_empty_str);
+    }
+
+    cls = objc_getClass("AnnieXContainerTimingModel");
+    if (cls) safeHookNoOrig(cls, sel_getUid("collectTiming:timestamp:"), (IMP)ret_void);
+
+    cls = objc_getClass("AnnieLatchMonitorModule");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("result:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("perfMetric:"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AnnieContainerVCRouterInterceptor");
+    if (cls) safeHookNoOrig(cls, sel_getUid("customHandleWithParams:"), (IMP)ret_NO);
+
+    cls = objc_getClass("AnnieDynamicModel");
+    if (cls) autoHookClassMethodsSafe("AnnieDynamicModel");
+
+    cls = objc_getClass("AnnieSpeechRecognitionController");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("startRecognitionWithParams:completion:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("stopRecognition:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("onMessageWithType:andData:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("sendAsrStateChangeWithEventType:message:"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AnnieLLMSpeechRecognitionController");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("startRecognitionWithParams:completion:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("stopRecognition:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("onMessageWithType:andData:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("sendAsrStateChangeWithEventType:message:"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AnnieAudioRecorder");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("prepareToRecord"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("startRecord"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("stopRecord"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AnnieSpeechRecognizer");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("startRecognitionWithAppKey:token:sosSilenceTimeout:eosSilenceTimeout:sentenceMaxSeconds:listener:"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("setupSAMIWithAppKey:token:sosSilenceTimeout:eosSilenceTimeout:sentenceMaxSeconds:listener:"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("recognizePCMAudioData:withDataSize:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("stopRecognition"), (IMP)ret_void);
+    }
+
+    BYPASS_LOG(@"ByteDance key classes hooked");
+}
+
+#pragma mark - 系统 API 层 Hook（关键兜底）
+
+static BOOL (*orig_fileExistsAtPath)(id, SEL, NSString*);
+static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
+    if (path && (
+        [path containsString:@"/Applications/Cydia.app"] ||
+        [path containsString:@"/Library/MobileSubstrate"] ||
+        [path containsString:@"/var/jb"] ||
+        [path containsString:@"/usr/sbin/sshd"] ||
+        [path containsString:@"/etc/apt"] ||
+        [path containsString:@"/var/lib/dpkg"] ||
+        [path containsString:@"/bin/bash"] ||
+        [path containsString:@"/usr/bin/ssh"] ||
+        [path containsString:@"/var/containers/Bundle/tweaks"] ||
+        [path containsString:@"/var/mobile/Library/Preferences/"] ||
+        [path containsString:@".dylib"])) {
+        BYPASS_LOG(@"NSFileManager blocked: %@", path);
+        return NO;
+    }
+    return orig_fileExistsAtPath(self, _cmd, path);
+}
+
+static BOOL (*orig_fileExistsAtPath_isDirectory)(id, SEL, NSString*, BOOL*);
+static BOOL hook_fileExistsAtPath_isDirectory(id self, SEL _cmd, NSString *path, BOOL *isDir) {
+    if (path && (
+        [path containsString:@"/Applications/Cydia.app"] ||
+        [path containsString:@"/Library/MobileSubstrate"] ||
+        [path containsString:@"/var/jb"] ||
+        [path containsString:@"/usr/sbin/sshd"] ||
+        [path containsString:@"/etc/apt"] ||
+        [path containsString:@"/var/lib/dpkg"] ||
+        [path containsString:@"/bin/bash"] ||
+        [path containsString:@"/usr/bin/ssh"] ||
+        [path containsString:@"/var/containers/Bundle/tweaks"] ||
+        [path containsString:@"/var/mobile/Library/Preferences/"] ||
+        [path containsString:@".dylib"])) {
+        BYPASS_LOG(@"NSFileManager blocked(isDir): %@", path);
+        if (isDir) *isDir = NO;
+        return NO;
+    }
+    return orig_fileExistsAtPath_isDirectory(self, _cmd, path, isDir);
+}
+
+static NSArray *(*orig_contentsOfDirectoryAtPath_error)(id, SEL, NSString*, NSError**);
+static NSArray *hook_contentsOfDirectoryAtPath_error(id self, SEL _cmd, NSString *path, NSError **error) {
+    if (path && (
+        [path containsString:@"/var/jb"] ||
+        [path containsString:@"/Library/MobileSubstrate"] ||
+        [path containsString:@"/var/containers/Bundle/tweaks"])) {
+        BYPASS_LOG(@"NSFileManager blocked dir: %@", path);
+        return @[];
+    }
+    return orig_contentsOfDirectoryAtPath_error(self, _cmd, path, error);
+}
+
+static NSArray *(*orig_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error)(id, SEL, NSURL*, NSArray*, NSUInteger, NSError**);
+static NSArray *hook_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error(id self, SEL _cmd, NSURL *url, NSArray *keys, NSUInteger mask, NSError **error) {
+    if (url && url.path && (
+        [url.path containsString:@"/var/jb"] ||
+        [url.path containsString:@"/Library/MobileSubstrate"] ||
+        [url.path containsString:@"/var/containers/Bundle/tweaks"])) {
+        BYPASS_LOG(@"NSFileManager blocked URL dir: %@", url.path);
+        return @[];
+    }
+    return orig_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error(self, _cmd, url, keys, mask, error);
+}
+
+static void hookNSFileManager() {
+    Class cls = objc_getClass("NSFileManager");
+    if (!cls) return;
+    safeHook(cls, sel_getUid("fileExistsAtPath:"), (IMP)hook_fileExistsAtPath, (IMP *)&orig_fileExistsAtPath);
+    safeHook(cls, sel_getUid("fileExistsAtPath:isDirectory:"), (IMP)hook_fileExistsAtPath_isDirectory, (IMP *)&orig_fileExistsAtPath_isDirectory);
+    safeHook(cls, sel_getUid("contentsOfDirectoryAtPath:error:"), (IMP)hook_contentsOfDirectoryAtPath_error, (IMP *)&orig_contentsOfDirectoryAtPath_error);
+    safeHook(cls, sel_getUid("contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:"), (IMP)hook_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error, (IMP *)&orig_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error);
+    BYPASS_LOG(@"NSFileManager hooked");
+}
+
+static NSArray *(*orig_allBundles)(Class, SEL);
+static NSArray *hook_allBundles(Class self, SEL _cmd) {
+    NSArray *orig = orig_allBundles(self, _cmd);
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (NSBundle *bundle in orig) {
+        NSString *path = bundle.bundlePath;
+        if (path && (
+            [path containsString:@"/var/jb"] ||
+            [path containsString:@"tweak"] ||
+            [path containsString:@".dylib"] ||
+            [path containsString:@"AliSecBypass"] ||
+            [path containsString:@"FanqieBypass"] ||
+            [path containsString:@"substrate"] ||
+            [path containsString:@"dobby"] ||
+            [path containsString:@"ellekit"])) {
+            BYPASS_LOG(@"NSBundle filtered: %@", path);
+            continue;
+        }
+        [filtered addObject:bundle];
+    }
+    return filtered;
+}
+
+static NSArray *(*orig_allFrameworks)(Class, SEL);
+static NSArray *hook_allFrameworks(Class self, SEL _cmd) {
+    NSArray *orig = orig_allFrameworks(self, _cmd);
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (NSBundle *bundle in orig) {
+        NSString *path = bundle.bundlePath;
+        if (path && (
+            [path containsString:@"/var/jb"] ||
+            [path containsString:@"tweak"] ||
+            [path containsString:@".dylib"] ||
+            [path containsString:@"AliSecBypass"] ||
+            [path containsString:@"FanqieBypass"] ||
+            [path containsString:@"substrate"] ||
+            [path containsString:@"dobby"] ||
+            [path containsString:@"ellekit"])) {
+            BYPASS_LOG(@"NSFramework filtered: %@", path);
+            continue;
+        }
+        [filtered addObject:bundle];
+    }
+    return filtered;
+}
+
+static NSString *(*orig_bundlePath)(id, SEL);
+static NSString *hook_bundlePath(id self, SEL _cmd) {
+    NSString *orig = orig_bundlePath(self, _cmd);
+    if (orig && (
+        [orig containsString:@"/var/jb"] ||
+        [orig containsString:@"tweak"] ||
+        [orig containsString:@".dylib"])) {
+        return @"/System/Library/Frameworks/Foundation.framework";
+    }
+    return orig;
+}
+
+static NSString *(*orig_executablePath)(id, SEL);
+static NSString *hook_executablePath(id self, SEL _cmd) {
+    NSString *orig = orig_executablePath(self, _cmd);
+    if (orig && [orig containsString:@".dylib"]) {
+        return nil;
+    }
+    return orig;
+}
+
+static void hookNSBundle() {
+    Class cls = objc_getClass("NSBundle");
+    if (!cls) return;
+    Method m1 = class_getClassMethod(cls, sel_getUid("allBundles"));
+    if (m1) {
+        orig_allBundles = (NSArray *(*)(Class, SEL))method_getImplementation(m1);
+        method_setImplementation(m1, (IMP)hook_allBundles);
+    }
+    Method m2 = class_getClassMethod(cls, sel_getUid("allFrameworks"));
+    if (m2) {
+        orig_allFrameworks = (NSArray *(*)(Class, SEL))method_getImplementation(m2);
+        method_setImplementation(m2, (IMP)hook_allFrameworks);
+    }
+    safeHook(cls, sel_getUid("bundlePath"), (IMP)hook_bundlePath, (IMP *)&orig_bundlePath);
+    safeHook(cls, sel_getUid("executablePath"), (IMP)hook_executablePath, (IMP *)&orig_executablePath);
+    BYPASS_LOG(@"NSBundle hooked");
+}
+
+static NSDictionary *(*orig_environment)(id, SEL);
+static NSDictionary *hook_environment(id self, SEL _cmd) {
+    NSMutableDictionary *env = [orig_environment(self, _cmd) mutableCopy];
+    [env removeObjectForKey:@"DYLD_INSERT_LIBRARIES"];
+    [env removeObjectForKey:@"DYLD_FRAMEWORK_PATH"];
+    [env removeObjectForKey:@"DYLD_LIBRARY_PATH"];
+    [env removeObjectForKey:@"MSSafeMode"];
+    [env removeObjectForKey:@"_MSSafeMode"];
+    [env removeObjectForKey:@"_DYLD_INSERT_LIBRARIES"];
+    return env;
+}
+
+static NSArray *(*orig_arguments)(id, SEL);
+static NSArray *hook_arguments(id self, SEL _cmd) {
+    NSArray *orig = orig_arguments(self, _cmd);
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (NSString *arg in orig) {
+        if ([arg containsString:@"-Tweak"] || [arg containsString:@"-substrate"] || [arg containsString:@"-dobby"]) {
+            continue;
+        }
+        [filtered addObject:arg];
+    }
+    return filtered;
+}
+
+static void hookNSProcessInfo() {
+    Class cls = objc_getClass("NSProcessInfo");
+    if (!cls) return;
+    safeHook(cls, sel_getUid("environment"), (IMP)hook_environment, (IMP *)&orig_environment);
+    safeHook(cls, sel_getUid("arguments"), (IMP)hook_arguments, (IMP *)&orig_arguments);
+    BYPASS_LOG(@"NSProcessInfo hooked");
+}
+
+static NSString *(*orig_identifierForVendor)(id, SEL);
+static NSString *hook_identifierForVendor(id self, SEL _cmd) {
+    return @"00000000-0000-0000-0000-000000000000";
+}
+
+static void hookUIDevice() {
+    Class cls = objc_getClass("UIDevice");
+    if (!cls) return;
+    safeHook(cls, sel_getUid("identifierForVendor"), (IMP)hook_identifierForVendor, (IMP *)&orig_identifierForVendor);
+    BYPASS_LOG(@"UIDevice hooked");
+}
+
+static BOOL (*orig_canOpenURL)(id, SEL, NSURL*);
+static BOOL hook_canOpenURL(id self, SEL _cmd, NSURL *url) {
+    NSString *scheme = url.scheme;
+    if ([scheme isEqualToString:@"cydia"] ||
+        [scheme isEqualToString:@"sileo"] ||
+        [scheme isEqualToString:@"zbra"] ||
+        [scheme isEqualToString:@"filza"]) {
+        BYPASS_LOG(@"UIApplication canOpenURL blocked: %@", scheme);
+        return NO;
+    }
+    return orig_canOpenURL(self, _cmd, url);
+}
+
+static void hookUIApplication() {
+    Class cls = objc_getClass("UIApplication");
+    if (!cls) return;
+    safeHook(cls, sel_getUid("canOpenURL:"), (IMP)hook_canOpenURL, (IMP *)&orig_canOpenURL);
+    BYPASS_LOG(@"UIApplication hooked");
+}
+
+static BOOL isBlockedHost(NSString *host) {
+    if (!host) return NO;
+    NSString *low = host.lowercaseString;
+    return (
+        [low containsString:@"log"] ||
+        [low containsString:@"mon"] ||
+        [low containsString:@"apm"] ||
+        [low containsString:@"security"] ||
+        [low containsString:@"risk"] ||
+        [low containsString:@"snssdk"] ||
+        [low containsString:@"bytedance"] ||
+        [low containsString:@"byteoversea"] ||
+        [low containsString:@"toutiao"] ||
+        [low containsString:@"douyin"] ||
+        [low containsString:@"ies"] ||
+        [low containsString:@"bdurl"] ||
+        [low containsString:@"pangolin"] ||
+        [low containsString:@"gromore"] ||
+        [low containsString:@"ttapis"] ||
+        [low containsString:@"byteimg"] ||
+        [low containsString:@"volces"] ||
+        [low containsString:@"helo"]
+    );
+}
+
+static NSURLSessionDataTask *(*orig_dataTaskWithRequest)(id, SEL, NSURLRequest*);
+static NSURLSessionDataTask *hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    NSURL *url = request.URL;
+    if (url && isBlockedHost(url.host)) {
+        BYPASS_LOG(@"NSURLSession blocked: %@", url.absoluteString);
+        NSMutableURLRequest *mutReq = [request mutableCopy];
+        mutReq.URL = [NSURL URLWithString:@"about:blank"];
+        return orig_dataTaskWithRequest(self, _cmd, mutReq);
+    }
+    return orig_dataTaskWithRequest(self, _cmd, request);
+}
+
+static NSURLSessionDataTask *(*orig_dataTaskWithURL)(id, SEL, NSURL*);
+static NSURLSessionDataTask *hook_dataTaskWithURL(id self, SEL _cmd, NSURL *url) {
+    if (url && isBlockedHost(url.host)) {
+        BYPASS_LOG(@"NSURLSession blocked URL: %@", url.absoluteString);
+        return orig_dataTaskWithURL(self, _cmd, [NSURL URLWithString:@"about:blank"]);
+    }
+    return orig_dataTaskWithURL(self, _cmd, url);
+}
+
+static void hookNSURLSession() {
+    Class cls = objc_getClass("NSURLSession");
+    if (!cls) return;
+    safeHook(cls, sel_getUid("dataTaskWithRequest:"), (IMP)hook_dataTaskWithRequest, (IMP *)&orig_dataTaskWithRequest);
+    safeHook(cls, sel_getUid("dataTaskWithURL:"), (IMP)hook_dataTaskWithURL, (IMP *)&orig_dataTaskWithURL);
+    BYPASS_LOG(@"NSURLSession hooked");
+}
+
 #pragma mark - Constructor
 
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"AliSecBypass v2.1 loaded (headfile-enhanced)");
+        BYPASS_LOG(@"FanqieBypass v1.0 loaded");
 
         // 阿里系
         hookAliSecXSafeUtilsVariants();
@@ -623,14 +1004,21 @@ static void init() {
         hookAnalytics();
         hookAMapSystemInfoAndStats();
 
-        // 字节系
-        hookByteDanceGeckoManager();
-        hookByteDanceResourceKit();
-        hookByteDanceSwiftClasses();
-
         // 百度系
         hookBaiduCommon();
 
-        BYPASS_LOG(@"AliSecBypass v2.1 init complete");
+        // 字节系
+        hookByteDanceSwiftClasses();
+        hookByteDanceKeyClasses();
+
+        // 系统 API 层兜底
+        hookNSFileManager();
+        hookNSBundle();
+        hookNSProcessInfo();
+        hookUIDevice();
+        hookUIApplication();
+        hookNSURLSession();
+
+        BYPASS_LOG(@"FanqieBypass v1.0 init complete");
     }
 }
