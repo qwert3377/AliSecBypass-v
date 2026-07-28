@@ -21,7 +21,7 @@ struct _rebinding {
     void *replacement;
     void **replaced;
 };
-extern int rebind_symbols(struct _rebinding rebindings[], size_t rebindings_nel);
+extern "C" int rebind_symbols(struct _rebinding rebindings[], size_t rebindings_nel);
 
 static int (*orig_ptrace)(int, pid_t, void *, int) = NULL;
 
