@@ -8,6 +8,7 @@
 #import <dlfcn.h>
 #import <sys/stat.h>
 #import <sys/sysctl.h>
+#import <sys/ptrace.h>
 #import <unistd.h>
 #import <stdio.h>
 #import <stdlib.h>
@@ -125,15 +126,6 @@ static int my_stat(const char *path, struct stat *buf) {
 }
 DYLD_INTERPOSE(my_stat, stat);
 
-static int my_stat64(const char *path, struct stat64 *buf) {
-    if (isJailbreakPath(path)) {
-        BYPASS_LOG(@"stat64 blocked: %s", path);
-        errno = ENOENT;
-        return -1;
-    }
-    return stat64(path, buf);
-}
-DYLD_INTERPOSE(my_stat64, stat64);
 
 static int my_lstat(const char *path, struct stat *buf) {
     if (isJailbreakPath(path)) {
@@ -145,15 +137,6 @@ static int my_lstat(const char *path, struct stat *buf) {
 }
 DYLD_INTERPOSE(my_lstat, lstat);
 
-static int my_lstat64(const char *path, struct stat64 *buf) {
-    if (isJailbreakPath(path)) {
-        BYPASS_LOG(@"lstat64 blocked: %s", path);
-        errno = ENOENT;
-        return -1;
-    }
-    return lstat64(path, buf);
-}
-DYLD_INTERPOSE(my_lstat64, lstat64);
 
 static FILE *my_fopen(const char *path, const char *mode) {
     if (isJailbreakPath(path)) {
@@ -239,7 +222,7 @@ static int my_unsetenv(const char *name) {
 }
 DYLD_INTERPOSE(my_unsetenv, unsetenv);
 
-static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+static int my_ptrace(int request, pid_t pid, void *addr, int data) {
     if (request == 0) { // PT_DENY_ATTACH = 0 on iOS
         BYPASS_LOG(@"ptrace PT_DENY_ATTACH blocked");
         return 0;
@@ -1199,7 +1182,7 @@ static void hookNSURLSession() {
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"FanqieBypass v1.2-fix loaded (C+ObjC dual layer)");
+        BYPASS_LOG(@"FanqieBypass v1.3-fix loaded (C+ObjC dual layer)");
 
         hookAliSecXSafeUtilsVariants();
         hookAliSecXReachability();
@@ -1224,6 +1207,6 @@ static void init() {
         hookUIApplication();
         hookNSURLSession();
 
-        BYPASS_LOG(@"FanqieBypass v1.2-fix init complete");
+        BYPASS_LOG(@"FanqieBypass v1.3-fix init complete");
     }
 }
