@@ -1,7 +1,6 @@
 // FanqieBypass.mm
-// 番茄小说/番茄畅听/红果 专用反检测插件 v1.0
-// 覆盖：阿里/高德/百度/字节(Salamander/AnnieX/BDADSDK/BDAResourceKit/IES/TempoiOS)
-// 纯库文件，零外部依赖，适用于 TrollStore / 非越狱注入
+// 番茄小说/番茄畅听/红果 专用反检测插件 v1.1
+// 修复 v1.0 UIDevice identifierForVendor 类型错误导致的崩溃
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
@@ -102,7 +101,25 @@ static void autoHookClassMethodsSafe(const char *clsName) {
             strcmp(selName, "description") == 0 ||
             strcmp(selName, "debugDescription") == 0 ||
             strcmp(selName, "hash") == 0 ||
-            strcmp(selName, "superclass") == 0) {
+            strcmp(selName, "superclass") == 0 ||
+            strcmp(selName, "class") == 0 ||
+            strcmp(selName, "isEqual:") == 0 ||
+            strcmp(selName, "isKindOfClass:") == 0 ||
+            strcmp(selName, "isMemberOfClass:") == 0 ||
+            strcmp(selName, "respondsToSelector:") == 0 ||
+            strcmp(selName, "conformsToProtocol:") == 0 ||
+            strcmp(selName, "performSelector:") == 0 ||
+            strcmp(selName, "performSelector:withObject:") == 0 ||
+            strcmp(selName, "performSelector:withObject:withObject:") == 0 ||
+            strcmp(selName, "forwardingTargetForSelector:") == 0 ||
+            strcmp(selName, "methodSignatureForSelector:") == 0 ||
+            strcmp(selName, "forwardInvocation:") == 0 ||
+            strcmp(selName, "doesNotRecognizeSelector:") == 0 ||
+            strcmp(selName, "zone") == 0 ||
+            strcmp(selName, "autorelease") == 0 ||
+            strcmp(selName, "retain") == 0 ||
+            strcmp(selName, "release") == 0 ||
+            strcmp(selName, "retainCount") == 0) {
             continue;
         }
 
@@ -706,9 +723,9 @@ static void hookByteDanceKeyClasses() {
 
 #pragma mark - 系统 API 层 Hook（关键兜底）
 
-static BOOL (*orig_fileExistsAtPath)(id, SEL, NSString*);
-static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
-    if (path && (
+static BOOL isJailbreakPath(NSString *path) {
+    if (!path) return NO;
+    return (
         [path containsString:@"/Applications/Cydia.app"] ||
         [path containsString:@"/Library/MobileSubstrate"] ||
         [path containsString:@"/var/jb"] ||
@@ -719,7 +736,13 @@ static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
         [path containsString:@"/usr/bin/ssh"] ||
         [path containsString:@"/var/containers/Bundle/tweaks"] ||
         [path containsString:@"/var/mobile/Library/Preferences/"] ||
-        [path containsString:@".dylib"])) {
+        [path containsString:@".dylib"]
+    );
+}
+
+static BOOL (*orig_fileExistsAtPath)(id, SEL, NSString*);
+static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
+    if (isJailbreakPath(path)) {
         BYPASS_LOG(@"NSFileManager blocked: %@", path);
         return NO;
     }
@@ -728,18 +751,7 @@ static BOOL hook_fileExistsAtPath(id self, SEL _cmd, NSString *path) {
 
 static BOOL (*orig_fileExistsAtPath_isDirectory)(id, SEL, NSString*, BOOL*);
 static BOOL hook_fileExistsAtPath_isDirectory(id self, SEL _cmd, NSString *path, BOOL *isDir) {
-    if (path && (
-        [path containsString:@"/Applications/Cydia.app"] ||
-        [path containsString:@"/Library/MobileSubstrate"] ||
-        [path containsString:@"/var/jb"] ||
-        [path containsString:@"/usr/sbin/sshd"] ||
-        [path containsString:@"/etc/apt"] ||
-        [path containsString:@"/var/lib/dpkg"] ||
-        [path containsString:@"/bin/bash"] ||
-        [path containsString:@"/usr/bin/ssh"] ||
-        [path containsString:@"/var/containers/Bundle/tweaks"] ||
-        [path containsString:@"/var/mobile/Library/Preferences/"] ||
-        [path containsString:@".dylib"])) {
+    if (isJailbreakPath(path)) {
         BYPASS_LOG(@"NSFileManager blocked(isDir): %@", path);
         if (isDir) *isDir = NO;
         return NO;
@@ -749,10 +761,7 @@ static BOOL hook_fileExistsAtPath_isDirectory(id self, SEL _cmd, NSString *path,
 
 static NSArray *(*orig_contentsOfDirectoryAtPath_error)(id, SEL, NSString*, NSError**);
 static NSArray *hook_contentsOfDirectoryAtPath_error(id self, SEL _cmd, NSString *path, NSError **error) {
-    if (path && (
-        [path containsString:@"/var/jb"] ||
-        [path containsString:@"/Library/MobileSubstrate"] ||
-        [path containsString:@"/var/containers/Bundle/tweaks"])) {
+    if (isJailbreakPath(path)) {
         BYPASS_LOG(@"NSFileManager blocked dir: %@", path);
         return @[];
     }
@@ -761,10 +770,7 @@ static NSArray *hook_contentsOfDirectoryAtPath_error(id self, SEL _cmd, NSString
 
 static NSArray *(*orig_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error)(id, SEL, NSURL*, NSArray*, NSUInteger, NSError**);
 static NSArray *hook_contentsOfDirectoryAtURL_includingPropertiesForKeys_options_error(id self, SEL _cmd, NSURL *url, NSArray *keys, NSUInteger mask, NSError **error) {
-    if (url && url.path && (
-        [url.path containsString:@"/var/jb"] ||
-        [url.path containsString:@"/Library/MobileSubstrate"] ||
-        [url.path containsString:@"/var/containers/Bundle/tweaks"])) {
+    if (url && url.path && isJailbreakPath(url.path)) {
         BYPASS_LOG(@"NSFileManager blocked URL dir: %@", url.path);
         return @[];
     }
@@ -781,21 +787,27 @@ static void hookNSFileManager() {
     BYPASS_LOG(@"NSFileManager hooked");
 }
 
+static BOOL isInjectedBundle(NSString *path) {
+    if (!path) return NO;
+    return (
+        [path containsString:@"/var/jb"] ||
+        [path containsString:@"tweak"] ||
+        [path containsString:@".dylib"] ||
+        [path containsString:@"AliSecBypass"] ||
+        [path containsString:@"FanqieBypass"] ||
+        [path containsString:@"substrate"] ||
+        [path containsString:@"dobby"] ||
+        [path containsString:@"ellekit"]
+    );
+}
+
 static NSArray *(*orig_allBundles)(Class, SEL);
 static NSArray *hook_allBundles(Class self, SEL _cmd) {
     NSArray *orig = orig_allBundles(self, _cmd);
     NSMutableArray *filtered = [NSMutableArray array];
     for (NSBundle *bundle in orig) {
         NSString *path = bundle.bundlePath;
-        if (path && (
-            [path containsString:@"/var/jb"] ||
-            [path containsString:@"tweak"] ||
-            [path containsString:@".dylib"] ||
-            [path containsString:@"AliSecBypass"] ||
-            [path containsString:@"FanqieBypass"] ||
-            [path containsString:@"substrate"] ||
-            [path containsString:@"dobby"] ||
-            [path containsString:@"ellekit"])) {
+        if (isInjectedBundle(path)) {
             BYPASS_LOG(@"NSBundle filtered: %@", path);
             continue;
         }
@@ -810,15 +822,7 @@ static NSArray *hook_allFrameworks(Class self, SEL _cmd) {
     NSMutableArray *filtered = [NSMutableArray array];
     for (NSBundle *bundle in orig) {
         NSString *path = bundle.bundlePath;
-        if (path && (
-            [path containsString:@"/var/jb"] ||
-            [path containsString:@"tweak"] ||
-            [path containsString:@".dylib"] ||
-            [path containsString:@"AliSecBypass"] ||
-            [path containsString:@"FanqieBypass"] ||
-            [path containsString:@"substrate"] ||
-            [path containsString:@"dobby"] ||
-            [path containsString:@"ellekit"])) {
+        if (isInjectedBundle(path)) {
             BYPASS_LOG(@"NSFramework filtered: %@", path);
             continue;
         }
@@ -830,10 +834,7 @@ static NSArray *hook_allFrameworks(Class self, SEL _cmd) {
 static NSString *(*orig_bundlePath)(id, SEL);
 static NSString *hook_bundlePath(id self, SEL _cmd) {
     NSString *orig = orig_bundlePath(self, _cmd);
-    if (orig && (
-        [orig containsString:@"/var/jb"] ||
-        [orig containsString:@"tweak"] ||
-        [orig containsString:@".dylib"])) {
+    if (orig && isInjectedBundle(orig)) {
         return @"/System/Library/Frameworks/Foundation.framework";
     }
     return orig;
@@ -899,15 +900,19 @@ static void hookNSProcessInfo() {
     BYPASS_LOG(@"NSProcessInfo hooked");
 }
 
-static NSString *(*orig_identifierForVendor)(id, SEL);
-static NSString *hook_identifierForVendor(id self, SEL _cmd) {
-    return @"00000000-0000-0000-0000-000000000000";
+static NSUUID *hook_identifierForVendor(id self, SEL _cmd) {
+    static NSUUID *uuid = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        uuid = [[NSUUID alloc] initWithUUIDString:@"00000000-0000-0000-0000-000000000000"];
+    });
+    return uuid;
 }
 
 static void hookUIDevice() {
     Class cls = objc_getClass("UIDevice");
     if (!cls) return;
-    safeHook(cls, sel_getUid("identifierForVendor"), (IMP)hook_identifierForVendor, (IMP *)&orig_identifierForVendor);
+    safeHook(cls, sel_getUid("identifierForVendor"), (IMP)hook_identifierForVendor, NULL);
     BYPASS_LOG(@"UIDevice hooked");
 }
 
@@ -990,9 +995,8 @@ static void hookNSURLSession() {
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"FanqieBypass v1.0 loaded");
+        BYPASS_LOG(@"FanqieBypass v1.1 loaded");
 
-        // 阿里系
         hookAliSecXSafeUtilsVariants();
         hookAliSecXReachability();
         hookAliSecXKeychain();
@@ -1004,14 +1008,11 @@ static void init() {
         hookAnalytics();
         hookAMapSystemInfoAndStats();
 
-        // 百度系
         hookBaiduCommon();
 
-        // 字节系
         hookByteDanceSwiftClasses();
         hookByteDanceKeyClasses();
 
-        // 系统 API 层兜底
         hookNSFileManager();
         hookNSBundle();
         hookNSProcessInfo();
@@ -1019,6 +1020,6 @@ static void init() {
         hookUIApplication();
         hookNSURLSession();
 
-        BYPASS_LOG(@"FanqieBypass v1.0 init complete");
+        BYPASS_LOG(@"FanqieBypass v1.1 init complete");
     }
 }
