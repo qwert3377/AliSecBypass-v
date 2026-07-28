@@ -14,6 +14,18 @@
 #import <string.h>
 #import <errno.h>
 
+#pragma mark - Fishhook forward decl (ptrace rebind)
+
+struct _rebinding {
+    const char *name;
+    void *replacement;
+    void **replaced;
+};
+extern int rebind_symbols(struct _rebinding rebindings[], size_t rebindings_nel);
+
+static int (*orig_ptrace)(int, pid_t, void *, int) = NULL;
+
+
 #pragma mark - 日志系统
 
 static NSString *logPath() {
@@ -228,9 +240,11 @@ static int my_ptrace(int request, pid_t pid, void *addr, int data) {
         BYPASS_LOG(@"ptrace PT_DENY_ATTACH blocked");
         return 0;
     }
-    return ptrace(request, pid, addr, data);
+    if (orig_ptrace) {
+        return orig_ptrace(request, pid, addr, data);
+    }
+    return -1;
 }
-DYLD_INTERPOSE(my_ptrace, ptrace);
 
 static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     if (namelen >= 4 && name[0] == 1 && name[1] == 14) { // CTL_KERN=1, KERN_PROC=14
@@ -1207,6 +1221,10 @@ static void init() {
         hookUIDevice();
         hookUIApplication();
         hookNSURLSession();
+
+        // ptrace is not exported by iOS SDK, use fishhook instead of DYLD_INTERPOSE
+        struct _rebinding ptrace_rebind = {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace};
+        rebind_symbols(&ptrace_rebind, 1);
 
         BYPASS_LOG(@"FanqieBypass v1.3-fix init complete");
     }
