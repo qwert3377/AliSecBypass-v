@@ -1,31 +1,16 @@
-// AliSecBypass_v4_3_fishhook.mm
-// 番茄畅听/番茄小说 通用脱壳检测绕过插件 v4.3
-// fishhook (C函数) + ObjC Runtime (SDK类) 混合方案
-// 纯库文件，无 Logos，TrollStore / 非越狱注入
-// 日志: App Documents/AliBypass.log
+// AliSecBypass.mm
+// 阿里/高德/字节/百度 SDK 脱壳检测绕过插件 v2.1
+// 纯库文件，零外部依赖，适用于 TrollStore / 非越狱注入
+// 按头文件增强：AliSecX / AMap / Aliyun / Salamander / AnnieX / BDADSDK / BDAResourceKit / TempoiOS / Bind
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#include <sys/sysctl.h>
-#include <unistd.h>
-#include "fishhook.h"
+#import <stdlib.h>
+#import <string.h>
 
-// iOS SDK 没有 sys/ptrace.h，手动声明
-typedef char *caddr_t;
-#define PT_DENY_ATTACH 0
-#define P_TRACED 0x00000800
+#pragma mark - 日志系统
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern int ptrace(int request, pid_t pid, caddr_t addr, int data);
-#ifdef __cplusplus
-}
-#endif
-
-#pragma mark - Logger
-
-static NSString *bypassLogPath() {
+static NSString *logPath() {
     static NSString *path = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -42,673 +27,580 @@ static void BYPASS_LOG(NSString *fmt, ...) {
     va_end(args);
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
                       [[NSDate date] descriptionWithLocale:nil], msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:bypassLogPath()];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath()];
     if (fh) {
         [fh seekToEndOfFile];
         [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
         [fh closeFile];
     } else {
-        [line writeToFile:bypassLogPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [line writeToFile:logPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 }
 
-#pragma mark - fishhook C Function Hooks
+#pragma mark - Hook 工具
 
-static int (*orig_ptrace)(int request, pid_t pid, caddr_t addr, int data);
-static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
-    if (request == PT_DENY_ATTACH) {
-        BYPASS_LOG(@"[FISH] ptrace(PT_DENY_ATTACH) blocked");
-        return 0;
-    }
-    return orig_ptrace(request, pid, addr, data);
-}
-
-static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
-    int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
-    if (namelen >= 4 && name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
-        if (oldp) {
-            struct kinfo_proc *info = (struct kinfo_proc *)oldp;
-            if (info->kp_proc.p_flag & P_TRACED) {
-                info->kp_proc.p_flag &= ~P_TRACED;
-                BYPASS_LOG(@"[FISH] sysctl P_TRACED cleared");
-            }
-        }
-    }
-    return ret;
-}
-
-static int (*orig_access)(const char *path, int mode);
-static int my_access(const char *path, int mode) {
-    if (path) {
-        NSString *p = [NSString stringWithUTF8String:path];
-        if ([p containsString:@"Cydia"] || [p containsString:@"cydia"] ||
-            [p containsString:@"MobileSubstrate"] || [p containsString:@"substrate"] ||
-            [p containsString:@"apt"] || [p containsString:@"dpkg"] ||
-            [p containsString:@"bin/bash"] || [p containsString:@"usr/sbin/sshd"] ||
-            [p containsString:@"etc/apt"] || [p containsString:@"Library/MobileSubstrate"] ||
-            [p containsString:@"var/lib/dpkg"] || [p containsString:@"var/cache/apt"] ||
-            [p containsString:@"var/tmp/cydia"] || [p containsString:@"usr/bin/ssh"] ||
-            [p containsString:@"usr/libexec/ssh"] || [p containsString:@"Sileo"] ||
-            [p containsString:@"Zebra"] || [p containsString:@"TrollStore"] ||
-            [p containsString:@"trollstore"]) {
-            BYPASS_LOG(@"[FISH] access blocked: %s", path);
-            return -1;
-        }
-    }
-    return orig_access(path, mode);
-}
-
-#pragma mark - Hook Helpers
-
-static inline void safeHookNoOrig(Class cls, SEL sel, IMP fake) {
-    if (!cls || !sel || !fake) return;
+static inline void safeHook(Class cls, SEL sel, IMP fake, IMP *orig) {
+    if (!cls) return;
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) m = class_getClassMethod(cls, sel);
     if (!m) return;
+    if (orig) *orig = method_getImplementation(m);
     method_setImplementation(m, fake);
 }
 
-#pragma mark - Universal Fakes
+static inline void safeHookNoOrig(Class cls, SEL sel, IMP fake) {
+    safeHook(cls, sel, fake, NULL);
+}
 
-static id   fake_ret_nil(id self, SEL _cmd) { return nil; }
-static id   fake_ret_empty(id self, SEL _cmd) { return @""; }
-static id   fake_ret_safe(id self, SEL _cmd) { return @"safe"; }
-static id   fake_ret_array(id self, SEL _cmd) { return @[]; }
-static id   fake_ret_dict(id self, SEL _cmd) { return @{}; }
-static id   fake_ret_num0(id self, SEL _cmd) { return @0; }
-static BOOL fake_ret_NO(id self, SEL _cmd) { return NO; }
-static BOOL fake_ret_YES(id self, SEL _cmd) { return YES; }
-static void fake_ret_void(id self, SEL _cmd) {}
-static void fake_ret_void_id(id self, SEL _cmd, id arg) {}
-static void fake_ret_void_id_id(id self, SEL _cmd, id a, id b) {}
-static void fake_ret_void_id_id_id(id self, SEL _cmd, id a, id b, id c) {}
-static long long fake_ret_0ll(id self, SEL _cmd) { return 0; }
-static int fake_ret_0i(id self, SEL _cmd) { return 0; }
-static unsigned long long fake_ret_0ull(id self, SEL _cmd) { return 0; }
-static NSUInteger fake_ret_0ul(id self, SEL _cmd) { return 0; }
+#pragma mark - 通用返回值 Stub
 
-#pragma mark - Module A: 阿里 SDK
+static id ret_nil(id self, SEL _cmd) { return nil; }
+static id ret_empty_str(id self, SEL _cmd) { return @""; }
+static id ret_empty_arr(id self, SEL _cmd) { return @[]; }
+static id ret_empty_dict(id self, SEL _cmd) { return @{}; }
+static id ret_zero_num(id self, SEL _cmd) { return @0; }
+static id ret_safe(id self, SEL _cmd) { return @"safe"; }
+static BOOL ret_NO(id self, SEL _cmd) { return NO; }
+static long long ret_zero_ll(id self, SEL _cmd) { return 0; }
+static int ret_zero_int(id self, SEL _cmd) { return 0; }
+static double ret_zero_double(id self, SEL _cmd) { return 0.0; }
+static void ret_void(id self, SEL _cmd) {}
 
-static void hookAliSDK() {
-    const char *safeUtils[] = {
-        "AliSecXSafeUtilsMXXTIY", "AliSecXSafeUtilsZZZX",
-        "AliSecXSafeUtils", nil
-    };
-    for (int i = 0; safeUtils[i]; i++) {
-        Class cls = objc_getClass(safeUtils[i]);
-        if (!cls) continue;
-        BYPASS_LOG(@"[ALI] found %s", safeUtils[i]);
-        safeHookNoOrig(cls, @selector(descriptor), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(secStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(safeDescriptor), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(securityStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(checkStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(isJailbreak), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isJailbroken), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isDebug), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isDebuggerAttached), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isProxy), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isEmulator), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isSimulator), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(startSafeGuard), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(initSafeGuard), (IMP)fake_ret_void);
-    }
+#pragma mark - 批量 Hook 辅助
 
-    const char *reachClasses[] = {
-        "AliSecXReachabilityMXXTIY", "AliSecXReachabilityZZZX",
-        "AliSecXReachability", nil
-    };
-    for (int i = 0; reachClasses[i]; i++) {
-        Class cls = objc_getClass(reachClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(currentReachabilityStatus), (IMP)fake_ret_0ll);
-        safeHookNoOrig(cls, @selector(startNotifier), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(stopNotifier), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(localWiFiStatusForFlags:), (IMP)fake_ret_0ll);
-        safeHookNoOrig(cls, @selector(networkStatusForFlags:), (IMP)fake_ret_0ll);
-    }
-
-    const char *devInfoClasses[] = {
-        "AliSecXDeviceInfoMXXTIY", "AliSecXDeviceInfoZZZX",
-        "AliSecXDeviceInfo", "AliDeviceInfo",
-        "AliSecXPhoneInfoHolderMXXTIY", "AliSecXPhoneInfoHolderZZZX",
-        "AliSecXPhoneInfoHolder", nil
-    };
-    for (int i = 0; devInfoClasses[i]; i++) {
-        Class cls = objc_getClass(devInfoClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(getAid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(aid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getUtdid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(utdid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getAdiu), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(adiu), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(deviceId), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(uniqueDeviceIdentifier), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getUUID), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(uuid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getDeviceID), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getMacAddress), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(macAddress), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getIPAddress), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(ipAddress), (IMP)fake_ret_empty);
-    }
-
-    const char *keychainClasses[] = {
-        "AliSecXSSKeychainQuery", "AliSecXSSKeychainQueryMXXT",
-        "AliSecXSSKeychain", "AliKeychain", nil
-    };
-    for (int i = 0; keychainClasses[i]; i++) {
-        Class cls = objc_getClass(keychainClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(save:), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(deleteItem:), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(fetchAll:), (IMP)fake_ret_array);
-        safeHookNoOrig(cls, @selector(fetch:), (IMP)fake_ret_NO);
-    }
-
-    const char *storageClasses[] = {
-        "AliSecXLocalStorage", "AliSecXLocalStorageMXXT",
-        "AliSecXLocalStorageUtils", "AliLocalStorage", nil
-    };
-    for (int i = 0; storageClasses[i]; i++) {
-        Class cls = objc_getClass(storageClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(setObject:forKey:), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(objectForKey:), (IMP)fake_ret_nil);
-        safeHookNoOrig(cls, @selector(removeObjectForKey:), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(save:), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(load:), (IMP)fake_ret_nil);
-    }
-
-    const char *fileOpClasses[] = {
-        "AliSecXFileOp", "AliSecXFileOpMXXT", "AliFileOp", nil
-    };
-    for (int i = 0; fileOpClasses[i]; i++) {
-        Class cls = objc_getClass(fileOpClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(fileExistsAtPath:), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(readFile:), (IMP)fake_ret_nil);
-        safeHookNoOrig(cls, @selector(writeFile:data:), (IMP)fake_ret_YES);
-    }
-
-    const char *monitorClasses[] = {
-        "AMapMonitorSingal", "AMapMonitorNSException",
-        "AMapMonitorMachException", "AMapCrashReporter",
-        "AMapExceptionHandler", nil
-    };
-    for (int i = 0; monitorClasses[i]; i++) {
-        Class cls = objc_getClass(monitorClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(startMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(registerMonitor:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(setupMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(start), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(installNSExceptionHandle), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(uninstallNSExceptionHandle), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(installSingalHandle), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(uninstallSingalHandle), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(installMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(uninstallMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(startCrashReporter), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(enableCrashReporter), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(registerExceptionHandler), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(setupExceptionHandler), (IMP)fake_ret_void);
-    }
-
-    Class crashMgr = objc_getClass("AMapCrashManager");
-    if (crashMgr) {
-        safeHookNoOrig(crashMgr, @selector(installMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(crashMgr, @selector(uninstallMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(crashMgr, @selector(registerWithComponent:withConfig:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(crashMgr, @selector(handleException:crashIndex:backTrace:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(crashMgr, @selector(checkConfigs), (IMP)fake_ret_void);
-    }
-
-    Class crashCfg = objc_getClass("AMapCrashConfig");
-    if (crashCfg) {
-        safeHookNoOrig(crashCfg, @selector(isFilter), (IMP)fake_ret_YES);
-    }
-
-    Class analytics = objc_getClass("AMapAnalyticsManager");
-    if (analytics) {
-        BYPASS_LOG(@"[ALI] found AMapAnalyticsManager");
-        safeHookNoOrig(analytics, @selector(sendLog:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(analytics, @selector(sendEvent:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(analytics, @selector(sendReport:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(analytics, @selector(trackEvent:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(analytics, @selector(uploadLog), (IMP)fake_ret_void);
-        safeHookNoOrig(analytics, @selector(flush), (IMP)fake_ret_void);
-        safeHookNoOrig(analytics, @selector(logEvent:params:component:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(analytics, @selector(logError:errorInfo:component:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(analytics, @selector(logURLError:forURL:component:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(analytics, @selector(logRESTError:forURL:component:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(analytics, @selector(logCrash:crashInfo:component:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(analytics, @selector(uploadLogWithType:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(analytics, @selector(uploadLogWithType:component:complete:), (IMP)fake_ret_void_id_id_id);
-    }
-
-    Class netFlow = objc_getClass("AMapNetFlowManager");
-    if (netFlow) {
-        BYPASS_LOG(@"[ALI] found AMapNetFlowManager");
-        safeHookNoOrig(netFlow, @selector(isBlock:), (IMP)fake_ret_NO);
-        safeHookNoOrig(netFlow, @selector(isBlocked), (IMP)fake_ret_NO);
-        safeHookNoOrig(netFlow, @selector(checkBlock), (IMP)fake_ret_NO);
-        safeHookNoOrig(netFlow, @selector(checkNetworkBlock), (IMP)fake_ret_NO);
-        safeHookNoOrig(netFlow, @selector(checkResponse:withRequest:responseData:), (IMP)fake_ret_void_id_id_id);
-    }
-
-    Class netFlowBlock = objc_getClass("AMapNetFlowBlockStrategy");
-    if (netFlowBlock) {
-        safeHookNoOrig(netFlowBlock, @selector(isHitStrateg), (IMP)fake_ret_NO);
-        safeHookNoOrig(netFlowBlock, @selector(isVaild), (IMP)fake_ret_NO);
-    }
-
-    Class errCodeStrategy = objc_getClass("AMapErrorCodeStrategy");
-    if (errCodeStrategy) {
-        safeHookNoOrig(errCodeStrategy, @selector(isHitStrateg), (IMP)fake_ret_NO);
-        safeHookNoOrig(errCodeStrategy, @selector(isVaild), (IMP)fake_ret_NO);
-    }
-
-    Class adiuMgr = objc_getClass("AMapADIUManager");
-    if (adiuMgr) {
-        BYPASS_LOG(@"[ALI] found AMapADIUManager");
-        safeHookNoOrig(adiuMgr, @selector(ADIU), (IMP)fake_ret_empty);
-        safeHookNoOrig(adiuMgr, @selector(saveWithADIU:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(adiuMgr, @selector(processWithResponseData:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(adiuMgr, @selector(requestADIU), (IMP)fake_ret_void);
-    }
-
-    Class identityMgr = objc_getClass("AliyunIdentityManager");
-    if (identityMgr) {
-        BYPASS_LOG(@"[ALI] found AliyunIdentityManager");
-        safeHookNoOrig(identityMgr, @selector(verifyWith:extParams:onCompletion:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(identityMgr, @selector(verifyTechWith:extParams:onCompletion:), (IMP)fake_ret_void_id_id_id);
-        safeHookNoOrig(identityMgr, @selector(sendlog:withSeedID:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(identityMgr, @selector(getMetaInfo), (IMP)fake_ret_empty);
-        safeHookNoOrig(identityMgr, @selector(quit:onCompletion:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(identityMgr, @selector(modelFilePathContent), (IMP)fake_ret_empty);
-        safeHookNoOrig(identityMgr, @selector(uploadLogChooice), (IMP)fake_ret_NO);
-        safeHookNoOrig(identityMgr, @selector(getlogArray), (IMP)fake_ret_array);
-    }
-
-    Class faceAuth = objc_getClass("AliyunFaceAuthRPC");
-    if (faceAuth) {
-        safeHookNoOrig(faceAuth, @selector(zimInit:completionBlock:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(faceAuth, @selector(zimValidate:completionBlock:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(faceAuth, @selector(zimNFCValidate:completionBlock:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(faceAuth, @selector(zimOCRIdentify:completionBlock:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(faceAuth, @selector(uploadFileWthParams:completionBlock:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(faceAuth, @selector(zimFileUpload:completionBlock:), (IMP)fake_ret_void_id_id);
-    }
-
-    Class encryptor = objc_getClass("AliyunEncryptorforTech");
-    if (encryptor) {
-        safeHookNoOrig(encryptor, @selector(encrypt:), (IMP)fake_ret_empty);
-        safeHookNoOrig(encryptor, @selector(encryptData:), (IMP)fake_ret_nil);
-    }
-
-    Class stats = objc_getClass("AMapStatistics");
-    if (stats) {
-        BYPASS_LOG(@"[ALI] found AMapStatistics");
-        SEL idSelectors[] = {
-            @selector(diu), @selector(adiu), @selector(imac), @selector(mac),
-            @selector(tid), @selector(sim), @selector(tel), @selector(pkg),
-            @selector(manufacture), @selector(model), @selector(device),
-            @selector(ant), @selector(nt), @selector(mnc), @selector(np),
-            @selector(lon), @selector(lat), @selector(wifis),
-            @selector(wifi), @selector(wifiname), @selector(bts),
-            @selector(bttype), @selector(gps), @selector(resolution),
-            @selector(glrender), @selector(ram), @selector(storage),
-            @selector(arch), @selector(platform), @selector(appname),
-            @selector(appversion), @selector(bundleid), @selector(sysversion),
-            (SEL)0
-        };
-        for (int i = 0; idSelectors[i] != (SEL)0; i++) {
-            safeHookNoOrig(stats, idSelectors[i], (IMP)fake_ret_empty);
+static void hookSelectorsOnClass(const char *clsName, const char **sels, IMP imp) {
+    Class cls = objc_getClass(clsName);
+    if (!cls) return;
+    for (int i = 0; sels[i] != nil; i++) {
+        SEL sel = sel_getUid(sels[i]);
+        if (class_getInstanceMethod(cls, sel)) {
+            safeHookNoOrig(cls, sel, imp);
         }
-        safeHookNoOrig(stats, @selector(keyAuthorized), (IMP)fake_ret_YES);
-    }
-
-    Class sysInfo = objc_getClass("AMapSystemInfo");
-    if (sysInfo) {
-        safeHookNoOrig(sysInfo, @selector(extractMemoryTotalSize), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(extractMemoryUsedSize), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(extractMemoryFreeSize), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(extractDeviceVersion), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(extractAppUUID), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(extractCPUArch), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(extractDeviceAppHash), (IMP)fake_ret_empty);
-        safeHookNoOrig(sysInfo, @selector(sysctlInt32ForName:), (IMP)fake_ret_0i);
-        safeHookNoOrig(sysInfo, @selector(sysctlUint64ForName:), (IMP)fake_ret_0ull);
-    }
-
-    Class macFinder = objc_getClass("AMapMacAddressFinder");
-    if (macFinder) {
-        safeHookNoOrig(macFinder, @selector(AMF_macAddress), (IMP)fake_ret_empty);
-        safeHookNoOrig(macFinder, @selector(AMF_IPAddress), (IMP)fake_ret_empty);
-        safeHookNoOrig(macFinder, @selector(_getMacAddressWithIP:), (IMP)fake_ret_empty);
-    }
-
-    Class services = objc_getClass("AMapServices");
-    if (services) {
-        safeHookNoOrig(services, @selector(validatingAPIKey), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(sendInitInfoWithComponent:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(services, @selector(registerWithComponent:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(services, @selector(registerWithComponent:authKeys:params:handler:), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(sendStatisticsWithComponent:handler:), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(showKeyAuthorizationInfo:responseHeader:forComponent:), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(setApiKey:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(services, @selector(setCrashReportEnabled:), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(setUpAnalytics), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(initAnalytics), (IMP)fake_ret_void);
-        safeHookNoOrig(services, @selector(uploadAnalyticsInfo), (IMP)fake_ret_void);
-    }
-
-    const char *reformerClasses[] = {
-        "AMapAuthRequestReformer", "AMapAOSRequestReformer",
-        "AMapConcreteRequestReformer", "AMapRESTRequestReformer",
-        "AMapPostDataRequestReformer", "AMapDownloadRequestReformer",
-        "AMapADIURequestReformer", nil
-    };
-    for (int i = 0; reformerClasses[i]; i++) {
-        Class cls = objc_getClass(reformerClasses[i]);
-        if (!cls) continue;
-        safeHookNoOrig(cls, @selector(reformParameters:result:), (IMP)fake_ret_void_id_id);
-        safeHookNoOrig(cls, @selector(signvalue), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(signvalueWithData:), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(parameters), (IMP)fake_ret_nil);
-        safeHookNoOrig(cls, @selector(postData), (IMP)fake_ret_nil);
-        safeHookNoOrig(cls, @selector(baseURL), (IMP)fake_ret_nil);
-        safeHookNoOrig(cls, @selector(v6BaseURL), (IMP)fake_ret_nil);
-    }
-
-    Class rsa = objc_getClass("AMapFoundationRSA");
-    if (rsa) {
-        safeHookNoOrig(rsa, @selector(encryptWithData:), (IMP)fake_ret_nil);
-        safeHookNoOrig(rsa, @selector(encryptWithString:), (IMP)fake_ret_empty);
-        safeHookNoOrig(rsa, @selector(encryptToString:), (IMP)fake_ret_empty);
-        safeHookNoOrig(rsa, @selector(verifyBytesSHA256withRSA:signature:), (IMP)fake_ret_YES);
-    }
-
-    Class aes = objc_getClass("AMapFoundationAES");
-    if (aes) {
-        safeHookNoOrig(aes, @selector(encryptData:key:), (IMP)fake_ret_nil);
-        safeHookNoOrig(aes, @selector(decryptData:key:), (IMP)fake_ret_nil);
     }
 }
 
-#pragma mark - Module B: 百度 SDK
+// 自动扫描类的方法列表并 hook（仅处理 @objc 暴露的方法）
+// 跳过 init/dealloc/struct 返回等高风险方法
+static void autoHookClassMethodsSafe(const char *clsName) {
+    Class cls = objc_getClass(clsName);
+    if (!cls) return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    if (!methods) return;
 
-static void hookBaiduSDK() {
-    const char *baiduSecurityClasses[] = {
-        "BaiduSecurityManager", "BDProtector", "BDSecurity", "BaiduSafe",
-        "BaiduAntiCheat", "BDASecurityManager", "BDASafeUtils",
-        "BDAEnvironment", "BDAEnvChecker", "BDADeviceHelper",
-        "BDASecurity", "BDDeviceInfo", "BDDeviceManager",
-        "BDPanFileDownloadEngine", "BDPanSecurityManager",
-        "BaiduSecuritySDK", "BaiduSecurityUtils", nil
-    };
-    for (int i = 0; baiduSecurityClasses[i]; i++) {
-        Class cls = objc_getClass(baiduSecurityClasses[i]);
-        if (!cls) continue;
-        BYPASS_LOG(@"[BD] found %s", baiduSecurityClasses[i]);
-        safeHookNoOrig(cls, @selector(isJailbreak), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isJailbroken), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isDebug), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isDebuggerAttached), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isProxy), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isVPN), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isEmulator), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isSimulator), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isVirtualDevice), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(checkSignature), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(verifySignature), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(checkEnvironment), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(verifyEnvironment), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(checkIntegrity), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(checkStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(securityStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(getDeviceID), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(deviceId), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getUUID), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(uuid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getUtdid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(utdid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getAid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(aid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(startSafeGuard), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(initSafeGuard), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(startMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(setupMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(sendLog:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(sendReport:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(uploadLog), (IMP)fake_ret_void);
+    int hooked = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        Method m = methods[i];
+        SEL sel = method_getName(m);
+        const char *selName = sel_getName(sel);
+
+        // 跳过生命周期和初始化方法，避免破坏对象状态
+        if (strcmp(selName, "init") == 0 ||
+            strcmp(selName, "dealloc") == 0 ||
+            strcmp(selName, ".cxx_destruct") == 0 ||
+            strncmp(selName, "initWith", 8) == 0 ||
+            strcmp(selName, "alloc") == 0 ||
+            strcmp(selName, "new") == 0 ||
+            strcmp(selName, "copy") == 0 ||
+            strcmp(selName, "copyWithZone:") == 0 ||
+            strcmp(selName, "mutableCopyWithZone:") == 0) {
+            continue;
+        }
+
+        const char *type = method_getTypeEncoding(m);
+        if (!type || strlen(type) < 1) continue;
+
+        char retType = type[0];
+        IMP stub = NULL;
+
+        if (retType == 'v') {
+            stub = (IMP)ret_void;
+        } else if (retType == 'B') {
+            stub = (IMP)ret_NO;
+        } else if (retType == 'q' || retType == 'l' || retType == 'i' || retType == 'Q' || retType == 'L' || retType == 'I' || retType == 's' || retType == 'S' || retType == 'c' || retType == 'C') {
+            stub = (IMP)ret_zero_ll;
+        } else if (retType == 'd' || retType == 'f') {
+            stub = (IMP)ret_zero_double;
+        } else if (retType == '@' || retType == '#') {
+            if (strstr(selName, "Array") || strstr(selName, "List") || strstr(selName, "array")) {
+                stub = (IMP)ret_empty_arr;
+            } else if (strstr(selName, "Dict") || strstr(selName, "Map") || strstr(selName, "dictionary")) {
+                stub = (IMP)ret_empty_dict;
+            } else if (strstr(selName, "String") || strstr(selName, "str") || strstr(selName, "Name") || strstr(selName, "Text") || strstr(selName, "URL")) {
+                stub = (IMP)ret_empty_str;
+            } else {
+                stub = (IMP)ret_nil;
+            }
+        } else if (retType == '*' || retType == ':' || retType == '^') {
+            stub = (IMP)ret_zero_ll;
+        } else {
+            // struct / union / complex，跳过避免崩溃
+            continue;
+        }
+
+        if (stub) {
+            safeHookNoOrig(cls, sel, stub);
+            hooked++;
+        }
     }
-
-    Class bdKeychain = objc_getClass("BDKeychainManager");
-    if (bdKeychain) {
-        safeHookNoOrig(bdKeychain, @selector(setObject:forKey:), (IMP)fake_ret_YES);
-        safeHookNoOrig(bdKeychain, @selector(objectForKey:), (IMP)fake_ret_nil);
-        safeHookNoOrig(bdKeychain, @selector(removeObjectForKey:), (IMP)fake_ret_YES);
-    }
-
-    Class bdStorage = objc_getClass("BDLocalStorage");
-    if (bdStorage) {
-        safeHookNoOrig(bdStorage, @selector(setObject:forKey:), (IMP)fake_ret_YES);
-        safeHookNoOrig(bdStorage, @selector(objectForKey:), (IMP)fake_ret_nil);
-        safeHookNoOrig(bdStorage, @selector(removeObjectForKey:), (IMP)fake_ret_YES);
-    }
-
-    Class bdFileOp = objc_getClass("BDFileOp");
-    if (bdFileOp) {
-        safeHookNoOrig(bdFileOp, @selector(fileExistsAtPath:), (IMP)fake_ret_NO);
-        safeHookNoOrig(bdFileOp, @selector(readFile:), (IMP)fake_ret_nil);
-        safeHookNoOrig(bdFileOp, @selector(writeFile:data:), (IMP)fake_ret_YES);
+    free(methods);
+    if (hooked > 0) {
+        BYPASS_LOG(@"autoHook %s: %d methods", clsName, hooked);
     }
 }
 
-#pragma mark - Module C: 字节 SDK
+#pragma mark - 阿里安全 Utils
 
-static void hookByteDanceSDK() {
-    const char *ttMonitorClasses[] = {
-        "AnnieXMonitorModule",
-        "AnnieXMonitorAbilityDelegate",
-        "AnnieTraceEventImpl",
-        "AnnieLiveBizMonitor",
-        "AnnieLiveReportAggregateALogMethodImpl",
-        "AnnieSendLogV3Impl",
+static void hookAliSecXSafeUtilsVariants() {
+    const char *variants[] = {
+        "AliSecXSafeUtilsMXXTIY",
+        "AliSecXSafeUtilsZZZX",
         nil
     };
-    for (int i = 0; ttMonitorClasses[i]; i++) {
-        Class cls = objc_getClass(ttMonitorClasses[i]);
-        if (!cls) continue;
-        BYPASS_LOG(@"[TT] found %s", ttMonitorClasses[i]);
-        safeHookNoOrig(cls, @selector(sendLog:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(sendEvent:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(sendReport:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(trackEvent:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(upload), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(flush), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(perfMetric:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(result:), (IMP)fake_ret_void_id);
-        safeHookNoOrig(cls, @selector(traceBeginSectionWithName:debugInfo:), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(traceEndSectionWithName:), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(traceInstantWithName:), (IMP)fake_ret_void);
-    }
-
-    Class geckoMgr = objc_getClass("BDADSDKGeckoManager");
-    if (geckoMgr) {
-        safeHookNoOrig(geckoMgr, @selector(registerAndPreloadCommerceGecko), (IMP)fake_ret_void);
-        safeHookNoOrig(geckoMgr, @selector(gurdKitDidSetup), (IMP)fake_ret_void);
-        safeHookNoOrig(geckoMgr, @selector(updateGurdPollWith:), (IMP)fake_ret_void_id);
-    }
-
-    Class bdAdStrategy = objc_getClass("BDAResourceKit_iOSAdStrategyTrackUtil");
-    if (bdAdStrategy) {
-        safeHookNoOrig(bdAdStrategy, @selector(track:), (IMP)fake_ret_void_id);
-    }
-
-    Class heimdallr = objc_getClass("SalamanderBDFoundationSLHeimdallr");
-    if (heimdallr) {
-        safeHookNoOrig(heimdallr, @selector(start), (IMP)fake_ret_void);
-        safeHookNoOrig(heimdallr, @selector(stop), (IMP)fake_ret_void);
-    }
-
-    const char *ttSecurityClasses[] = {
-        "TTSecurity", "TTAppSecurity", "TTDeviceHelper",
-        "TTEnvChecker", "TTAntiSpam", "TTSecurityManager",
-        "TTSecurityUtils", "TTDeviceInfo", "TTDeviceManager",
-        "TTJailbreakDetector", "TTDebugDetector", "TTProxyDetector",
-        "TTEnvironment", "TTEnvManager", "TTAppInfo", nil
+    const char *strSels[] = {
+        "descriptor", "secStatus", "safeDescriptor", "securityStatus",
+        "checkStatus", "deviceFingerprint", "riskToken", "envInfo",
+        nil
     };
-    for (int i = 0; ttSecurityClasses[i]; i++) {
-        Class cls = objc_getClass(ttSecurityClasses[i]);
-        if (!cls) continue;
-        BYPASS_LOG(@"[TT] found %s", ttSecurityClasses[i]);
-        safeHookNoOrig(cls, @selector(isJailbreak), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isJailbroken), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isDebug), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isDebuggerAttached), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isProxy), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isVPN), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isEmulator), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isSimulator), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(isVirtualDevice), (IMP)fake_ret_NO);
-        safeHookNoOrig(cls, @selector(checkEnvironment), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(verifyEnvironment), (IMP)fake_ret_YES);
-        safeHookNoOrig(cls, @selector(checkStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(securityStatus), (IMP)fake_ret_safe);
-        safeHookNoOrig(cls, @selector(getDeviceID), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(deviceId), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getUUID), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(uuid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getUtdid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(utdid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(getAid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(aid), (IMP)fake_ret_empty);
-        safeHookNoOrig(cls, @selector(startSafeGuard), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(initSafeGuard), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(startMonitor), (IMP)fake_ret_void);
-        safeHookNoOrig(cls, @selector(setupMonitor), (IMP)fake_ret_void);
-    }
-
-    Class ttKeychain = objc_getClass("TTKeychainManager");
-    if (ttKeychain) {
-        safeHookNoOrig(ttKeychain, @selector(setObject:forKey:), (IMP)fake_ret_YES);
-        safeHookNoOrig(ttKeychain, @selector(objectForKey:), (IMP)fake_ret_nil);
-        safeHookNoOrig(ttKeychain, @selector(removeObjectForKey:), (IMP)fake_ret_YES);
-    }
-
-    Class ttStorage = objc_getClass("TTLocalStorage");
-    if (ttStorage) {
-        safeHookNoOrig(ttStorage, @selector(setObject:forKey:), (IMP)fake_ret_YES);
-        safeHookNoOrig(ttStorage, @selector(objectForKey:), (IMP)fake_ret_nil);
-        safeHookNoOrig(ttStorage, @selector(removeObjectForKey:), (IMP)fake_ret_YES);
-    }
-
-    Class ttFileOp = objc_getClass("TTFileOp");
-    if (ttFileOp) {
-        safeHookNoOrig(ttFileOp, @selector(fileExistsAtPath:), (IMP)fake_ret_NO);
-        safeHookNoOrig(ttFileOp, @selector(readFile:), (IMP)fake_ret_nil);
-        safeHookNoOrig(ttFileOp, @selector(writeFile:data:), (IMP)fake_ret_YES);
+    const char *boolSels[] = {
+        "isJailbreak", "isJailbroken", "isDebug", "isDebuggerAttached",
+        "isProxy", "isEmulator", "isVirtualMachine", nil
+    };
+    for (int i = 0; variants[i] != nil; i++) {
+        hookSelectorsOnClass(variants[i], strSels, (IMP)ret_safe);
+        hookSelectorsOnClass(variants[i], boolSels, (IMP)ret_NO);
     }
 }
 
-#pragma mark - Module D: 系统类检测绕过
+#pragma mark - 阿里 Reachability
 
-static void hookSystemClasses() {
-    Class fileMgr = objc_getClass("NSFileManager");
-    if (fileMgr) {
-        Method m = class_getInstanceMethod(fileMgr, @selector(fileExistsAtPath:));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            IMP fake = imp_implementationWithBlock(^BOOL(id self, NSString *path) {
-                if ([path containsString:@"Cydia"] ||
-                    [path containsString:@"cydia"] ||
-                    [path containsString:@"MobileSubstrate"] ||
-                    [path containsString:@"substrate"] ||
-                    [path containsString:@"apt"] ||
-                    [path containsString:@"dpkg"] ||
-                    [path containsString:@"bin/bash"] ||
-                    [path containsString:@"usr/sbin/sshd"] ||
-                    [path containsString:@"etc/apt"] ||
-                    [path containsString:@"Library/MobileSubstrate"] ||
-                    [path containsString:@"var/lib/dpkg"] ||
-                    [path containsString:@"var/cache/apt"] ||
-                    [path containsString:@"var/tmp/cydia"] ||
-                    [path containsString:@"usr/bin/ssh"] ||
-                    [path containsString:@"usr/libexec/ssh"] ||
-                    [path containsString:@"Sileo"] ||
-                    [path containsString:@"Zebra"] ||
-                    [path containsString:@"TrollStore"] ||
-                    [path containsString:@"trollstore"]) {
-                    BYPASS_LOG(@"[FILE] blocked check: %@", path);
-                    return NO;
-                }
-                return ((BOOL (*)(id, SEL, NSString *))orig)(self, @selector(fileExistsAtPath:), path);
-            });
-            method_setImplementation(m, fake);
-            BYPASS_LOG(@"[SYS] hooked NSFileManager fileExistsAtPath:");
+static void hookAliSecXReachability() {
+    const char *clses[] = { "AliSecXReachabilityMXXTIY", "AliSecXReachabilityZZZX", nil };
+    for (int i = 0; clses[i] != nil; i++) {
+        Class cls = objc_getClass(clses[i]);
+        if (!cls) continue;
+        safeHookNoOrig(cls, sel_getUid("startNotifier"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("stopNotifier"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("currentReachabilityStatus"), (IMP)ret_zero_ll);
+        safeHookNoOrig(cls, sel_getUid("localWiFiStatusForFlags:"), (IMP)ret_zero_ll);
+        safeHookNoOrig(cls, sel_getUid("networkStatusForFlags:"), (IMP)ret_zero_ll);
+    }
+}
+
+#pragma mark - 阿里 Keychain & Storage
+
+static void hookAliSecXKeychain() {
+    const char *clses[] = {
+        "AliSecXSSKeychain", "AliSecXSSKeychainMXXT",
+        "AliSecXSSKeychainQuery", "AliSecXSSKeychainQueryMXXT",
+        nil
+    };
+    for (int i = 0; clses[i] != nil; i++) {
+        Class cls = objc_getClass(clses[i]);
+        if (!cls) continue;
+        safeHookNoOrig(cls, sel_getUid("save:"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("deleteItem:"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("fetchAll:"), (IMP)ret_empty_arr);
+        safeHookNoOrig(cls, sel_getUid("fetch:"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("setPassword:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("password"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("query"), (IMP)ret_empty_dict);
+    }
+}
+
+static void hookAliSecXCryptoAndStorage() {
+    const char *clses[] = {
+        "AliSecXCryptoGTMBase64",
+        "AliSecXFileOp", "AliSecXFileOpMXXT",
+        "AliSecXLocalStorage", "AliSecXLocalStorageMXXT", "AliSecXLocalStorageUtils",
+        nil
+    };
+    for (int i = 0; clses[i] != nil; i++) {
+        autoHookClassMethodsSafe(clses[i]);
+    }
+}
+
+#pragma mark - 阿里云身份认证
+
+static void (*orig_verifyWith)(id, SEL, id, id, id);
+static void hook_verifyWith(id self, SEL _cmd, id arg1, id arg2, id completion) {
+    BYPASS_LOG(@"AliyunIdentityManager.verifyWith blocked");
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{@"code": @0, @"msg": @"success", @"certifyId": @""});
+    }
+}
+
+static void (*orig_verifyTechWith)(id, SEL, id, id, id);
+static void hook_verifyTechWith(id self, SEL _cmd, id arg1, id arg2, id completion) {
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{@"code": @0, @"msg": @"success"});
+    }
+}
+
+static void (*orig_quitAliyun)(id, SEL, id, id);
+static void hook_quitAliyun(id self, SEL _cmd, id arg1, id completion) {
+    if (completion) { void (^cb)(id) = completion; cb(nil); }
+}
+
+static void hookAliyunIdentity() {
+    Class cls = objc_getClass("AliyunIdentityManager");
+    if (!cls) return;
+    BYPASS_LOG(@"hooking AliyunIdentityManager");
+    safeHook(cls, sel_getUid("verifyWith:extParams:onCompletion:"), (IMP)hook_verifyWith, (IMP *)&orig_verifyWith);
+    safeHook(cls, sel_getUid("verifyTechWith:extParams:onCompletion:"), (IMP)hook_verifyTechWith, (IMP *)&orig_verifyTechWith);
+    safeHook(cls, sel_getUid("quit:onCompletion:"), (IMP)hook_quitAliyun, (IMP *)&orig_quitAliyun);
+    safeHookNoOrig(cls, sel_getUid("getMetaInfo"), (IMP)ret_empty_str);
+    safeHookNoOrig(cls, sel_getUid("sendlog:withSeedID:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("modelFilePathContent"), (IMP)ret_empty_str);
+    safeHookNoOrig(cls, sel_getUid("uploadLogChooice"), (IMP)ret_NO);
+    safeHookNoOrig(cls, sel_getUid("colorParamFail:"), (IMP)ret_NO);
+    safeHookNoOrig(cls, sel_getUid("checkMinimumVersion"), (IMP)ret_empty_str);
+    safeHookNoOrig(cls, sel_getUid("appResignActive:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("onVerifyResponse:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("onFinalize:andExtinfo:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("getlogArray"), (IMP)ret_empty_arr);
+    safeHookNoOrig(cls, sel_getUid("finalPathForFile:"), (IMP)ret_empty_str);
+    safeHookNoOrig(cls, sel_getUid("setDataProtocolVersion:"), (IMP)ret_void);
+}
+
+#pragma mark - 阿里云人脸认证 RPC
+
+static void (*orig_zimInit)(id, SEL, id, id);
+static void hook_zimInit(id self, SEL _cmd, id params, id completion) {
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{@"code": @0, @"msg": @"success"});
+    }
+}
+
+static void (*orig_zimValidate)(id, SEL, id, id);
+static void hook_zimValidate(id self, SEL _cmd, id params, id completion) {
+    if (completion) {
+        void (^cb)(id) = completion;
+        cb(@{@"code": @0, @"msg": @"success"});
+    }
+}
+
+static void hookAliyunFaceAuth() {
+    Class cls = objc_getClass("AliyunFaceAuthRPC");
+    if (!cls) return;
+    safeHook(cls, sel_getUid("zimInit:completionBlock:"), (IMP)hook_zimInit, (IMP *)&orig_zimInit);
+    safeHook(cls, sel_getUid("zimValidate:completionBlock:"), (IMP)hook_zimValidate, (IMP *)&orig_zimValidate);
+    safeHookNoOrig(cls, sel_getUid("zimNFCValidate:completionBlock:"), (IMP)hook_zimInit);
+    safeHookNoOrig(cls, sel_getUid("zimOCRIdentify:completionBlock:"), (IMP)hook_zimInit);
+    safeHookNoOrig(cls, sel_getUid("uploadFileWthParams:completionBlock:"), (IMP)hook_zimInit);
+    safeHookNoOrig(cls, sel_getUid("zimFileUpload:completionBlock:"), (IMP)hook_zimInit);
+    safeHookNoOrig(cls, sel_getUid("dictionaryIsContainKey:key:"), (IMP)ret_NO);
+    safeHookNoOrig(cls, sel_getUid("getValueFromeDict:forKey:defaultStr:"), (IMP)ret_empty_str);
+
+    Class facade = objc_getClass("AliyunFaceAuthFacade");
+    if (facade) autoHookClassMethodsSafe("AliyunFaceAuthFacade");
+}
+
+#pragma mark - 设备标识符 Hook
+
+static void hookDeviceIdentifiers() {
+    const char *classes[] = {
+        "AidManager",
+        "AMapADIUManager",
+        "AMapDeviceInfo",
+        "UTDevice",
+        "UTDID",
+        "OpenUDID",
+        "AliSecuritySDK",
+        "AliSecXDeviceInfoMXXTIY",
+        "AliSecXDeviceInfoZZZX",
+        "AliSecXPhoneInfoHolderMXXTIY",
+        "AliSecXPhoneInfoHolderZZZX",
+        nil
+    };
+    const char *selectors[] = {
+        "getAid", "aid",
+        "getUtdid", "utdid",
+        "getAdiu", "adiu",
+        "openUDIDValue",
+        "deviceId", "uniqueDeviceIdentifier",
+        "getUUID", "uuid",
+        "ADIU",
+        nil
+    };
+    for (int i = 0; classes[i] != nil; i++) {
+        Class cls = objc_getClass(classes[i]);
+        if (!cls) continue;
+        for (int j = 0; selectors[j] != nil; j++) {
+            SEL sel = sel_getUid(selectors[j]);
+            if (class_getInstanceMethod(cls, sel)) {
+                safeHookNoOrig(cls, sel, (IMP)ret_empty_str);
+            }
         }
     }
+}
 
-    Class procInfo = objc_getClass("NSProcessInfo");
-    if (procInfo) {
-        Method m = class_getInstanceMethod(procInfo, @selector(environment));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            IMP fake = imp_implementationWithBlock(^NSDictionary *(id self) {
-                NSMutableDictionary *env = [((NSDictionary * (*)(id, SEL))orig)(self, @selector(environment)) mutableCopy];
-                if (env[@"DYLD_INSERT_LIBRARIES"]) {
-                    [env removeObjectForKey:@"DYLD_INSERT_LIBRARIES"];
-                    BYPASS_LOG(@"[ENV] removed DYLD_INSERT_LIBRARIES");
-                }
-                return env;
-            });
-            method_setImplementation(m, fake);
-            BYPASS_LOG(@"[SYS] hooked NSProcessInfo environment");
-        }
+#pragma mark - 高德监控与崩溃
+
+static void hookMonitors() {
+    Class cls;
+
+    cls = objc_getClass("AMapMonitorSingal");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("startMonitor"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("registerMonitor:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("setupMonitor"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("start"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("installSingalHandle"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("uninstallSingalHandle"), (IMP)ret_void);
     }
 
-    Class bundle = objc_getClass("NSBundle");
-    if (bundle) {
-        Method m = class_getInstanceMethod(bundle, @selector(bundleIdentifier));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            IMP fake = imp_implementationWithBlock(^NSString *(id self) {
-                NSString *bid = ((NSString * (*)(id, SEL))orig)(self, @selector(bundleIdentifier));
-                if ([bid containsString:@"trollstore"] || [bid containsString:@"TrollStore"]) {
-                    BYPASS_LOG(@"[BUNDLE] masked trollstore bundle ID");
-                    return @"com.apple.mobilesafari";
-                }
-                return bid;
-            });
-            method_setImplementation(m, fake);
-            BYPASS_LOG(@"[SYS] hooked NSBundle bundleIdentifier");
-        }
+    cls = objc_getClass("AMapMonitorNSException");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("installNSExceptionHandle"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("uninstallNSExceptionHandle"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("handleUncaughtException:"), (IMP)ret_void);
     }
 
-    Class app = objc_getClass("UIApplication");
-    if (app) {
-        Method m = class_getInstanceMethod(app, @selector(canOpenURL:));
-        if (m) {
-            IMP orig = method_getImplementation(m);
-            IMP fake = imp_implementationWithBlock(^BOOL(id self, NSURL *url) {
-                NSString *scheme = url.scheme.lowercaseString;
-                if ([scheme isEqualToString:@"cydia"] ||
-                    [scheme isEqualToString:@"sileo"] ||
-                    [scheme isEqualToString:@"zbra"] ||
-                    [scheme containsString:@"trollstore"]) {
-                    BYPASS_LOG(@"[URL] blocked scheme: %@", scheme);
-                    return NO;
-                }
-                return ((BOOL (*)(id, SEL, NSURL *))orig)(self, @selector(canOpenURL:), url);
-            });
-            method_setImplementation(m, fake);
-            BYPASS_LOG(@"[SYS] hooked UIApplication canOpenURL:");
-        }
+    cls = objc_getClass("AMapMonitorMachException");
+    if (cls) autoHookClassMethodsSafe("AMapMonitorMachException");
+
+    cls = objc_getClass("AMapCrashReporter");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("startCrashReporter"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("enableCrashReporter"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapExceptionHandler");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("registerExceptionHandler"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("setupExceptionHandler"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapCrashManager");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("installMonitor"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("uninstallMonitor"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("isInTracedModel"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("registerWithComponent:withConfig:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("checkConfigs"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("componentCrashForThread:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("firstAppCmd"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("firstSymbolCmd"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("parserCrashReason:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("parserCrashThread:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("matchComponent:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("handleExceptionType:code:subcode:signum:crashIndex:crashThreadTrace:backTrace:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("parserCrashException:thread:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("parserCrashType:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("handleException:crashIndex:backTrace:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("fillSystemInfo:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("fillComponentInfo:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("exceptionType:signum:"), (IMP)ret_empty_str);
+    }
+}
+
+#pragma mark - 高德分析与日志
+
+static void (*orig_sendLog)(id, SEL, id);
+static void hook_sendLog(id self, SEL _cmd, id log) {}
+
+static void hookAnalytics() {
+    Class cls;
+
+    cls = objc_getClass("AMapAnalyticsManager");
+    if (cls) {
+        safeHook(cls, sel_getUid("sendLog:"), (IMP)hook_sendLog, (IMP *)&orig_sendLog);
+        safeHookNoOrig(cls, sel_getUid("sendEvent:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("sendReport:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("trackEvent:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("uploadLog"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("flush"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapNetworkManager");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("sendRequest:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("sendReport:"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapLogUploader");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("upload"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("startUpload"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapNetFlowManager");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("isBlock"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("isBlocked"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("checkBlock"), (IMP)ret_NO);
+        safeHookNoOrig(cls, sel_getUid("checkNetworkBlock"), (IMP)ret_NO);
+    }
+
+    cls = objc_getClass("AMapLog");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("_log:message:level:component:file:function:line:session:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("_queueLogMessage:asynchronously:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("_logMessage:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("logEvent:params:component:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("logError:errorInfo:component:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("logCrash:crashInfo:component:"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapLogManager");
+    if (cls) autoHookClassMethodsSafe("AMapLogManager");
+}
+
+#pragma mark - 高德系统信息与统计
+
+static void hookAMapSystemInfoAndStats() {
+    Class cls = objc_getClass("AMapSystemInfo");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("extractMemoryTotalSize"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("extractMemoryUsedSize"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("extractMemoryFreeSize"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("extractDeviceVersion"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("extractAppUUID"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("extractCPUArch"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("extractDeviceAppHash"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("enterBackground:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("becomeActive:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("resignActive:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("updateLastSwitchActiveTime:"), (IMP)ret_void);
+    }
+
+    cls = objc_getClass("AMapStatistics");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("xinfo"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("xinfo_21"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("platinfoWithProduct:version:"), (IMP)ret_empty_dict);
+        safeHookNoOrig(cls, sel_getUid("infoStringWithKeys:"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("infoDictionaryWithKeys:"), (IMP)ret_empty_dict);
+        safeHookNoOrig(cls, sel_getUid("setupCoordinateWithLat:lon:"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("fetchSSIDInfo"), (IMP)ret_empty_str);
+        safeHookNoOrig(cls, sel_getUid("currentDeviceModel"), (IMP)ret_empty_str);
+    }
+}
+
+#pragma mark - 字节跳动 Swift 类（自动扫描 @objc 方法）
+
+static void hookByteDanceSwiftClasses() {
+    const char *swiftClasses[] = {
+        // Salamander 基础
+        "_TtC10Salamander8SLDevice",
+        "_TtC10Salamander8SLScreen",
+        "_TtC10Salamander8SLThread",
+        "_TtC10Salamander13SLApplication",
+        "_TtC10Salamander16DeviceSystemImpl",
+        "_TtC10Salamander10ScreenImpl",
+        "_TtC10Salamander11SwiftOCTool",
+        "_TtC10Salamander12EventBusImpl",
+        "_TtC10Salamander15ApplicationImpl",
+        // Salamander BD Foundation
+        "_TtC22SalamanderBDFoundation11SLHeimdallr",
+        "_TtC22SalamanderBDFoundation11SLJSONUtils",
+        "_TtC22SalamanderBDFoundation15SLBDApplication",
+        // AnnieX
+        "_TtC6AnnieX11APMReporter",
+        "_TtC6AnnieX11NetworkImpl",
+        "_TtC6AnnieX13HeimdallrImpl",
+        "_TtC6AnnieX14HybridSettings",
+        "_TtC6AnnieX15AnnieXJSONUtils",
+        "_TtC6AnnieX15AnnieXUUIDUtils",
+        "_TtC6AnnieX17AnnieXApplication",
+        "_TtC6AnnieX17AnnieXStringUtils",
+        "_TtC6AnnieX7LogImpl",
+        "_TtC6AnnieX8Switches",
+        // Bind
+        "_TtC4Bind10BindConfig",
+        "_TtC4Bind9BindUtils",
+        // TempoiOS
+        "_TtC8TempoiOS10TempoTrace",
+        "_TtC8TempoiOS8TempoApp",
+        "_TtC8TempoiOS15TempoSwiperCell",
+        "_TtC8TempoiOS15TempoViewWidget",
+        "_TtC8TempoiOS16TempoBorderLayer",
+        "_TtC8TempoiOS16TempoImageWidget",
+        "_TtC8TempoiOS17TempoBuiltInClass",
+        "_TtC8TempoiOS17TempoLottieWidget",
+        "_TtC8TempoiOS17TempoPipeLineTask",
+        "_TtC8TempoiOS17TempoSwiperWidget",
+        "_TtC8TempoiOS19TempoSwiperItemView",
+        "_TtC8TempoiOS20TempoCountDownWidget",
+        "_TtC8TempoiOS20TempoMethodAppModule",
+        "_TtC8TempoiOS21TempoBounceViewWidget",
+        "_TtC8TempoiOS21TempoDebugRetainCount",
+        "_TtC8TempoiOS21TempoScrollViewWidget",
+        "_TtC8TempoiOS21TempoSwiperItemWidget",
+        "_TtC8TempoiOS25TempoTapGestureRecognizer",
+        "_TtC8TempoiOS31TempoLongPressGestureRecognizer",
+        // BDADSDK
+        "_TtC7BDADSDK12GeckoManager",
+        "_TtC7BDADSDK21GeckoEventDelegateImp",
+        // BDAResourceKit
+        "_TtC18BDAResourceKit_iOS14AdResourceUtil",
+        "_TtC18BDAResourceKit_iOS16AdResourceLoader",
+        "_TtC18BDAResourceKit_iOS17AdPromiseDeferred",
+        "_TtC18BDAResourceKit_iOS19AdStrategyTrackUtil",
+        "_TtC18BDAResourceKit_iOS23AdWebViewResourceLoader",
+        "_TtC18BDAResourceKit_iOS35AdResourceLoaderEnvironmentStrategy",
+        // SalamanderAnnieX
+        "_TtC16SalamanderAnnieX13BridgeHandler",
+        "_TtC16SalamanderAnnieX15BridgeHandlerV2",
+        nil
+    };
+
+    for (int i = 0; swiftClasses[i] != nil; i++) {
+        autoHookClassMethodsSafe(swiftClasses[i]);
+    }
+}
+
+#pragma mark - 字节跳动精确 Hook（头文件中有明确方法的类）
+
+static void hookByteDanceGeckoManager() {
+    Class cls = objc_getClass("_TtC7BDADSDK12GeckoManager");
+    if (!cls) return;
+    BYPASS_LOG(@"hooking GeckoManager");
+    safeHookNoOrig(cls, sel_getUid("registerAndPreloadCommerceGecko"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("gurdKitDidSetup"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("updateGurdPollWith:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("updateGurdPollWith:completion:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("dataFor:channel:"), (IMP)ret_nil);
+    safeHookNoOrig(cls, sel_getUid("hasGeckoResourceFor:"), (IMP)ret_NO);
+    safeHookNoOrig(cls, sel_getUid("clearGeckoResourceFor:"), (IMP)ret_void);
+    safeHookNoOrig(cls, sel_getUid("geckoAccessKey"), (IMP)ret_empty_str);
+}
+
+static void hookByteDanceResourceKit() {
+    Class cls = objc_getClass("_TtC18BDAResourceKit_iOS23AdWebViewResourceLoader");
+    if (cls) {
+        safeHookNoOrig(cls, sel_getUid("didReceiveMemoryWarningNotification"), (IMP)ret_void);
+        safeHookNoOrig(cls, sel_getUid("didReceiveApplicationWillTerminalNotification"), (IMP)ret_void);
+    }
+}
+
+#pragma mark - 百度系通用 Hook
+
+static void hookBaiduCommon() {
+    // 百度常见风控/统计类（防御性 hook，类不存在时自动跳过）
+    const char *baiduClasses[] = {
+        "BaiduMobStat",
+        "BDTuring",
+        "BDTuringConfig",
+        "BDTuringVerify",
+        "BaiduLocation",
+        nil
+    };
+    const char *boolSels[] = {
+        "isJailbreak", "isJailbroken", "isDebug", "isDebuggerAttached",
+        "isProxy", "isEmulator", nil
+    };
+    const char *strSels[] = {
+        "getDeviceId", "deviceId", "getUUID", "uuid",
+        "getRiskToken", "riskToken", "getMetaInfo", nil
+    };
+    for (int i = 0; baiduClasses[i] != nil; i++) {
+        hookSelectorsOnClass(baiduClasses[i], boolSels, (IMP)ret_NO);
+        hookSelectorsOnClass(baiduClasses[i], strSels, (IMP)ret_empty_str);
+        autoHookClassMethodsSafe(baiduClasses[i]);
     }
 }
 
@@ -717,22 +609,28 @@ static void hookSystemClasses() {
 __attribute__((constructor))
 static void init() {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4.3 (fishhook + ObjC) loaded ===");
+        BYPASS_LOG(@"AliSecBypass v2.1 loaded (headfile-enhanced)");
 
-        // fishhook C函数
-        rebind_symbols((struct rebinding[3]){
-            {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace},
-            {"sysctl", (void *)my_sysctl, (void **)&orig_sysctl},
-            {"access", (void *)my_access, (void **)&orig_access}
-        }, 3);
-        BYPASS_LOG(@"[FISH] ptrace/sysctl/access rebinding done");
+        // 阿里系
+        hookAliSecXSafeUtilsVariants();
+        hookAliSecXReachability();
+        hookAliSecXKeychain();
+        hookAliSecXCryptoAndStorage();
+        hookAliyunIdentity();
+        hookAliyunFaceAuth();
+        hookDeviceIdentifiers();
+        hookMonitors();
+        hookAnalytics();
+        hookAMapSystemInfoAndStats();
 
-        // ObjC Runtime SDK hook
-        hookAliSDK();
-        hookBaiduSDK();
-        hookByteDanceSDK();
-        hookSystemClasses();
+        // 字节系
+        hookByteDanceGeckoManager();
+        hookByteDanceResourceKit();
+        hookByteDanceSwiftClasses();
 
-        BYPASS_LOG(@"=== AliSecBypass v4.3 init complete ===");
+        // 百度系
+        hookBaiduCommon();
+
+        BYPASS_LOG(@"AliSecBypass v2.1 init complete");
     }
 }
