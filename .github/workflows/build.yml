@@ -1,17 +1,22 @@
 name: Build AliSecBypass v4
+
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Theos
         run: git clone --recursive https://github.com/theos/theos.git $HOME/theos && echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
       - name: Install Dependencies
         run: brew install cmake ldid || true
+
       - name: Clone and build fishhook
         run: |
           git clone --depth=1 https://github.com/facebook/fishhook.git fishhook
@@ -22,8 +27,37 @@ jobs:
           echo "fishhook built"
           file libfishhook.a
         working-directory: ${{ github.workspace }}
+
+      - name: Clone and build Dobby
+        run: |
+          git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
+          cd dobby
+          mkdir -p build && cd build
+          cmake .. \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDOBBY_DEBUG=OFF \
+            -DDOBBY_GENERATE_SHARED=OFF
+          make -j$(sysctl -n hw.ncpu)
+          echo "Dobby built"
+          find . -name "libdobby.a" -exec file {} \;
+        working-directory: ${{ github.workspace }}
+
+      - name: Prepare Dobby for build
+        run: |
+          mkdir -p Dobby/include
+          cp $(find dobby -name "libdobby.a" | head -1) Dobby/
+          cp $(find dobby -name "dobby.h" | head -1) Dobby/include/
+          echo "Dobby prepared:"
+          ls -la Dobby/
+          ls -la Dobby/include/
+        working-directory: ${{ github.workspace }}
+
       - name: Build Tweak
         run: export THEOS=$HOME/theos && export FISHHOOK_PATH=$(pwd)/fishhook && make clean || true && make package FINALPACKAGE=1
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
