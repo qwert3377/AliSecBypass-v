@@ -32,7 +32,15 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
           cd dobby
-          python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
+          if [ -f "scripts/platform_builder.py" ]; then
+            echo "Using platform_builder.py..."
+            python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
+          else
+            echo "platform_builder.py not found, using manual build..."
+            mkdir -p build && cd build
+            cmake .. -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_BUILD_TYPE=Release -DDOBBY_DEBUG=OFF -DDOBBY_GENERATE_SHARED=OFF ||             cmake .. -DCMAKE_BUILD_TYPE=Release -DDOBBY_DEBUG=OFF -DDOBBY_GENERATE_SHARED=OFF
+            make -j$(sysctl -n hw.ncpu)
+          fi
           echo "Dobby built"
           find . -name "libdobby.a" -exec file {} \;
         working-directory: ${{ github.workspace }}
