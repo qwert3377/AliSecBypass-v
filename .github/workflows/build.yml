@@ -32,15 +32,7 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
           cd dobby
-          mkdir -p build && cd build
-          cmake .. \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DDOBBY_DEBUG=OFF \
-            -DDOBBY_GENERATE_SHARED=OFF
-          make -j$(sysctl -n hw.ncpu)
+          python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
           echo "Dobby built"
           find . -name "libdobby.a" -exec file {} \;
         working-directory: ${{ github.workspace }}
