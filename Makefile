@@ -14,10 +14,10 @@ LIBRARY_NAME = AliSecBypass_v4
 AliSecBypass_v4_FILES = AliSecBypass_v4.mm
 
 # ========== 第三方库路径配置 ==========
-# fishhook 路径（相对项目根目录）
-FISHHOOK_PATH ?= $(PWD)/fishhook
-# Dobby 路径（相对项目根目录）
-DOBBY_PATH ?= $(PWD)/Dobby
+# 用 $(shell pwd) 而不是 $(PWD)，GitHub Actions 兼容
+PROJECT_DIR = $(shell pwd)
+FISHHOOK_PATH = $(PROJECT_DIR)/fishhook
+DOBBY_PATH = $(PROJECT_DIR)/Dobby
 
 # ========== 编译标志 ==========
 AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11 -fno-modules -fno-implicit-modules \
@@ -31,7 +31,7 @@ AliSecBypass_v4_CCFLAGS = -std=c++11 -fno-modules -fno-implicit-modules \
   -I$(DOBBY_PATH)/include
 
 # ========== 自动查找 fishhook 静态库 ==========
-FISHHOOK_LIB = $(shell find $(FISHHOOK_PATH) -name "libfishhook.a" | head -1)
+FISHHOOK_LIB = $(shell find $(FISHHOOK_PATH) -name "libfishhook.a" 2>/dev/null | head -1)
 ifeq ($(FISHHOOK_LIB),)
   $(warning [WARN] fishhook static library not found in $(FISHHOOK_PATH))
 else
@@ -40,7 +40,7 @@ else
 endif
 
 # ========== 自动查找 Dobby 静态库 ==========
-DOBBY_LIB = $(shell find $(DOBBY_PATH) -name "libdobby.a" | head -1)
+DOBBY_LIB = $(shell find $(DOBBY_PATH) -name "libdobby.a" 2>/dev/null | head -1)
 ifeq ($(DOBBY_LIB),)
   $(warning [WARN] Dobby static library not found in $(DOBBY_PATH))
 else
