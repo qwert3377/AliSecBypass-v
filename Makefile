@@ -14,7 +14,7 @@ LIBRARY_NAME = AliSecBypass_v4
 AliSecBypass_v4_FILES = AliSecBypass_v4.mm
 
 # ========== 第三方库路径配置 ==========
-# 用 $(shell pwd) 而不是 $(PWD)，GitHub Actions 兼容
+# GitHub Actions 上 $(PWD) 不可靠，用 $(shell pwd)
 PROJECT_DIR = $(shell pwd)
 FISHHOOK_PATH = $(PROJECT_DIR)/fishhook
 DOBBY_PATH = $(PROJECT_DIR)/Dobby
