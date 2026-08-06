@@ -28,32 +28,34 @@ jobs:
           file libfishhook.a
         working-directory: ${{ github.workspace }}
 
-      - name: Build Dobby via setup.sh
+      - name: Clone and build Dobby
         run: |
-          # 先修复 setup.sh 里的 pipes 兼容问题（如果 GitHub Actions Python 版本不同）
-          if [ -f "setup.sh" ]; then
-            sed -i.bak 's/import pipes/import shlex/g' setup.sh 2>/dev/null || true
-            sed -i.bak 's/pipes.quote/shlex.quote/g' setup.sh 2>/dev/null || true
-            chmod +x setup.sh
-            ./setup.sh
-          else
-            # 如果没有 setup.sh，手动跑 platform_builder.py
-            git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
-            cd dobby
-            sed -i.bak 's/import pipes/import shlex/g' scripts/platform_builder.py
-            sed -i.bak 's/pipes.quote/shlex.quote/g' scripts/platform_builder.py
-            python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
-          fi
+          git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
+          cd dobby
+          # 修复 Python 3.12+ 移除 pipes 模块的问题
+          python3 -c "
+          import sys
+          with open('scripts/platform_builder.py', 'r') as f:
+              content = f.read()
+          content = content.replace('import pipes', 'import shlex')
+          content = content.replace('pipes.quote', 'shlex.quote')
+          with open('scripts/platform_builder.py', 'w') as f:
+              f.write(content)
+          print('Fixed platform_builder.py')
+          "
+          python3 scripts/platform_builder.py --platform=iphoneos --arch=arm64
+          echo "Dobby built"
+          find . -name "libdobby.a" -exec file {} \;
         working-directory: ${{ github.workspace }}
 
       - name: Prepare Dobby for build
         run: |
           mkdir -p Dobby/include
-          cp $(find . -name "libdobby.a" | head -1) Dobby/ 2>/dev/null || true
-          cp $(find . -name "dobby.h" | head -1) Dobby/include/ 2>/dev/null || true
+          cp $(find dobby -name "libdobby.a" | head -1) Dobby/
+          cp $(find dobby -name "dobby.h" | head -1) Dobby/include/
           echo "Dobby prepared:"
-          ls -la Dobby/ 2>/dev/null || echo "Dobby dir not found"
-          ls -la Dobby/include/ 2>/dev/null || echo "Dobby include not found"
+          ls -la Dobby/
+          ls -la Dobby/include/
         working-directory: ${{ github.workspace }}
 
       - name: Build Tweak
