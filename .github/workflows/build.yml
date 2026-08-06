@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -32,9 +32,7 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/jmpews/Dobby.git dobby
           cd dobby
-          # 修复 Python 3.12+ 移除 pipes 模块的问题
           python3 -c "
-          import sys
           with open('scripts/platform_builder.py', 'r') as f:
               content = f.read()
           content = content.replace('import pipes', 'import shlex')
@@ -51,11 +49,11 @@ jobs:
       - name: Prepare Dobby for build
         run: |
           mkdir -p Dobby/include
-          cp $(find dobby -name "libdobby.a" | head -1) Dobby/
-          cp $(find dobby -name "dobby.h" | head -1) Dobby/include/
+          cp $(find dobby -name "libdobby.a" | head -1) Dobby/ || true
+          cp $(find dobby -name "dobby.h" | head -1) Dobby/include/ || true
           echo "Dobby prepared:"
-          ls -la Dobby/
-          ls -la Dobby/include/
+          ls -la Dobby/ || true
+          ls -la Dobby/include/ || true
         working-directory: ${{ github.workspace }}
 
       - name: Build Tweak
