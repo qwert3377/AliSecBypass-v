@@ -22,11 +22,13 @@ DOBBY_PATH = $(PROJECT_DIR)/Dobby
 # ========== 编译标志 ==========
 AliSecBypass_v4_CFLAGS = -fobjc-arc -std=c++11 -fno-modules -fno-implicit-modules \
   -Wno-unused-function -Wno-unused-variable \
+  -Wno-arc-performSelector-leaks \
   -I$(FISHHOOK_PATH) \
   -I$(DOBBY_PATH)/include
 
 AliSecBypass_v4_CCFLAGS = -std=c++11 -fno-modules -fno-implicit-modules \
   -Wno-unused-function -Wno-unused-variable \
+  -Wno-arc-performSelector-leaks \
   -I$(FISHHOOK_PATH) \
   -I$(DOBBY_PATH)/include
 
