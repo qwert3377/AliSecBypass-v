@@ -1,5 +1,5 @@
-// AliSecBypass v5.3-fix - 修复编译错误 (advertisingIdentifier ARC类型)
-// fishhook + ObjC Runtime 混合方案
+// AliSecBypass v5.3-fix2 - 修复链接错误 (Security符号fishhook找不到)
+// fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -12,6 +12,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fishhook.h>
+#include <dobby.h>
 #include <mach-o/dyld.h>
 #include <Security/Security.h>
 
@@ -134,7 +135,6 @@ static void hookASIdentifierManager(void) {
             method_setImplementation(m, (IMP)my_adId);
             bypassLog(@"[Hook] ASIdentifierManager advertisingIdentifier hooked");
 
-            // 自测用 performSelector 避免编译时类型检查 (AdSupport未链接)
             id mgr = [asid performSelector:@selector(sharedManager)];
             if (mgr) {
                 NSUUID *test = [mgr performSelector:@selector(advertisingIdentifier)];
@@ -188,7 +188,7 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 5. Keychain Hook ==========
+// ========== 5. Keychain Hook (DobbyHook, 不用fishhook) ==========
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     OSStatus status = orig_SecItemCopyMatching(query, result);
@@ -229,6 +229,12 @@ static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
         }
     }
     return orig_SecItemAdd(attributes, result);
+}
+
+static void hookKeychain(void) {
+    int r1 = DobbyHook((void *)SecItemCopyMatching, (void *)my_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching);
+    int r2 = DobbyHook((void *)SecItemAdd, (void *)my_SecItemAdd, (void **)&orig_SecItemAdd);
+    bypassLog([NSString stringWithFormat:@"[Hook] Keychain DobbyHook: CopyMatching=%d Add=%d", r1, r2]);
 }
 
 // ========== 6. 隐藏自身 dylib ==========
@@ -337,12 +343,13 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
 
 // ========== 11. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.3-fix init ===");
+    bypassLog(@"=== AliSecBypass v5.3-fix2 init ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
+    hookKeychain(); // DobbyHook Security函数
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -353,11 +360,9 @@ __attribute__((constructor(101))) static void constructor(void) {
         {"uname", (void *)my_uname, (void **)&orig_uname},
         {"dlopen", (void *)my_dlopen, (void **)&orig_dlopen},
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
-        {"SecItemCopyMatching", (void *)my_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching},
-        {"SecItemAdd", (void *)my_SecItemAdd, (void **)&orig_SecItemAdd},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    int ret = rebind_symbols(rebinds, 11);
+    int ret = rebind_symbols(rebinds, 9);
     bypassLog([NSString stringWithFormat:@"[fishhook] rebind: %d", ret]);
 
     Class cls = objc_getClass("NSURLSession");
@@ -366,5 +371,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m) { orig_dtwr = method_getImplementation(m); method_setImplementation(m, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.3-fix init complete ===");
+    bypassLog(@"=== AliSecBypass v5.3-fix2 init complete ===");
 }
