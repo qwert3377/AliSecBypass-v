@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.5 - 弹窗拦截 + 防App自杀 + 防网络取消 + 防跳转AppStore
+// AliSecBypass v6.1.6 - 补 hook commonParams 方法 + NSBundle路径伪装 + NSTimer监控
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -136,6 +136,7 @@ typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
 
 static IMP orig_commonParamsblock = NULL;
 static IMP orig_commonParamsblockWithURL = NULL;
+static IMP orig_commonParams = NULL;
 
 static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
     if (!original) return nil;
@@ -163,6 +164,12 @@ static id my_commonParamsblockWithURL(id self, SEL _cmd) {
     return makeWrappedBlockWithURL(original);
 }
 
+static id my_commonParams(id self, SEL _cmd) {
+    id result = ((id (*)(id, SEL))orig_commonParams)(self, _cmd);
+    if ([result isKindOfClass:[NSDictionary class]]) return patchCommonParams(result);
+    return result;
+}
+
 static void hookTTNetworkCommonParams(void) {
     Class ttMgr = objc_getClass("TTNetworkManager");
     if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
@@ -177,6 +184,11 @@ static void hookTTNetworkCommonParams(void) {
         orig_commonParamsblockWithURL = method_getImplementation(m);
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] commonParamsblockWithURL hooked");
+    }
+    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
+        orig_commonParams = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_commonParams);
+        bypassLog(@"[Hook] commonParams hooked");
     }
 }
 
@@ -391,7 +403,6 @@ static void my_taskCancel(id self, SEL _cmd) {
     if (urlStr.length > 0) {
         bypassLog([NSString stringWithFormat:@"[Cancel] Task cancel blocked for %@", urlStr]);
     }
-    // 不调用原始 cancel，强制继续请求
 }
 
 // ========== 9. 弹窗拦截 + 调用栈记录 ==========
@@ -448,9 +459,52 @@ static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *optio
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
 }
 
-// ========== 11. 初始化 ==========
+// ========== 11. NSBundle 路径伪装（隐藏LiveContainer路径）==========
+static IMP orig_bundlePath = NULL;
+static NSString *my_bundlePath(id self, SEL _cmd) {
+    NSString *path = ((NSString *(*)(id, SEL))orig_bundlePath)(self, _cmd);
+    if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
+                 [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
+        // 返回一个看起来像正常App Store安装的路径
+        return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app";
+    }
+    return path;
+}
+
+static IMP orig_resourcePath = NULL;
+static NSString *my_resourcePath(id self, SEL _cmd) {
+    NSString *path = ((NSString *(*)(id, SEL))orig_resourcePath)(self, _cmd);
+    if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
+                 [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
+        return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app";
+    }
+    return path;
+}
+
+static IMP orig_executablePath = NULL;
+static NSString *my_executablePath(id self, SEL _cmd) {
+    NSString *path = ((NSString *(*)(id, SEL))orig_executablePath)(self, _cmd);
+    if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
+                 [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
+        return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app/FanqieNovel";
+    }
+    return path;
+}
+
+// ========== 12. NSTimer 监控（记录可疑定时器）==========
+static IMP orig_scheduledTimer = NULL;
+static id my_scheduledTimer(id self, SEL _cmd, NSTimeInterval interval, id target, SEL selector, id userInfo, BOOL repeats) {
+    NSString *targetName = NSStringFromClass([target class]) ?: @"(block)";
+    NSString *selName = NSStringFromSelector(selector) ?: @"(none)";
+    if (interval >= 30.0 && interval <= 300.0) {
+        bypassLog([NSString stringWithFormat:@"[Timer] suspicious timer: interval=%.1f target=%@ selector=%@", interval, targetName, selName]);
+    }
+    return ((id (*)(id, SEL, NSTimeInterval, id, SEL, id, BOOL))orig_scheduledTimer)(self, _cmd, interval, target, selector, userInfo, repeats);
+}
+
+// ========== 13. 初始化 ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.5 init ===");
+    bypassLog(@"=== AliSecBypass v6.1.6 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -506,5 +560,21 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m2) { orig_openURLOptions = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_openURLOptions); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.5 init complete ===");
+    Class bundleCls = objc_getClass("NSBundle");
+    if (bundleCls) {
+        Method m1 = class_getInstanceMethod(bundleCls, @selector(bundlePath));
+        if (m1) { orig_bundlePath = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_bundlePath); }
+        Method m2 = class_getInstanceMethod(bundleCls, @selector(resourcePath));
+        if (m2) { orig_resourcePath = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_resourcePath); }
+        Method m3 = class_getInstanceMethod(bundleCls, @selector(executablePath));
+        if (m3) { orig_executablePath = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_executablePath); }
+    }
+
+    Class timerCls = objc_getClass("NSTimer");
+    if (timerCls) {
+        Method m = class_getClassMethod(timerCls, @selector(scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:));
+        if (m) { orig_scheduledTimer = method_getImplementation(m); method_setImplementation(m, (IMP)my_scheduledTimer); }
+    }
+
+    bypassLog(@"=== AliSecBypass v6.1.6 init complete ===");
 }
