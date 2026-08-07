@@ -1,4 +1,4 @@
-// AliSecBypass v5.6 - 精简拦截：只拦纯安全检测，放行业务日志
+// AliSecBypass v5.7 - 增强截包：流式body + Cronet + 更多网络入口
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -28,6 +28,58 @@ static void bypassLog(NSString *msg) {
         if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
         else { [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil]; }
     });
+}
+
+// ========== 辅助：读取流式body ==========
+static NSData *readStreamBody(NSInputStream *stream) {
+    if (!stream) return nil;
+    NSMutableData *data = [NSMutableData data];
+    [stream open];
+    uint8_t buffer[4096];
+    while ([stream hasBytesAvailable]) {
+        NSInteger len = [stream read:buffer maxLength:sizeof(buffer)];
+        if (len > 0) [data appendBytes:buffer length:len];
+        else break;
+    }
+    [stream close];
+    return data.length > 0 ? data : nil;
+}
+
+// ========== 辅助：记录请求详情 ==========
+static void logRequestDetails(NSURLRequest *request) {
+    NSURL *url = request.URL;
+    NSString *host = url.host ?: @"";
+    NSString *path = url.path ?: @"";
+
+    // 尝试读取 body
+    NSData *body = request.HTTPBody;
+    if (!body && request.HTTPBodyStream) {
+        body = readStreamBody(request.HTTPBodyStream);
+    }
+
+    NSString *bodyStr = nil;
+    if (body && body.length > 0) {
+        bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+        if (!bodyStr) bodyStr = [body base64EncodedStringWithOptions:0];
+        if (bodyStr.length > 4096) bodyStr = [bodyStr substringToIndex:4096];
+    }
+
+    // 记录 headers（过滤掉 cookie 等敏感信息，只保留关键头）
+    NSDictionary *headers = request.allHTTPHeaderFields;
+    NSMutableString *headerStr = [NSMutableString string];
+    NSArray *keys = @[@"Content-Type", @"User-Agent", @"X-Argus", @"X-Gorgon", @"X-Khronos", @"X-Ladon"];
+    for (NSString *key in keys) {
+        NSString *val = headers[key];
+        if (val) [headerStr appendFormat:@"%@=%@;", key, val];
+    }
+
+    if (bodyStr) {
+        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@%@ | H:%@ | B:%@", 
+            request.HTTPMethod, host, path, headerStr, bodyStr]);
+    } else {
+        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@%@ | H:%@", 
+            request.HTTPMethod, host, path, headerStr]);
+    }
 }
 
 // ========== 设备指纹 ==========
@@ -81,95 +133,56 @@ static void initDeviceProfile(void) {
     }
 }
 
-// ========== 1. 伪造 UIDevice - identifierForVendor ==========
+// ========== 1. 伪造 UIDevice ==========
 static IMP orig_idfv = NULL;
 static NSUUID *my_idfv(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[IDFV] identifierForVendor -> %@", gFakeIDFV]);
     return [[NSUUID alloc] initWithUUIDString:gFakeIDFV];
 }
-
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[IDFV] _uniqueVendorIdentifier -> %@", gFakeIDFV]);
     return [[NSUUID alloc] initWithUUIDString:gFakeIDFV];
 }
-
 static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
 static NSString *my_model(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: @"iPhone"; }
 
 static void hookUIDevice(void) {
     Class uid = objc_getClass("UIDevice");
-    if (!uid) { bypassLog(@"[Hook] UIDevice not found"); return; }
+    if (!uid) return;
     Method m;
-    if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) {
-        orig_idfv = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_idfv);
-        bypassLog(@"[Hook] UIDevice identifierForVendor hooked");
-    }
-    SEL sel1 = NSSelectorFromString(@"_uniqueVendorIdentifier");
-    if ((m = class_getInstanceMethod(uid, sel1))) {
-        method_setImplementation(m, (IMP)my_uniqueVendor);
-        bypassLog(@"[Hook] UIDevice _uniqueVendorIdentifier hooked");
-    }
-    SEL sel2 = NSSelectorFromString(@"uniqueIdentifierForVendor");
-    if ((m = class_getInstanceMethod(uid, sel2))) {
-        method_setImplementation(m, (IMP)my_uniqueVendor);
-        bypassLog(@"[Hook] UIDevice uniqueIdentifierForVendor hooked");
-    }
+    if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) { orig_idfv = method_getImplementation(m); method_setImplementation(m, (IMP)my_idfv); }
+    if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"_uniqueVendorIdentifier")))) method_setImplementation(m, (IMP)my_uniqueVendor);
+    if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"uniqueIdentifierForVendor")))) method_setImplementation(m, (IMP)my_uniqueVendor);
     if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) method_setImplementation(m, (IMP)my_sysVer);
     if ((m = class_getInstanceMethod(uid, @selector(model)))) method_setImplementation(m, (IMP)my_model);
     if ((m = class_getInstanceMethod(uid, @selector(name)))) method_setImplementation(m, (IMP)my_name);
-
-    NSUUID *test = [[UIDevice currentDevice] identifierForVendor];
-    bypassLog([NSString stringWithFormat:@"[Test] UIDevice.identifierForVendor = %@", test.UUIDString]);
+    bypassLog([NSString stringWithFormat:@"[Test] IDFV=%@", [[UIDevice currentDevice] identifierForVendor].UUIDString]);
 }
 
-// ========== 2. 伪造 ASIdentifierManager - advertisingIdentifier ==========
+// ========== 2. 伪造 ASIdentifierManager ==========
 static IMP orig_adId = NULL;
 static NSUUID *my_adId(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[IDFA] advertisingIdentifier -> %@", gFakeIDFA]);
     return [[NSUUID alloc] initWithUUIDString:gFakeIDFA];
 }
-
 static void hookASIdentifierManager(void) {
     static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        dlopen("/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY);
-    });
-
+    dispatch_once(&once, ^{ dlopen("/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY); });
     Class asid = objc_getClass("ASIdentifierManager");
     if (asid) {
         Method m = class_getInstanceMethod(asid, @selector(advertisingIdentifier));
-        if (m) {
-            orig_adId = method_getImplementation(m);
-            method_setImplementation(m, (IMP)my_adId);
-            bypassLog(@"[Hook] ASIdentifierManager advertisingIdentifier hooked");
-
-            id mgr = [asid performSelector:@selector(sharedManager)];
-            if (mgr) {
-                NSUUID *test = [mgr performSelector:@selector(advertisingIdentifier)];
-                bypassLog([NSString stringWithFormat:@"[Test] ASIdentifierManager.advertisingIdentifier = %@", test.UUIDString]);
-            }
-        }
-    } else {
-        bypassLog(@"[Hook] ASIdentifierManager not found");
+        if (m) { orig_adId = method_getImplementation(m); method_setImplementation(m, (IMP)my_adId); }
     }
 }
 
 // ========== 3. 伪造 UIScreen / NSProcessInfo ==========
 static IMP orig_screenBounds = NULL, orig_screenScale = NULL;
 static CGRect my_screenBounds(id self, SEL _cmd) {
-    CGFloat w = [gDeviceProfile[@"screenW"] floatValue];
-    CGFloat h = [gDeviceProfile[@"screenH"] floatValue];
-    return CGRectMake(0, 0, w, h);
+    return CGRectMake(0, 0, [gDeviceProfile[@"screenW"] floatValue], [gDeviceProfile[@"screenH"] floatValue]);
 }
 static CGFloat my_screenScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
-
 static IMP orig_physicalMemory = NULL;
 static unsigned long long my_physicalMemory(id self, SEL _cmd) {
     return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024 * 1024 * 1024;
 }
-
 static void hookScreenAndProcessInfo(void) {
     Class screen = objc_getClass("UIScreen");
     if (screen) {
@@ -182,7 +195,6 @@ static void hookScreenAndProcessInfo(void) {
         Method m = class_getInstanceMethod(pi, @selector(physicalMemory));
         if (m) { orig_physicalMemory = method_getImplementation(m); method_setImplementation(m, (IMP)my_physicalMemory); }
     }
-    bypassLog(@"[Hook] Screen & ProcessInfo hooked");
 }
 
 // ========== 4. 伪造 uname ==========
@@ -208,11 +220,10 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 精简域名拦截：只拦纯安全检测，放行业务日志 ==========
-// 已移除：applog、rtlog、mssdk（业务需要，拦了反而异常）
+// ========== 6. 精简域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
-    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"bytemastatic", @"bytemaimg"];
+    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
     return NO;
 }
@@ -231,17 +242,12 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
 
 static ssize_t (*orig_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
 static ssize_t my_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen) {
-    if (dest_addr && dest_addr->sa_family == AF_INET) {
-        struct sockaddr_in *sin = (struct sockaddr_in *)dest_addr;
-        int port = ntohs(sin->sin_port);
-        if (port == 53) bypassLog(@"[sendto] DNS UDP 53");
-    }
     return orig_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
 }
 
 static int (*orig_ptrace)(int, pid_t, caddr_t, int);
 static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
-    if (request == 0) { bypassLog(@"[ptrace] blocked"); return 0; }
+    if (request == 0) return 0;
     return orig_ptrace(request, pid, addr, data);
 }
 
@@ -249,7 +255,6 @@ static int (*orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t);
 static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
     if (ret == 0 && namelen >= 2 && name[0] == CTL_KERN && name[1] == KERN_PROC) {
-        bypassLog(@"[sysctl] KERN_PROC blocked");
         if (oldp && oldlenp) memset(oldp, 0, *oldlenp);
         return 0;
     }
@@ -268,11 +273,9 @@ static int my_getaddrinfo(const char *node, const char *service, const struct ad
     return orig_getaddrinfo(node, service, hints, res);
 }
 
-// ========== 8. dlopen/dlsym 隐藏 ==========
 static void *(*orig_dlopen)(const char *, int);
 static void *my_dlopen(const char *path, int mode) {
     if (path && (strstr(path, "AliSecBypass") || strstr(path, "bypass") || strstr(path, "fishhook"))) {
-        bypassLog([NSString stringWithFormat:@"[dlopen] HIDDEN: %s", path]);
         return orig_dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", mode);
     }
     return orig_dlopen(path, mode);
@@ -281,31 +284,17 @@ static void *my_dlopen(const char *path, int mode) {
 static void *(*orig_dlsym)(void *, const char *);
 static void *my_dlsym(void *handle, const char *symbol) {
     void *ret = orig_dlsym(handle, symbol);
-    if (symbol && (strstr(symbol, "Dobby") || strstr(symbol, "fishhook") || strstr(symbol, "rebind"))) {
-        bypassLog([NSString stringWithFormat:@"[dlsym] HIDDEN: %s", symbol]);
-        return NULL;
-    }
+    if (symbol && (strstr(symbol, "Dobby") || strstr(symbol, "fishhook") || strstr(symbol, "rebind"))) return NULL;
     return ret;
 }
 
-// ========== 9. NSURLSession Hook - 请求体自记录 ==========
+// ========== 8. NSURLSession Hook - 增强截包 ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
+    logRequestDetails(request);
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
-
-    NSData *body = request.HTTPBody;
-    if (body && body.length > 0) {
-        NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-        if (!bodyStr) bodyStr = [body base64EncodedStringWithOptions:0];
-        if (bodyStr.length > 2048) bodyStr = [bodyStr substringToIndex:2048];
-        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@ | body: %@", request.HTTPMethod, url.absoluteString, bodyStr]);
-    } else {
-        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@", request.HTTPMethod, url.absoluteString]);
-    }
-
     if (isBlockedHost(host)) {
-        bypassLog([NSString stringWithFormat:@"[NSURLSession] BLOCKED: %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
         [dummy cancel]; return dummy;
     }
@@ -317,21 +306,50 @@ static NSURLSessionDataTask *my_dtwu(id self, SEL _cmd, NSURL *url, void (^ch)(N
     bypassLog([NSString stringWithFormat:@"[HTTP] GET %@", url.absoluteString]);
     NSString *host = url.host ?: @"";
     if (isBlockedHost(host)) {
-        bypassLog([NSString stringWithFormat:@"[NSURLSession] BLOCKED: %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwu)(self, _cmd, url, ch);
         [dummy cancel]; return dummy;
     }
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwu)(self, _cmd, url, ch);
 }
 
+// ========== 9. Cronet / 自定义网络库 Hook ==========
+// 字节跳动常用 Cronet 发核心请求，尝试 hook 其关键方法
+static void hookCronetIfExists(void) {
+    // CronetEngine 类
+    Class cronetEngine = objc_getClass("CronetEngine");
+    if (cronetEngine) {
+        bypassLog(@"[Cronet] CronetEngine found");
+        // 尝试找 URLRequest 相关方法
+        unsigned int count;
+        Method *methods = class_copyMethodList(cronetEngine, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            SEL sel = method_getName(methods[i]);
+            NSString *name = NSStringFromSelector(sel);
+            if ([name containsString:@"Request"] || [name containsString:@"URL"] || [name containsString:@"send"]) {
+                bypassLog([NSString stringWithFormat:@"[Cronet] Method: %@", name]);
+            }
+        }
+        free(methods);
+    }
+
+    // 其他可能的网络类
+    NSArray *possibleClasses = @[@"TTHttpTask", @"TTNetworkManager", @"BDHttpTask", @"BDNetworkManager", 
+                                  @"CronetURLRequest", @"CronetHttpClient"];
+    for (NSString *clsName in possibleClasses) {
+        Class cls = objc_getClass([clsName UTF8String]);
+        if (cls) bypassLog([NSString stringWithFormat:@"[Network] Found class: %@", clsName]);
+    }
+}
+
 // ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.6 init ===");
+    bypassLog(@"=== AliSecBypass v5.7 init ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
+    hookCronetIfExists();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -344,16 +362,15 @@ __attribute__((constructor(101))) static void constructor(void) {
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    int ret = rebind_symbols(rebinds, 9);
-    bypassLog([NSString stringWithFormat:@"[fishhook] rebind: %d", ret]);
+    rebind_symbols(rebinds, 9);
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
         Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-        if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession dataTaskWithRequest hooked"); }
+        if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
         Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
-        if (m2) { orig_dtwu = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dtwu); bypassLog(@"[Hook] NSURLSession dataTaskWithURL hooked"); }
+        if (m2) { orig_dtwu = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dtwu); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.6 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.7 init complete ===");
 }
