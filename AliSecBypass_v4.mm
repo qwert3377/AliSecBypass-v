@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.9.3 - 去掉UIDevice.model/systemVersion hook（导致系统资源加载崩溃），保留idfv和网络层hook
+// AliSecBypass v6.1.10 - 极简稳定版：去掉所有UI/Bundle/UserDefaults hook，只保留核心网络参数+系统层伪装
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -191,7 +191,7 @@ static void hookTTNetworkCommonParams(void) {
     }
 }
 
-// ========== 1. UIDevice（只hook idfv，不hook model/systemVersion，避免系统资源加载崩溃）==========
+// ========== 1. UIDevice（只hook idfv，不动model/systemVersion）==========
 static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 
@@ -217,20 +217,7 @@ static void hookASIdentifierManager(void) {
     }
 }
 
-// ========== 3. NSProcessInfo（只hook physicalMemory，不hook processName避免副作用）==========
-static unsigned long long my_physicalMemory(id self, SEL _cmd) {
-    return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024ULL * 1024ULL * 1024ULL;
-}
-
-static void hookProcessInfo(void) {
-    Class pi = objc_getClass("NSProcessInfo");
-    if (pi) {
-        Method m;
-        if ((m = class_getInstanceMethod(pi, @selector(physicalMemory)))) method_setImplementation(m, (IMP)my_physicalMemory);
-    }
-}
-
-// ========== 4. uname ==========
+// ========== 3. uname ==========
 static int (*orig_uname)(struct utsname *);
 static int my_uname(struct utsname *name) {
     int ret = orig_uname(name);
@@ -243,7 +230,7 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 5. 隐藏自身 dylib ==========
+// ========== 4. 隐藏自身 dylib ==========
 static const char *(*orig_dyld_get_image_name)(uint32_t);
 static const char *my_dyld_get_image_name(uint32_t image_index) {
     const char *name = orig_dyld_get_image_name(image_index);
@@ -253,7 +240,7 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 域名拦截（扩展）==========
+// ========== 5. 域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"msdk.bytedance", @"volc.bytedance",
@@ -263,7 +250,7 @@ static BOOL isBlockedHost(NSString *host) {
     return NO;
 }
 
-// ========== 7. fishhook 系统函数 ==========
+// ========== 6. fishhook 系统函数 ==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
@@ -343,12 +330,12 @@ static void *my_dlsym(void *handle, const char *symbol) {
 
 static void (*orig_exit)(int);
 static void my_exit(int status) {
-    bypassLog([NSString stringWithFormat:@"[Block] exit(%d) blocked, stack:\n%@", status, [[NSThread callStackSymbols] componentsJoinedByString:@"\n"]]);
+    bypassLog([NSString stringWithFormat:@"[Block] exit(%d) blocked", status]);
 }
 
 static void (*orig_abort)(void);
 static void my_abort(void) {
-    bypassLog([NSString stringWithFormat:@"[Block] abort() blocked, stack:\n%@", [[NSThread callStackSymbols] componentsJoinedByString:@"\n"]]);
+    bypassLog(@"[Block] abort() blocked");
 }
 
 static char *(*orig_getenv)(const char *);
@@ -357,7 +344,7 @@ static char *my_getenv(const char *name) {
     return orig_getenv(name);
 }
 
-// ========== 8. NSURLSession Hook ==========
+// ========== 7. NSURLSession Hook ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
@@ -367,17 +354,6 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
         [dummy cancel]; return dummy;
     }
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
-}
-
-static IMP orig_dataTask = NULL;
-static NSURLSessionDataTask *my_dataTask(id self, SEL _cmd, NSURLRequest *request) {
-    NSURL *url = request.URL;
-    NSString *host = url.host ?: @"";
-    if (isBlockedHost(host)) {
-        NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_dataTask)(self, _cmd, request);
-        [dummy cancel]; return dummy;
-    }
-    return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_dataTask)(self, _cmd, request);
 }
 
 static IMP orig_taskCancel = NULL;
@@ -392,108 +368,13 @@ static void my_taskCancel(id self, SEL _cmd) {
     }
 }
 
-// ========== 9. 弹窗拦截 + 调用栈记录 ==========
-static IMP orig_presentVC = NULL;
-static void my_presentViewController(id self, SEL _cmd, UIViewController *vc, BOOL animated, void (^completion)(void)) {
-    if ([vc isKindOfClass:[UIAlertController class]]) {
-        UIAlertController *alert = (UIAlertController *)vc;
-        NSString *title = alert.title ?: @"";
-        NSString *message = alert.message ?: @"";
-        if ([title containsString:@"不安全"] || [title containsString:@"版本"] ||
-            [message containsString:@"正规应用市场"] || [message containsString:@"不安全"] ||
-            [message containsString:@"下载"]) {
-            bypassLog([NSString stringWithFormat:@"[Block] Alert presentation blocked: title=%@ message=%@", title, message]);
-            if (completion) completion();
-            return;
-        }
-    }
-    ((void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))orig_presentVC)(self, _cmd, vc, animated, completion);
-}
-
-static IMP orig_alertController = NULL;
-static id my_alertController(id self, SEL _cmd, NSString *title, NSString *message, UIAlertControllerStyle preferredStyle) {
-    if ([title containsString:@"不安全"] || [title containsString:@"版本"] ||
-        [message containsString:@"正规应用市场"] || [message containsString:@"不安全"] ||
-        [message containsString:@"下载"]) {
-        NSArray *symbols = [NSThread callStackSymbols];
-        NSString *stack = [symbols componentsJoinedByString:@"\n"];
-        bypassLog([NSString stringWithFormat:@"[Alert] Blocked alert creation: title=%@ message=%@\n[Stack]\n%@", title, message, stack]);
-    }
-    return ((id (*)(id, SEL, NSString *, NSString *, UIAlertControllerStyle))orig_alertController)(self, _cmd, title, message, preferredStyle);
-}
-
-// ========== 10. UIApplication openURL 拦截 ==========
-static IMP orig_openURL = NULL;
-static BOOL my_openURL(id self, SEL _cmd, NSURL *url) {
-    NSString *urlStr = url.absoluteString ?: @"";
-    if ([urlStr containsString:@"itunes.apple.com"] || [urlStr containsString:@"apps.apple.com"] ||
-        [urlStr containsString:@"itms-apps"] || [urlStr containsString:@"appstore"]) {
-        bypassLog([NSString stringWithFormat:@"[Block] App Store openURL blocked: %@", urlStr]);
-        return NO;
-    }
-    return ((BOOL (*)(id, SEL, NSURL *))orig_openURL)(self, _cmd, url);
-}
-
-static IMP orig_openURLOptions = NULL;
-static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *options, void (^completion)(BOOL)) {
-    NSString *urlStr = url.absoluteString ?: @"";
-    if ([urlStr containsString:@"itunes.apple.com"] || [urlStr containsString:@"apps.apple.com"] ||
-        [urlStr containsString:@"itms-apps"] || [urlStr containsString:@"appstore"]) {
-        bypassLog([NSString stringWithFormat:@"[Block] App Store openURL:options blocked: %@", urlStr]);
-        if (completion) completion(NO);
-        return;
-    }
-    ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
-}
-
-// ========== 11. NSBundle 只伪装Identifier和Info.plist key，不伪装路径==========
-static IMP orig_bundleIdentifier = NULL;
-static NSString *my_bundleIdentifier(id self, SEL _cmd) {
-    return @"com.dragon.read";
-}
-
-static IMP orig_objectForInfoDictKey = NULL;
-static id my_objectForInfoDictKey(id self, SEL _cmd, NSString *key) {
-    id result = ((id (*)(id, SEL, NSString *))orig_objectForInfoDictKey)(self, _cmd, key);
-    if ([key isEqualToString:@"CFBundleIdentifier"]) return @"com.dragon.read";
-    if ([key isEqualToString:@"CFBundleExecutable"]) return @"FanqieNovel";
-    if ([key isEqualToString:@"CFBundleName"]) return @"FanqieNovel";
-    return result;
-}
-
-// ========== 12. NSUserDefaults 监控 ==========
-static IMP orig_setObject = NULL;
-static void my_setObject(id self, SEL _cmd, id value, NSString *key) {
-    if (key && ([key containsString:@"security"] || [key containsString:@"risk"] || [key containsString:@"check"] ||
-                 [key containsString:@"detect"] || [key containsString:@"unsafe"] || [key containsString:@"ban"] ||
-                 [key containsString:@"blacklist"] || [key containsString:@"violation"] ||
-                 [key containsString:@"polaris"] || [key containsString:@"blank"])) {
-        bypassLog([NSString stringWithFormat:@"[Block] NSUserDefaults setObject blocked for key=%@", key]);
-        return;
-    }
-    ((void (*)(id, SEL, id, NSString *))orig_setObject)(self, _cmd, value, key);
-}
-
-static IMP orig_removeObject = NULL;
-static void my_removeObject(id self, SEL _cmd, NSString *key) {
-    if (key && ([key containsString:@"security"] || [key containsString:@"risk"] || [key containsString:@"check"] ||
-                 [key containsString:@"detect"] || [key containsString:@"unsafe"] || [key containsString:@"ban"] ||
-                 [key containsString:@"blacklist"] || [key containsString:@"violation"] ||
-                 [key containsString:@"polaris"] || [key containsString:@"blank"])) {
-        bypassLog([NSString stringWithFormat:@"[Block] NSUserDefaults removeObject blocked for key=%@", key]);
-        return;
-    }
-    ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
-}
-
-// ========== 13. 初始化（优先级1，最早执行）==========
+// ========== 8. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.9.3 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.10 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
-    hookProcessInfo();
     hookTTNetworkCommonParams();
 
     struct rebinding rebinds[] = {
@@ -516,8 +397,6 @@ __attribute__((constructor(1))) static void constructor(void) {
     if (cls) {
         Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
-        Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:));
-        if (m2) { orig_dataTask = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dataTask); }
     }
 
     Class taskCls = objc_getClass("NSURLSessionDataTask");
@@ -527,41 +406,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m) { orig_taskCancel = method_getImplementation(m); method_setImplementation(m, (IMP)my_taskCancel); }
     }
 
-    Class alertCls = objc_getClass("UIAlertController");
-    if (alertCls) {
-        Method m = class_getClassMethod(alertCls, @selector(alertControllerWithTitle:message:preferredStyle:));
-        if (m) { orig_alertController = method_getImplementation(m); method_setImplementation(m, (IMP)my_alertController); }
-    }
-
-    Class vcCls = objc_getClass("UIViewController");
-    if (vcCls) {
-        Method m = class_getInstanceMethod(vcCls, @selector(presentViewController:animated:completion:));
-        if (m) { orig_presentVC = method_getImplementation(m); method_setImplementation(m, (IMP)my_presentViewController); }
-    }
-
-    Class appCls = objc_getClass("UIApplication");
-    if (appCls) {
-        Method m1 = class_getInstanceMethod(appCls, @selector(openURL:));
-        if (m1) { orig_openURL = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_openURL); }
-        Method m2 = class_getInstanceMethod(appCls, @selector(openURL:options:completionHandler:));
-        if (m2) { orig_openURLOptions = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_openURLOptions); }
-    }
-
-    Class bundleCls = objc_getClass("NSBundle");
-    if (bundleCls) {
-        Method m4 = class_getInstanceMethod(bundleCls, @selector(bundleIdentifier));
-        if (m4) { orig_bundleIdentifier = method_getImplementation(m4); method_setImplementation(m4, (IMP)my_bundleIdentifier); }
-        Method m5 = class_getInstanceMethod(bundleCls, @selector(objectForInfoDictionaryKey:));
-        if (m5) { orig_objectForInfoDictKey = method_getImplementation(m5); method_setImplementation(m5, (IMP)my_objectForInfoDictKey); }
-    }
-
-    Class udCls = objc_getClass("NSUserDefaults");
-    if (udCls) {
-        Method m1 = class_getInstanceMethod(udCls, @selector(setObject:forKey:));
-        if (m1) { orig_setObject = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_setObject); }
-        Method m2 = class_getInstanceMethod(udCls, @selector(removeObjectForKey:));
-        if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
-    }
-
-    bypassLog(@"=== AliSecBypass v6.1.9.3 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.10 init complete ===");
 }
