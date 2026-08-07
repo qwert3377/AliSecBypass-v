@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.1 - 修复 iOS 26 SDK objc_getClass 编译错误
+// AliSecBypass v6.1.2 - 修复网络错误：每次基于原始字典修改，不缓存模板
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -29,35 +29,10 @@ static void bypassLog(NSString *msg) {
     });
 }
 
-// ========== 安全打印 ==========
-static NSString *safeDesc(id obj) {
-    if (!obj) return @"(nil)";
-    if ([obj isKindOfClass:[NSString class]]) return obj;
-    if ([obj isKindOfClass:[NSNumber class]]) return [obj stringValue];
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *d = obj;
-        NSMutableString *s = [NSMutableString stringWithString:@"{"];
-        [d enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
-            [s appendFormat:@"%@=%@;", k, safeDesc(v)];
-        }];
-        [s appendString:@"}"];
-        return s;
-    }
-    if ([obj isKindOfClass:[NSArray class]]) {
-        NSArray *a = obj;
-        NSMutableString *s = [NSMutableString stringWithString:@"["];
-        for (id item in a) [s appendFormat:@"%@,", safeDesc(item)];
-        [s appendString:@"]"];
-        return s;
-    }
-    return [obj description];
-}
-
 // ========== 全局伪装数据 ==========
 static NSDictionary *gDeviceProfile = nil;
 static NSString *gFakeIDFV = nil;
 static NSString *gFakeIDFA = nil;
-static NSDictionary *gFakeCommonParams = nil;
 
 static void initDeviceProfile(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -89,56 +64,54 @@ static void initDeviceProfile(void) {
     if (!gFakeIDFA) { gFakeIDFA = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"]; [ud synchronize]; }
 }
 
-// ========== 构建伪装参数字典模板（只执行一次） ==========
-static void buildFakeParams(NSDictionary *original) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSMutableDictionary *mut = original ? [original mutableCopy] : [NSMutableDictionary dictionary];
+// ========== 核心：基于原始字典修改，只换硬件指纹，保留所有其他字段 ==========
+static NSDictionary *patchCommonParams(NSDictionary *original) {
+    if (!original) return nil;
+    NSMutableDictionary *mut = [original mutableCopy];
+    if (!mut) return original;
 
-        // 核心硬件指纹替换
-        mut[@"vid"] = gFakeIDFV;
-        mut[@"idfv"] = gFakeIDFV;
-        mut[@"idfa"] = gFakeIDFA ?: @"00000000-0000-0000-0000-000000000000";
-        mut[@"cdid"] = [[NSUUID UUID] UUIDString];
+    // 只替换硬件指纹字段，服务器生成的字段（device_id/iid/ac/session等）全部保留原始值
+    mut[@"vid"] = gFakeIDFV;
+    mut[@"idfv"] = gFakeIDFV;
+    mut[@"idfa"] = gFakeIDFA ?: @"00000000-0000-0000-0000-000000000000";
+    mut[@"cdid"] = [[NSUUID UUID] UUIDString];
 
-        if (gDeviceProfile) {
-            NSString *machine = gDeviceProfile[@"machine"] ?: gDeviceProfile[@"model"];
-            NSString *model   = gDeviceProfile[@"model"];
-            NSString *sysVer  = gDeviceProfile[@"systemVersion"];
-            NSNumber *sw = gDeviceProfile[@"screenW"];
-            NSNumber *sh = gDeviceProfile[@"screenH"];
-            NSNumber *sc = gDeviceProfile[@"scale"];
+    if (gDeviceProfile) {
+        NSString *machine = gDeviceProfile[@"machine"] ?: gDeviceProfile[@"model"];
+        NSString *model   = gDeviceProfile[@"model"];
+        NSString *sysVer  = gDeviceProfile[@"systemVersion"];
+        NSNumber *sw = gDeviceProfile[@"screenW"];
+        NSNumber *sh = gDeviceProfile[@"screenH"];
+        NSNumber *sc = gDeviceProfile[@"scale"];
 
-            if (machine) mut[@"device_model"] = machine;
-            if (model)   mut[@"device_brand"] = [model lowercaseString];
-            if (sysVer)  mut[@"os_version"] = sysVer;
+        if (machine) mut[@"device_model"] = machine;
+        if (model)   mut[@"device_brand"] = [model lowercaseString];
+        if (sysVer)  mut[@"os_version"] = sysVer;
 
-            if (sw && sh && sc) {
-                int w = [sw intValue] * [sc intValue];
-                int h = [sh intValue] * [sc intValue];
-                mut[@"resolution"] = [NSString stringWithFormat:@"%d*%d", w, h];
-            }
-
-            static NSDictionary *typeMap = nil;
-            static dispatch_once_t mapOnce;
-            dispatch_once(&mapOnce, ^{
-                typeMap = @{
-                    @"iPhone14,2": @"iPhone 13 Pro",
-                    @"iPhone13,2": @"iPhone 13",
-                    @"iPhone15,2": @"iPhone 14 Pro",
-                    @"iPhone12,5": @"iPhone 11 Pro Max",
-                    @"iPhone14,5": @"iPhone 13",
-                    @"iPhone13,1": @"iPhone 13 mini",
-                    @"iPhone14,4": @"iPhone 13 mini",
-                    @"iPhone15,3": @"iPhone 14 Pro Max",
-                };
-            });
-            mut[@"device_type"] = typeMap[model] ?: [NSString stringWithFormat:@"iPhone (%@)", model];
+        if (sw && sh && sc) {
+            int w = [sw intValue] * [sc intValue];
+            int h = [sh intValue] * [sc intValue];
+            mut[@"resolution"] = [NSString stringWithFormat:@"%d*%d", w, h];
         }
 
-        gFakeCommonParams = [mut copy];
-        bypassLog(@"[FakeParams] fake commonParams template built");
-    });
+        static NSDictionary *typeMap = nil;
+        static dispatch_once_t mapOnce;
+        dispatch_once(&mapOnce, ^{
+            typeMap = @{
+                @"iPhone14,2": @"iPhone 13 Pro",
+                @"iPhone13,2": @"iPhone 13",
+                @"iPhone15,2": @"iPhone 14 Pro",
+                @"iPhone12,5": @"iPhone 11 Pro Max",
+                @"iPhone14,5": @"iPhone 13",
+                @"iPhone13,1": @"iPhone 13 mini",
+                @"iPhone14,4": @"iPhone 13 mini",
+                @"iPhone15,3": @"iPhone 14 Pro Max",
+            };
+        });
+        mut[@"device_type"] = typeMap[model] ?: [NSString stringWithFormat:@"iPhone (%@)", model];
+    }
+
+    return mut;
 }
 
 // ========== TTNetworkManager Hook ==========
@@ -152,18 +125,7 @@ static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
     if (!original) return nil;
     return [^NSDictionary *(void) {
         NSDictionary *result = original();
-        if (!gFakeCommonParams) buildFakeParams(result);
-        NSMutableDictionary *mut = [gFakeCommonParams mutableCopy];
-        // 保留 App 内部动态变化的字段，避免干扰计数/会话状态
-        NSArray *dynamicKeys = @[@"ip", @"cold_start_session_cnt_in_life", @"normal_session_cnt_in_day",
-                                 @"cold_start_session_cnt_in_day", @"normal_session_cnt_in_life",
-                                 @"update_version_code", @"need_personal_recommend", @"gender",
-                                 @"active_schema_params", @"compliance_status", @"ac",
-                                 @"device_id", @"iid", @"cold_start_session_id", @"normal_session_id"];
-        for (NSString *k in dynamicKeys) {
-            if (result[k]) mut[k] = result[k];
-        }
-        return mut;
+        return patchCommonParams(result);
     } copy];
 }
 
@@ -171,17 +133,7 @@ static CommonParamsBlockWithURL makeWrappedBlockWithURL(CommonParamsBlockWithURL
     if (!original) return nil;
     return [^NSDictionary *(NSURL *url) {
         NSDictionary *result = original(url);
-        if (!gFakeCommonParams) buildFakeParams(result);
-        NSMutableDictionary *mut = [gFakeCommonParams mutableCopy];
-        NSArray *dynamicKeys = @[@"ip", @"cold_start_session_cnt_in_life", @"normal_session_cnt_in_day",
-                                 @"cold_start_session_cnt_in_day", @"normal_session_cnt_in_life",
-                                 @"update_version_code", @"need_personal_recommend", @"gender",
-                                 @"active_schema_params", @"compliance_status", @"ac",
-                                 @"device_id", @"iid", @"cold_start_session_id", @"normal_session_id"];
-        for (NSString *k in dynamicKeys) {
-            if (result[k]) mut[k] = result[k];
-        }
-        return mut;
+        return patchCommonParams(result);
     } copy];
 }
 
@@ -210,24 +162,7 @@ static void hookTTNetworkCommonParams(void) {
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] commonParamsblockWithURL hooked");
     }
-    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
-        IMP orig = method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^id(id self) {
-            id result = ((id (*)(id, SEL))orig)(self, @selector(commonParams));
-            if (!gFakeCommonParams && [result isKindOfClass:[NSDictionary class]]) buildFakeParams(result);
-            if (gFakeCommonParams && [result isKindOfClass:[NSDictionary class]]) {
-                NSMutableDictionary *mut = [gFakeCommonParams mutableCopy];
-                NSArray *dynamicKeys = @[@"ip", @"cold_start_session_cnt_in_life", @"normal_session_cnt_in_day",
-                                         @"cold_start_session_cnt_in_day", @"normal_session_cnt_in_life",
-                                         @"update_version_code", @"need_personal_recommend", @"gender",
-                                         @"active_schema_params", @"compliance_status", @"ac",
-                                         @"device_id", @"iid", @"cold_start_session_id", @"normal_session_id"];
-                for (NSString *k in dynamicKeys) { if (result[k]) mut[k] = result[k]; }
-                return mut;
-            }
-            return result;
-        }));
-    }
+    // 不 hook commonParams 方法，避免与 block hook 冲突
 }
 
 // ========== 1. UIDevice ==========
@@ -423,7 +358,7 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
 
 // ========== 9. 初始化 ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.1 init ===");
+    bypassLog(@"=== AliSecBypass v6.1.2 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -450,5 +385,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.1 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.2 init complete ===");
 }
