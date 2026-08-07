@@ -1,9 +1,8 @@
-// AliSecBypass v6.1.8.1 - 修复JS字符串编译错误
+// AliSecBypass v6.1.8.2 - 去掉WebKit头文件依赖，纯Runtime操作WKWebView
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
-#include <WebKit/WebKit.h>
 #include <objc/runtime.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
@@ -561,14 +560,13 @@ static void my_removeObject(id self, SEL _cmd, NSString *key) {
     ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
 }
 
-// ========== 13. WKWebView 全面伪装（核心 - 修复JS字符串）==========
+// ========== 13. WKWebView 纯Runtime伪装（无WebKit头文件依赖）==========
 static NSString *buildWKWebViewJSScript(void) {
     NSString *fakeUA = buildFakeUserAgent();
     NSString *sw = gDeviceProfile[@"screenW"] ?: @"393";
     NSString *sh = gDeviceProfile[@"screenH"] ?: @"852";
     NSString *sc = gDeviceProfile[@"scale"] ?: @"3";
 
-    // 构建单行JS，避免编译器解析问题
     NSMutableString *js = [NSMutableString string];
     [js appendString:@"Object.defineProperty(navigator, 'platform', {get: function() { return 'iPhone'; }});"];
     [js appendFormat:@"Object.defineProperty(navigator, 'userAgent', {get: function() { return '%@'; }});", fakeUA];
@@ -581,14 +579,28 @@ static NSString *buildWKWebViewJSScript(void) {
 }
 
 static IMP orig_wkInit = NULL;
-static id my_wkInit(id self, SEL _cmd, CGRect frame, WKWebViewConfiguration *configuration) {
-    if (!configuration) configuration = [[WKWebViewConfiguration alloc] init];
+static id my_wkInit(id self, SEL _cmd, CGRect frame, id configuration) {
+    if (!configuration) {
+        Class wkConfigClass = NSClassFromString(@"WKWebViewConfiguration");
+        configuration = [[wkConfigClass alloc] init];
+    }
+    // 设置假UserAgent
     NSString *fakeUA = buildFakeUserAgent();
-    configuration.applicationNameForUserAgent = fakeUA;
+    [configuration setValue:fakeUA forKey:@"applicationNameForUserAgent"];
+
+    // 注入JS脚本
     NSString *js = buildWKWebViewJSScript();
-    WKUserScript *script = [[WKUserScript alloc] initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-    [configuration.userContentController addUserScript:script];
-    return ((id (*)(id, SEL, CGRect, WKWebViewConfiguration *))orig_wkInit)(self, _cmd, frame, configuration);
+    Class userScriptClass = NSClassFromString(@"WKUserScript");
+    id script = [[userScriptClass alloc] init];
+    // 用KVC设置属性（避免依赖头文件）
+    [script setValue:js forKey:@"source"];
+    [script setValue:@(0) forKey:@"injectionTime"]; // AtDocumentStart = 0
+    [script setValue:@(NO) forKey:@"forMainFrameOnly"];
+
+    id contentController = [configuration valueForKey:@"userContentController"];
+    [contentController performSelector:@selector(addUserScript:) withObject:script];
+
+    return ((id (*)(id, SEL, CGRect, id))orig_wkInit)(self, _cmd, frame, configuration);
 }
 
 static IMP orig_evalJS = NULL;
@@ -622,7 +634,7 @@ static id my_wkLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
 
 // ========== 14. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.8.1 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.8.2 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -703,7 +715,8 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    Class wkCls = objc_getClass("WKWebView");
+    // WKWebView hooks - 纯Runtime，不依赖WebKit头文件
+    Class wkCls = NSClassFromString(@"WKWebView");
     if (wkCls) {
         Method m1 = class_getInstanceMethod(wkCls, @selector(initWithFrame:configuration:));
         if (m1) { orig_wkInit = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_wkInit); }
@@ -713,5 +726,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m3) { orig_evalJS = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_evalJS); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.8.1 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.8.2 init complete ===");
 }
