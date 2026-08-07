@@ -1,4 +1,4 @@
-// AliSecBypass v5.3-fix2 - 修复链接错误 (Security符号fishhook找不到)
+// AliSecBypass v5.3-fix5 - 移除Keychain hook，专注IDFV/IDFA伪装
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -14,7 +14,6 @@
 #include <fishhook.h>
 #include <dobby.h>
 #include <mach-o/dyld.h>
-#include <Security/Security.h>
 
 // ========== 日志工具 ==========
 static dispatch_queue_t gLogQueue = NULL;
@@ -188,56 +187,7 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 5. Keychain Hook (DobbyHook, 不用fishhook) ==========
-static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
-static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    OSStatus status = orig_SecItemCopyMatching(query, result);
-    if (status == errSecSuccess && result && *result) {
-        NSString *account = nil;
-        CFTypeRef acctRef = CFDictionaryGetValue(query, kSecAttrAccount);
-        if (acctRef) account = (__bridge NSString *)acctRef;
-        NSArray *deviceKeys = @[@"device_id", @"uuid", @"idfv", @"idfa", @"install_id", @"device_fingerprint",
-                                 @"bd_did", @"tt_did", @"openudid", @"clientudid", @"mssdk_device_id"];
-        BOOL isDeviceKey = NO;
-        if (account) {
-            NSString *low = [account lowercaseString];
-            for (NSString *k in deviceKeys) { if ([low containsString:k]) { isDeviceKey = YES; break; } }
-        }
-        if (isDeviceKey) {
-            bypassLog([NSString stringWithFormat:@"[Keychain] BLOCKED read: %@", account]);
-            CFRelease(*result);
-            *result = NULL;
-            return errSecItemNotFound;
-        }
-    }
-    return status;
-}
-
-static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef *);
-static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    CFTypeRef acctRef = CFDictionaryGetValue(attributes, kSecAttrAccount);
-    if (acctRef) {
-        NSString *account = (__bridge NSString *)acctRef;
-        NSArray *deviceKeys = @[@"device_id", @"uuid", @"idfv", @"idfa", @"install_id", @"device_fingerprint",
-                                 @"bd_did", @"tt_did", @"openudid", @"clientudid", @"mssdk_device_id"];
-        NSString *low = [account lowercaseString];
-        for (NSString *k in deviceKeys) {
-            if ([low containsString:k]) {
-                bypassLog([NSString stringWithFormat:@"[Keychain] BLOCKED write: %@", account]);
-                return errSecSuccess;
-            }
-        }
-    }
-    return orig_SecItemAdd(attributes, result);
-}
-
-static void hookKeychain(void) {
-    int r1 = DobbyHook((void *)SecItemCopyMatching, (void *)my_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching);
-    int r2 = DobbyHook((void *)SecItemAdd, (void *)my_SecItemAdd, (void **)&orig_SecItemAdd);
-    bypassLog([NSString stringWithFormat:@"[Hook] Keychain DobbyHook: CopyMatching=%d Add=%d", r1, r2]);
-}
-
-// ========== 6. 隐藏自身 dylib ==========
+// ========== 5. 隐藏自身 dylib ==========
 static const char *(*orig_dyld_get_image_name)(uint32_t);
 static const char *my_dyld_get_image_name(uint32_t image_index) {
     const char *name = orig_dyld_get_image_name(image_index);
@@ -247,7 +197,7 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 7. 精确域名拦截 ==========
+// ========== 6. 精确域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"tnc0-", @"tnc16-", @"mon11-misc", @"security-lq",
@@ -257,7 +207,7 @@ static BOOL isBlockedHost(NSString *host) {
     return NO;
 }
 
-// ========== 8. fishhook 系统函数 ==========
+// ========== 7. fishhook 系统函数 ==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
@@ -308,7 +258,7 @@ static int my_getaddrinfo(const char *node, const char *service, const struct ad
     return orig_getaddrinfo(node, service, hints, res);
 }
 
-// ========== 9. dlopen/dlsym 隐藏 ==========
+// ========== 8. dlopen/dlsym 隐藏 ==========
 static void *(*orig_dlopen)(const char *, int);
 static void *my_dlopen(const char *path, int mode) {
     if (path && (strstr(path, "AliSecBypass") || strstr(path, "bypass") || strstr(path, "fishhook"))) {
@@ -328,7 +278,7 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-// ========== 10. NSURLSession Hook ==========
+// ========== 9. NSURLSession Hook ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
@@ -341,15 +291,14 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 11. 初始化 (priority 101) ==========
+// ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.3-fix2 init ===");
+    bypassLog(@"=== AliSecBypass v5.3-fix5 init ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
-    hookKeychain(); // DobbyHook Security函数
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -371,5 +320,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m) { orig_dtwr = method_getImplementation(m); method_setImplementation(m, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.3-fix2 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.3-fix5 init complete ===");
 }
