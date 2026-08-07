@@ -1,6 +1,4 @@
 // AliSecBypass v6.1.12 - 针对番茄畅听/红果/番茄小说字节系容器秒检测修复
-// 修复点：1)增加HTTP请求日志 2)Hook Keychain防旧IDFV泄露 3)Hook NSBundle隐藏容器特征
-//         4)扩充字段覆盖 5)探测BDAutoTrack/RangersAppLog 6)清理NSUserDefaults旧指纹
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱 / LiveContainer 注入
 
 #include <Foundation/Foundation.h>
@@ -15,7 +13,6 @@
 #include <arpa/inet.h>
 #include <fishhook.h>
 #include <mach-o/dyld.h>
-#include <Security/Security.h>
 
 // ========== 日志 ==========
 static dispatch_queue_t gLogQueue = NULL;
@@ -481,7 +478,7 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, wrappedCh);
 }
 
-// ========== 9. Keychain Hook ==========
+// ========== 9. Keychain Hook（不依赖 Security 框架符号）==========
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     OSStatus status = orig_SecItemCopyMatching(query, result);
@@ -499,16 +496,7 @@ static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result)
 
 static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    id obj = (__bridge id)attributes;
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        NSData *vData = ((NSDictionary *)obj)[(__bridge NSString *)kSecValueData];
-        if (vData) {
-            NSString *str = [[NSString alloc] initWithData:vData encoding:NSUTF8StringEncoding];
-            if (str && str.length > 20) {
-                bypassLog([NSString stringWithFormat:@"[Keychain] Add key, value: %@", str]);
-            }
-        }
-    }
+    bypassLog(@"[Keychain] SecItemAdd called");
     return orig_SecItemAdd(attributes, result);
 }
 
