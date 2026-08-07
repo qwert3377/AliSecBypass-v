@@ -6,6 +6,7 @@
 #include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
 #include <objc/runtime.h>
+#include <objc/message.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
@@ -27,7 +28,6 @@ static void bypassLog(NSString *msg) {
         NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *base = paths.firstObject;
-        // 日志写到插件自身 Documents，避免被 App 清理
         NSString *logPath = [base stringByAppendingPathComponent:@"AliSecBypass.log"];
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
         if (fh) { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
@@ -86,7 +86,6 @@ static void initDeviceProfile(void) {
     gFakeAID = [ud stringForKey:@"AliSecBypass_FakeAID"];
     if (!gFakeAID) { gFakeAID = [NSString stringWithFormat:@"%u", arc4random_uniform(900000000) + 100000000]; [ud setObject:gFakeAID forKey:@"AliSecBypass_FakeAID"]; [ud synchronize]; }
 
-    // 清理可能残留的旧真实指纹（字节常存 NSUserDefaults）
     NSArray *keysToRemove = @[@"kOpenUDID", @"openUDID", @"BDOpenUDID", @"RangersOpenUDID", @"ttinstall_id", @"tt_device_id", @"device_id_local"];
     for (NSString *k in keysToRemove) {
         if ([ud objectForKey:k]) { [ud removeObjectForKey:k]; }
@@ -100,7 +99,6 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     NSMutableDictionary *mut = [original mutableCopy];
     if (!mut) return original;
 
-    // 保留 device_id（服务端生成账号标识），其余全伪装
     NSString *origVid = original[@"vid"];
     NSString *origModel = original[@"device_model"];
     NSString *origRes = original[@"resolution"];
@@ -120,7 +118,6 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     mut[@"oaid"] = gFakeOAID;
     mut[@"uuid"] = gFakeUUID;
     mut[@"aid"] = gFakeAID;
-    // device_id 如果是服务端下发则保留，否则也伪装
     if (!origDeviceID || origDeviceID.length == 0) {
         mut[@"device_id"] = gFakeAID;
     }
@@ -178,7 +175,7 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     return mut;
 }
 
-// ========== TTNetworkManager Hook（v6.1.2双block + commonParams方法）==========
+// ========== TTNetworkManager Hook ==========
 typedef NSDictionary * (^CommonParamsBlock)(void);
 typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
 
@@ -242,14 +239,12 @@ static void hookTTNetworkCommonParams(void) {
 
 // ========== 探测并 Hook 字节系其他指纹 SDK ==========
 static void hookByteDanceSDKs(void) {
-    // BDAutoTrack / RangersAppLog / TTInstall 等常见类名
     NSArray *classNames = @[@"BDAutoTrack", @"RangersAppLog", @"TTInstall", @"TTTracker", @"VolcEngineTracker"];
     for (NSString *clsName in classNames) {
         Class cls = objc_getClass([clsName UTF8String]);
         if (!cls) continue;
         bypassLog([NSString stringWithFormat:@"[SDK] Found %@, attempting hook", clsName]);
 
-        // Hook deviceID / installID / ssid 等常见方法
         Method m;
         if ((m = class_getInstanceMethod(cls, @selector(deviceID)))) {
             IMP orig = method_getImplementation(m);
@@ -276,7 +271,7 @@ static void hookByteDanceSDKs(void) {
     }
 }
 
-// ========== 1. UIDevice（完整版）==========
+// ========== 1. UIDevice ==========
 static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
@@ -310,7 +305,7 @@ static void hookASIdentifierManager(void) {
     }
 }
 
-// ========== 3. UIScreen / NSProcessInfo（完整版）==========
+// ========== 3. UIScreen / NSProcessInfo ==========
 static CGRect my_screenBounds(id self, SEL _cmd) {
     return CGRectMake(0, 0, [gDeviceProfile[@"screenW"] floatValue], [gDeviceProfile[@"screenH"] floatValue]);
 }
@@ -369,7 +364,7 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 域名拦截（精简版）==========
+// ========== 6. 域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"mon11-misc.fqnovel", @"tnc.bytedance", @"toblog"];
@@ -377,7 +372,7 @@ static BOOL isBlockedHost(NSString *host) {
     return NO;
 }
 
-// ========== 7. fishhook 系统函数（精简版）==========
+// ========== 7. fishhook 系统函数 ==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
@@ -462,7 +457,6 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     NSString *host = url.host ?: @"";
     NSString *path = url.path ?: @"";
 
-    // 记录所有请求（包括Body里的参数）
     if ([path containsString:@"common" ] || [path containsString:@"params"] || [path containsString:@"device"] || [path containsString:@"log"]) {
         NSData *body = request.HTTPBody;
         NSString *bodyStr = body ? [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] : @"(no body)";
@@ -475,7 +469,6 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
         [dummy cancel]; return dummy;
     }
 
-    // 包装 completionHandler 以记录响应
     void (^wrappedCh)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
         if (httpResp && [path containsString:@"common" ]) {
@@ -488,7 +481,7 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, wrappedCh);
 }
 
-// ========== 9. Keychain Hook（防止读取旧真实 IDFV）==========
+// ========== 9. Keychain Hook ==========
 static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
 static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     OSStatus status = orig_SecItemCopyMatching(query, result);
@@ -519,9 +512,12 @@ static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     return orig_SecItemAdd(attributes, result);
 }
 
-// ========== 10. NSBundle Hook（隐藏容器修改的 Bundle ID / 路径）==========
+// ========== 10. NSBundle Hook ==========
 static NSString *gOriginalBundleID = nil;
 static NSString *gOriginalBundlePath = nil;
+static IMP orig_bundleIdentifier = NULL;
+static IMP orig_bundlePath = NULL;
+static IMP orig_infoDictionary = NULL;
 
 static NSString *my_bundleIdentifier(id self, SEL _cmd) {
     return gOriginalBundleID ?: @"com.dragon.read";
@@ -530,7 +526,7 @@ static NSString *my_bundlePath(id self, SEL _cmd) {
     return gOriginalBundlePath ?: @"/var/containers/Bundle/Application/XXXX/番茄畅听.app";
 }
 static NSDictionary *my_infoDictionary(id self, SEL _cmd) {
-    NSDictionary *orig = ((NSDictionary *(*)(id, SEL))objc_msgSend)(self, @selector(infoDictionary));
+    NSDictionary *orig = ((NSDictionary *(*)(id, SEL))orig_infoDictionary)(self, @selector(infoDictionary));
     NSMutableDictionary *mut = [orig mutableCopy];
     if (gOriginalBundleID) mut[@"CFBundleIdentifier"] = gOriginalBundleID;
     return mut;
@@ -541,17 +537,25 @@ static void hookNSBundle(void) {
     gOriginalBundleID = mainBundle.bundleIdentifier;
     gOriginalBundlePath = mainBundle.bundlePath;
 
-    // 如果 Bundle ID 已经被容器篡改（包含 LiveContainer 等），则伪装回常见值
     if (gOriginalBundleID && ([gOriginalBundleID containsString:@"LiveContainer"] || [gOriginalBundleID containsString:@"esign"] || [gOriginalBundleID containsString:@"troll"])) {
         bypassLog([NSString stringWithFormat:@"[Bundle] Container detected, original ID: %@", gOriginalBundleID]);
-        gOriginalBundleID = @"com.dragon.read"; // 番茄畅听原版 Bundle ID，红果/番茄小说请自行改
+        gOriginalBundleID = @"com.dragon.read";
     }
 
     Class bundleCls = objc_getClass("NSBundle");
     Method m;
-    if ((m = class_getInstanceMethod(bundleCls, @selector(bundleIdentifier)))) method_setImplementation(m, (IMP)my_bundleIdentifier);
-    if ((m = class_getInstanceMethod(bundleCls, @selector(bundlePath)))) method_setImplementation(m, (IMP)my_bundlePath);
-    if ((m = class_getInstanceMethod(bundleCls, @selector(infoDictionary)))) method_setImplementation(m, (IMP)my_infoDictionary);
+    if ((m = class_getInstanceMethod(bundleCls, @selector(bundleIdentifier)))) {
+        orig_bundleIdentifier = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_bundleIdentifier);
+    }
+    if ((m = class_getInstanceMethod(bundleCls, @selector(bundlePath)))) {
+        orig_bundlePath = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_bundlePath);
+    }
+    if ((m = class_getInstanceMethod(bundleCls, @selector(infoDictionary)))) {
+        orig_infoDictionary = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_infoDictionary);
+    }
     bypassLog(@"[Bundle] NSBundle hooked");
 }
 
