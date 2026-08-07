@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.8 - WebView JS环境伪装 + Polaris全面拦截 + 更多系统API伪装
+// AliSecBypass v6.1.8.1 - 修复JS字符串编译错误
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -561,30 +561,32 @@ static void my_removeObject(id self, SEL _cmd, NSString *key) {
     ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
 }
 
-// ========== 13. WKWebView 全面伪装（核心）==========
+// ========== 13. WKWebView 全面伪装（核心 - 修复JS字符串）==========
+static NSString *buildWKWebViewJSScript(void) {
+    NSString *fakeUA = buildFakeUserAgent();
+    NSString *sw = gDeviceProfile[@"screenW"] ?: @"393";
+    NSString *sh = gDeviceProfile[@"screenH"] ?: @"852";
+    NSString *sc = gDeviceProfile[@"scale"] ?: @"3";
+
+    // 构建单行JS，避免编译器解析问题
+    NSMutableString *js = [NSMutableString string];
+    [js appendString:@"Object.defineProperty(navigator, 'platform', {get: function() { return 'iPhone'; }});"];
+    [js appendFormat:@"Object.defineProperty(navigator, 'userAgent', {get: function() { return '%@'; }});", fakeUA];
+    [js appendFormat:@"Object.defineProperty(screen, 'width', {get: function() { return %@; }});", sw];
+    [js appendFormat:@"Object.defineProperty(screen, 'height', {get: function() { return %@; }});", sh];
+    [js appendFormat:@"Object.defineProperty(screen, 'availWidth', {get: function() { return %@; }});", sw];
+    [js appendFormat:@"Object.defineProperty(screen, 'availHeight', {get: function() { return %@; }});", sh];
+    [js appendFormat:@"window.devicePixelRatio = %@;", sc];
+    return js;
+}
+
 static IMP orig_wkInit = NULL;
 static id my_wkInit(id self, SEL _cmd, CGRect frame, WKWebViewConfiguration *configuration) {
     if (!configuration) configuration = [[WKWebViewConfiguration alloc] init];
-    // 设置假UserAgent
     NSString *fakeUA = buildFakeUserAgent();
     configuration.applicationNameForUserAgent = fakeUA;
-    // 注入JS覆盖navigator属性
-    NSString *js = [NSString stringWithFormat:@"
-        Object.defineProperty(navigator, 'platform', {get: function() { return 'iPhone'; }});
-        Object.defineProperty(navigator, 'userAgent', {get: function() { return '%@'; }});
-        Object.defineProperty(screen, 'width', {get: function() { return %@; }});
-        Object.defineProperty(screen, 'height', {get: function() { return %@; }});
-        Object.defineProperty(screen, 'availWidth', {get: function() { return %@; }});
-        Object.defineProperty(screen, 'availHeight', {get: function() { return %@; }});
-        window.devicePixelRatio = %@;
-    ", fakeUA,
-        gDeviceProfile[@"screenW"] ?: @"393",
-        gDeviceProfile[@"screenH"] ?: @"852",
-        gDeviceProfile[@"screenW"] ?: @"393",
-        gDeviceProfile[@"screenH"] ?: @"852",
-        gDeviceProfile[@"scale"] ?: @"3"];
+    NSString *js = buildWKWebViewJSScript();
     WKUserScript *script = [[WKUserScript alloc] initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-    [configuration.userContentController addScriptMessageHandler:(id<WKScriptMessageHandler>)self name:@"bypass"];
     [configuration.userContentController addUserScript:script];
     return ((id (*)(id, SEL, CGRect, WKWebViewConfiguration *))orig_wkInit)(self, _cmd, frame, configuration);
 }
@@ -620,7 +622,7 @@ static id my_wkLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
 
 // ========== 14. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.8 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.8.1 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -701,7 +703,6 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    // WKWebView hooks
     Class wkCls = objc_getClass("WKWebView");
     if (wkCls) {
         Method m1 = class_getInstanceMethod(wkCls, @selector(initWithFrame:configuration:));
@@ -712,5 +713,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m3) { orig_evalJS = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_evalJS); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.8 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.8.1 init complete ===");
 }
