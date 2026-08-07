@@ -1,5 +1,6 @@
-// AliSecBypass v4.7 - fishhook + ObjC Runtime 混合方案
+// AliSecBypass v4.8 - fishhook + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
+// 功能：反调试 + 网络拦截 + 越狱隐藏 + 首次打开换 ID
 
 #include <Foundation/Foundation.h>
 #include <objc/runtime.h>
@@ -39,12 +40,69 @@ static void bypassLog(NSString *msg) {
     });
 }
 
+// ========== ID 替换（首次打开换 ID，后续复用）==========
+static NSString *gFakeID = nil;
+
+static NSUUID *(*orig_identifierForVendor)(id, SEL);
+static NSUUID *my_identifierForVendor(id self, SEL _cmd) {
+    if (gFakeID) {
+        return [[NSUUID alloc] initWithUUIDString:gFakeID];
+    }
+    return orig_identifierForVendor(self, _cmd);
+}
+
+static NSUUID *(*orig_advertisingIdentifier)(id, SEL);
+static NSUUID *my_advertisingIdentifier(id self, SEL _cmd) {
+    if (gFakeID) {
+        return [[NSUUID alloc] initWithUUIDString:gFakeID];
+    }
+    return orig_advertisingIdentifier(self, _cmd);
+}
+
+static void initIDSwap(void) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSString *savedID = [ud stringForKey:@"AliSecBypass_FakeID"];
+
+    if (!savedID) {
+        savedID = [[NSUUID UUID] UUIDString];
+        [ud setObject:savedID forKey:@"AliSecBypass_FakeID"];
+        [ud synchronize];
+        bypassLog([NSString stringWithFormat:@"[IDSwap] First launch, new ID: %@", savedID]);
+    } else {
+        bypassLog([NSString stringWithFormat:@"[IDSwap] Reuse saved ID: %@", savedID]);
+    }
+    gFakeID = savedID;
+
+    // Hook UIDevice identifierForVendor
+    Class uidClass = objc_getClass("UIDevice");
+    if (uidClass) {
+        SEL sel = sel_registerName("identifierForVendor");
+        Method m = class_getInstanceMethod(uidClass, sel);
+        if (m) {
+            orig_identifierForVendor = (void *)method_getImplementation(m);
+            method_setImplementation(m, (IMP)my_identifierForVendor);
+            bypassLog(@"[IDSwap] UIDevice identifierForVendor hooked");
+        }
+    }
+
+    // Hook ASIdentifierManager advertisingIdentifier
+    Class asClass = objc_getClass("ASIdentifierManager");
+    if (asClass) {
+        SEL sel = sel_registerName("advertisingIdentifier");
+        Method m = class_getInstanceMethod(asClass, sel);
+        if (m) {
+            orig_advertisingIdentifier = (void *)method_getImplementation(m);
+            method_setImplementation(m, (IMP)my_advertisingIdentifier);
+            bypassLog(@"[IDSwap] ASIdentifierManager advertisingIdentifier hooked");
+        }
+    }
+}
+
 // ========== 1. fishhook connect() - Socket 层拦截 ==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
         struct sockaddr_in *sin = (struct sockaddr_in *)addr;
-        // 先把 IP 转成 NSString（避免异步时局部变量失效）
         NSString *ipStr = [NSString stringWithFormat:@"%s", inet_ntoa(sin->sin_addr)];
         bypassLog([NSString stringWithFormat:@"[connect] %@:%d", ipStr, ntohs(sin->sin_port)]);
     }
@@ -79,7 +137,6 @@ static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
 
-    // 宽松匹配：只要包含关键字就拦截
     NSArray *blockKeywords = @[@"tnc16-alisg",
                                 @"tnc16-alisc1",
                                 @"mon11-misc",
@@ -147,8 +204,12 @@ static void hookNSURLSession(void) {
 
 // ========== 6. 初始化 ==========
 static void initAllHooks(void) {
-    bypassLog(@"=== AliSecBypass v4.7 init ===");
+    bypassLog(@"=== AliSecBypass v4.8 init ===");
 
+    // 首次打开换 ID
+    initIDSwap();
+
+    // fishhook 系统函数
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
         {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace},
@@ -158,9 +219,10 @@ static void initAllHooks(void) {
     int ret = rebind_symbols(rebinds, 4);
     bypassLog([NSString stringWithFormat:@"[fishhook] rebind_symbols returned: %d", ret]);
 
+    // ObjC Runtime Hook
     hookNSURLSession();
 
-    bypassLog(@"=== AliSecBypass v4.7 init complete ===");
+    bypassLog(@"=== AliSecBypass v4.8 init complete ===");
 }
 
 // ========== 构造函数（延迟 2 秒，后台队列）==========
