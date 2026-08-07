@@ -1,8 +1,9 @@
-// AliSecBypass v6.1.7 - 最早加载 + 全面请求监控 + NSUserDefaults监控 + 更多域名拦截
+// AliSecBypass v6.1.8 - WebView JS环境伪装 + Polaris全面拦截 + 更多系统API伪装
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
+#include <WebKit/WebKit.h>
 #include <objc/runtime.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
@@ -64,6 +65,14 @@ static void initDeviceProfile(void) {
 
     gFakeIDFA = [ud stringForKey:@"AliSecBypass_FakeIDFA"];
     if (!gFakeIDFA) { gFakeIDFA = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"]; [ud synchronize]; }
+}
+
+// ========== 构建假UserAgent（用于WebView）==========
+static NSString *buildFakeUserAgent(void) {
+    if (!gDeviceProfile) return @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+    NSString *sysVer = gDeviceProfile[@"systemVersion"] ?: @"17.5.1";
+    NSString *verUnderscore = [sysVer stringByReplacingOccurrencesOfString:@"." withString:@"_"];
+    return [NSString stringWithFormat:@"Mozilla/5.0 (iPhone; CPU iPhone OS %@ like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", verUnderscore];
 }
 
 // ========== 核心：基于原始字典修改，只换硬件指纹，保留所有其他字段 ==========
@@ -244,6 +253,7 @@ static unsigned long long my_physicalMemory(id self, SEL _cmd) {
 static NSString *my_osVerString(id self, SEL _cmd) {
     return [NSString stringWithFormat:@"Version %@ (Build 21F79)", gDeviceProfile[@"systemVersion"] ?: @"17.5.1"];
 }
+static NSString *my_processName(id self, SEL _cmd) { return @"FanqieNovel"; }
 
 static void hookScreenAndProcessInfo(void) {
     Class screen = objc_getClass("UIScreen");
@@ -259,6 +269,7 @@ static void hookScreenAndProcessInfo(void) {
         Method m;
         if ((m = class_getInstanceMethod(pi, @selector(physicalMemory)))) method_setImplementation(m, (IMP)my_physicalMemory);
         if ((m = class_getInstanceMethod(pi, @selector(operatingSystemVersionString)))) method_setImplementation(m, (IMP)my_osVerString);
+        if ((m = class_getInstanceMethod(pi, @selector(processName)))) method_setImplementation(m, (IMP)my_processName);
     }
 }
 
@@ -289,7 +300,8 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"msdk.bytedance", @"volc.bytedance",
-                           @"mon11-misc.fqnovel", @"tnc", @"anti", @"risk", @"verify"];
+                           @"mon11-misc.fqnovel", @"tnc", @"anti", @"risk", @"verify",
+                           @"msv6.wosms.cn", @"wosms.cn"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
     return NO;
 }
@@ -382,21 +394,17 @@ static void my_abort(void) {
     bypassLog([NSString stringWithFormat:@"[Block] abort() blocked, stack:\n%@", [[NSThread callStackSymbols] componentsJoinedByString:@"\n"]]);
 }
 
+static char *(*orig_getenv)(const char *);
+static char *my_getenv(const char *name) {
+    if (name && (strstr(name, "DYLD_INSERT_LIBRARIES") || strstr(name, "DYLD_"))) return NULL;
+    return orig_getenv(name);
+}
+
 // ========== 8. NSURLSession 全面监控 ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
-    NSString *path = url.path ?: @"";
-    NSString *query = url.query ?: @"";
-
-    // 记录所有请求（只记录前20个避免刷屏）
-    static int reqCount = 0;
-    if (reqCount < 20) {
-        reqCount++;
-        bypassLog([NSString stringWithFormat:@"[Req] #%d %@ %@?%@", reqCount, host, path, query]);
-    }
-
     if (isBlockedHost(host)) {
         bypassLog([NSString stringWithFormat:@"[Block] Blocked request to %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
@@ -409,11 +417,6 @@ static IMP orig_dataTask = NULL;
 static NSURLSessionDataTask *my_dataTask(id self, SEL _cmd, NSURLRequest *request) {
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
-    static int reqCount2 = 0;
-    if (reqCount2 < 20) {
-        reqCount2++;
-        bypassLog([NSString stringWithFormat:@"[Req2] #%d %@", reqCount2, host]);
-    }
     if (isBlockedHost(host)) {
         bypassLog([NSString stringWithFormat:@"[Block] Blocked dataTask to %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_dataTask)(self, _cmd, request);
@@ -488,7 +491,7 @@ static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *optio
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
 }
 
-// ========== 11. NSBundle 路径伪装 ==========
+// ========== 11. NSBundle 全面伪装 ==========
 static IMP orig_bundlePath = NULL;
 static NSString *my_bundlePath(id self, SEL _cmd) {
     NSString *path = ((NSString *(*)(id, SEL))orig_bundlePath)(self, _cmd);
@@ -519,12 +522,27 @@ static NSString *my_executablePath(id self, SEL _cmd) {
     return path;
 }
 
-// ========== 12. NSUserDefaults 监控（阻止写入检测标志）==========
+static IMP orig_bundleIdentifier = NULL;
+static NSString *my_bundleIdentifier(id self, SEL _cmd) {
+    return @"com.dragon.read";
+}
+
+static IMP orig_objectForInfoDictKey = NULL;
+static id my_objectForInfoDictKey(id self, SEL _cmd, NSString *key) {
+    id result = ((id (*)(id, SEL, NSString *))orig_objectForInfoDictKey)(self, _cmd, key);
+    if ([key isEqualToString:@"CFBundleIdentifier"]) return @"com.dragon.read";
+    if ([key isEqualToString:@"CFBundleExecutable"]) return @"FanqieNovel";
+    if ([key isEqualToString:@"CFBundleName"]) return @"FanqieNovel";
+    return result;
+}
+
+// ========== 12. NSUserDefaults 监控 ==========
 static IMP orig_setObject = NULL;
 static void my_setObject(id self, SEL _cmd, id value, NSString *key) {
     if (key && ([key containsString:@"security"] || [key containsString:@"risk"] || [key containsString:@"check"] ||
                  [key containsString:@"detect"] || [key containsString:@"unsafe"] || [key containsString:@"ban"] ||
-                 [key containsString:@"blacklist"] || [key containsString:@"violation"])) {
+                 [key containsString:@"blacklist"] || [key containsString:@"violation"] ||
+                 [key containsString:@"polaris"] || [key containsString:@"blank"])) {
         bypassLog([NSString stringWithFormat:@"[Block] NSUserDefaults setObject blocked for key=%@", key]);
         return;
     }
@@ -535,16 +553,74 @@ static IMP orig_removeObject = NULL;
 static void my_removeObject(id self, SEL _cmd, NSString *key) {
     if (key && ([key containsString:@"security"] || [key containsString:@"risk"] || [key containsString:@"check"] ||
                  [key containsString:@"detect"] || [key containsString:@"unsafe"] || [key containsString:@"ban"] ||
-                 [key containsString:@"blacklist"] || [key containsString:@"violation"])) {
+                 [key containsString:@"blacklist"] || [key containsString:@"violation"] ||
+                 [key containsString:@"polaris"] || [key containsString:@"blank"])) {
         bypassLog([NSString stringWithFormat:@"[Block] NSUserDefaults removeObject blocked for key=%@", key]);
         return;
     }
     ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
 }
 
-// ========== 13. 初始化（优先级1，最早执行）==========
+// ========== 13. WKWebView 全面伪装（核心）==========
+static IMP orig_wkInit = NULL;
+static id my_wkInit(id self, SEL _cmd, CGRect frame, WKWebViewConfiguration *configuration) {
+    if (!configuration) configuration = [[WKWebViewConfiguration alloc] init];
+    // 设置假UserAgent
+    NSString *fakeUA = buildFakeUserAgent();
+    configuration.applicationNameForUserAgent = fakeUA;
+    // 注入JS覆盖navigator属性
+    NSString *js = [NSString stringWithFormat:@"
+        Object.defineProperty(navigator, 'platform', {get: function() { return 'iPhone'; }});
+        Object.defineProperty(navigator, 'userAgent', {get: function() { return '%@'; }});
+        Object.defineProperty(screen, 'width', {get: function() { return %@; }});
+        Object.defineProperty(screen, 'height', {get: function() { return %@; }});
+        Object.defineProperty(screen, 'availWidth', {get: function() { return %@; }});
+        Object.defineProperty(screen, 'availHeight', {get: function() { return %@; }});
+        window.devicePixelRatio = %@;
+    ", fakeUA,
+        gDeviceProfile[@"screenW"] ?: @"393",
+        gDeviceProfile[@"screenH"] ?: @"852",
+        gDeviceProfile[@"screenW"] ?: @"393",
+        gDeviceProfile[@"screenH"] ?: @"852",
+        gDeviceProfile[@"scale"] ?: @"3"];
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+    [configuration.userContentController addScriptMessageHandler:(id<WKScriptMessageHandler>)self name:@"bypass"];
+    [configuration.userContentController addUserScript:script];
+    return ((id (*)(id, SEL, CGRect, WKWebViewConfiguration *))orig_wkInit)(self, _cmd, frame, configuration);
+}
+
+static IMP orig_evalJS = NULL;
+static void my_evalJS(id self, SEL _cmd, NSString *js, void (^completion)(id, NSError *)) {
+    NSString *lowerJS = [js lowercaseString];
+    if ([lowerJS containsString:@"useragent"] || [lowerJS containsString:@"navigator"] ||
+        [lowerJS containsString:@"screen"] || [lowerJS containsString:@"device"] ||
+        [lowerJS containsString:@"platform"] || [lowerJS containsString:@"vendor"]) {
+        bypassLog([NSString stringWithFormat:@"[WebView] Blocked suspicious JS: %@", js]);
+        if (completion) {
+            if ([lowerJS containsString:@"useragent"]) completion(buildFakeUserAgent(), nil);
+            else if ([lowerJS containsString:@"screen.width"]) completion(gDeviceProfile[@"screenW"] ?: @"393", nil);
+            else if ([lowerJS containsString:@"screen.height"]) completion(gDeviceProfile[@"screenH"] ?: @"852", nil);
+            else completion(@"", nil);
+        }
+        return;
+    }
+    ((void (*)(id, SEL, NSString *, void (^)(id, NSError *)))orig_evalJS)(self, _cmd, js, completion);
+}
+
+static IMP orig_wkLoadRequest = NULL;
+static id my_wkLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
+    NSURL *url = request.URL;
+    NSString *host = url.host ?: @"";
+    if (isBlockedHost(host)) {
+        bypassLog([NSString stringWithFormat:@"[Block] WKWebView load blocked for %@", host]);
+        return nil;
+    }
+    return ((id (*)(id, SEL, NSURLRequest *))orig_wkLoadRequest)(self, _cmd, request);
+}
+
+// ========== 14. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.7 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.8 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -563,9 +639,10 @@ __attribute__((constructor(1))) static void constructor(void) {
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
         {"exit", (void *)my_exit, (void **)&orig_exit},
-        {"abort", (void *)my_abort, (void **)&orig_abort}
+        {"abort", (void *)my_abort, (void **)&orig_abort},
+        {"getenv", (void *)my_getenv, (void **)&orig_getenv}
     };
-    rebind_symbols(rebinds, 11);
+    rebind_symbols(rebinds, 12);
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
@@ -610,6 +687,10 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_resourcePath = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_resourcePath); }
         Method m3 = class_getInstanceMethod(bundleCls, @selector(executablePath));
         if (m3) { orig_executablePath = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_executablePath); }
+        Method m4 = class_getInstanceMethod(bundleCls, @selector(bundleIdentifier));
+        if (m4) { orig_bundleIdentifier = method_getImplementation(m4); method_setImplementation(m4, (IMP)my_bundleIdentifier); }
+        Method m5 = class_getInstanceMethod(bundleCls, @selector(objectForInfoDictionaryKey:));
+        if (m5) { orig_objectForInfoDictKey = method_getImplementation(m5); method_setImplementation(m5, (IMP)my_objectForInfoDictKey); }
     }
 
     Class udCls = objc_getClass("NSUserDefaults");
@@ -620,5 +701,16 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.7 init complete ===");
+    // WKWebView hooks
+    Class wkCls = objc_getClass("WKWebView");
+    if (wkCls) {
+        Method m1 = class_getInstanceMethod(wkCls, @selector(initWithFrame:configuration:));
+        if (m1) { orig_wkInit = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_wkInit); }
+        Method m2 = class_getInstanceMethod(wkCls, @selector(loadRequest:));
+        if (m2) { orig_wkLoadRequest = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_wkLoadRequest); }
+        Method m3 = class_getInstanceMethod(wkCls, @selector(evaluateJavaScript:completionHandler:));
+        if (m3) { orig_evalJS = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_evalJS); }
+    }
+
+    bypassLog(@"=== AliSecBypass v6.1.8 init complete ===");
 }
