@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.10.1 - 测试：去掉commonParams方法hook + 去掉msv6.wosms.cn拦截
+// AliSecBypass v6.1.10.2 - 极简核心版：去掉taskCancel/getenv/exit/abort（导致TNC失败和检测），只保留最稳定hook
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -12,7 +12,6 @@
 #include <arpa/inet.h>
 #include <fishhook.h>
 #include <mach-o/dyld.h>
-#include <stdlib.h>
 
 // ========== 日志 ==========
 static dispatch_queue_t gLogQueue = NULL;
@@ -129,7 +128,7 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     return mut;
 }
 
-// ========== TTNetworkManager Hook（只保留block，去掉commonParams方法hook）==========
+// ========== TTNetworkManager Hook（只保留block）==========
 typedef NSDictionary * (^CommonParamsBlock)(void);
 typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
 
@@ -177,7 +176,6 @@ static void hookTTNetworkCommonParams(void) {
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] commonParamsblockWithURL hooked");
     }
-    // 不 hook commonParams 方法，避免冲突
 }
 
 // ========== 1. UIDevice（只hook idfv）==========
@@ -229,7 +227,7 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 5. 域名拦截（去掉msv6.wosms.cn和wosms.cn）==========
+// ========== 5. 域名拦截（精简，只拦核心安全域名）==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"msdk.bytedance", @"volc.bytedance",
@@ -238,7 +236,7 @@ static BOOL isBlockedHost(NSString *host) {
     return NO;
 }
 
-// ========== 6. fishhook 系统函数 ==========
+// ========== 6. fishhook 系统函数（精简版）==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
@@ -247,11 +245,6 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         if ([ipStr hasPrefix:@"172.31."]) { errno = ECONNREFUSED; return -1; }
     }
     return orig_connect(sockfd, addr, addrlen);
-}
-
-static ssize_t (*orig_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
-static ssize_t my_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen) {
-    return orig_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
 }
 
 static int (*orig_ptrace)(int, pid_t, void *, int);
@@ -316,23 +309,7 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-static void (*orig_exit)(int);
-static void my_exit(int status) {
-    bypassLog([NSString stringWithFormat:@"[Block] exit(%d) blocked", status]);
-}
-
-static void (*orig_abort)(void);
-static void my_abort(void) {
-    bypassLog(@"[Block] abort() blocked");
-}
-
-static char *(*orig_getenv)(const char *);
-static char *my_getenv(const char *name) {
-    if (name && (strstr(name, "DYLD_INSERT_LIBRARIES") || strstr(name, "DYLD_"))) return NULL;
-    return orig_getenv(name);
-}
-
-// ========== 7. NSURLSession Hook ==========
+// ========== 7. NSURLSession Hook（只拦截请求创建，不拦截cancel）==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
@@ -344,21 +321,9 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-static IMP orig_taskCancel = NULL;
-static void my_taskCancel(id self, SEL _cmd) {
-    NSString *urlStr = @"";
-    if ([self respondsToSelector:@selector(currentRequest)]) {
-        NSURLRequest *req = [self currentRequest];
-        urlStr = req.URL.absoluteString ?: @"";
-    }
-    if (urlStr.length > 0) {
-        bypassLog([NSString stringWithFormat:@"[Cancel] Task cancel blocked for %@", urlStr]);
-    }
-}
-
 // ========== 8. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.10.1 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.10.2 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -367,19 +332,15 @@ __attribute__((constructor(1))) static void constructor(void) {
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
-        {"sendto", (void *)my_sendto, (void **)&orig_sendto},
         {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace},
         {"sysctl", (void *)my_sysctl, (void **)&orig_sysctl},
         {"getaddrinfo", (void *)my_getaddrinfo, (void **)&orig_getaddrinfo},
         {"uname", (void *)my_uname, (void **)&orig_uname},
         {"dlopen", (void *)my_dlopen, (void **)&orig_dlopen},
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
-        {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
-        {"exit", (void *)my_exit, (void **)&orig_exit},
-        {"abort", (void *)my_abort, (void **)&orig_abort},
-        {"getenv", (void *)my_getenv, (void **)&orig_getenv}
+        {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    rebind_symbols(rebinds, 12);
+    rebind_symbols(rebinds, 8);
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
@@ -387,12 +348,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    Class taskCls = objc_getClass("NSURLSessionDataTask");
-    if (!taskCls) taskCls = objc_getClass("__NSCFLocalDataTask");
-    if (taskCls) {
-        Method m = class_getInstanceMethod(taskCls, @selector(cancel));
-        if (m) { orig_taskCancel = method_getImplementation(m); method_setImplementation(m, (IMP)my_taskCancel); }
-    }
-
-    bypassLog(@"=== AliSecBypass v6.1.10.1 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.10.2 init complete ===");
 }
