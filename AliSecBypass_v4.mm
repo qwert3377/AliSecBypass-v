@@ -1,4 +1,4 @@
-// AliSecBypass v6.1 - 深度修改 commonParamsblock 返回值 + 补全 sysctl HW_MACHINE
+// AliSecBypass v6.1.1 - 修复 iOS 26 SDK objc_getClass 编译错误
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -196,7 +196,7 @@ static id my_commonParamsblockWithURL(id self, SEL _cmd) {
 }
 
 static void hookTTNetworkCommonParams(void) {
-    Class ttMgr = objc_getClass(@"TTNetworkManager");
+    Class ttMgr = objc_getClass("TTNetworkManager");
     if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
 
     Method m;
@@ -239,7 +239,7 @@ static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: 
 static NSString *my_localizedModel(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 
 static void hookUIDevice(void) {
-    Class uid = objc_getClass(@"UIDevice");
+    Class uid = objc_getClass("UIDevice");
     if (!uid) return;
     Method m;
     if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) method_setImplementation(m, (IMP)my_idfv);
@@ -256,8 +256,8 @@ static NSUUID *my_adId(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDS
 
 static void hookASIdentifierManager(void) {
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ dlopen(@"/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY); });
-    Class asid = objc_getClass(@"ASIdentifierManager");
+    dispatch_once(&once, ^{ dlopen("/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY); });
+    Class asid = objc_getClass("ASIdentifierManager");
     if (asid) {
         Method m = class_getInstanceMethod(asid, @selector(advertisingIdentifier));
         if (m) method_setImplementation(m, (IMP)my_adId);
@@ -284,7 +284,7 @@ static NSString *my_osVerString(id self, SEL _cmd) {
 }
 
 static void hookScreenAndProcessInfo(void) {
-    Class screen = objc_getClass(@"UIScreen");
+    Class screen = objc_getClass("UIScreen");
     if (screen) {
         Method m;
         if ((m = class_getInstanceMethod(screen, @selector(bounds)))) method_setImplementation(m, (IMP)my_screenBounds);
@@ -292,7 +292,7 @@ static void hookScreenAndProcessInfo(void) {
         if ((m = class_getInstanceMethod(screen, @selector(nativeBounds)))) method_setImplementation(m, (IMP)my_nativeBounds);
         if ((m = class_getInstanceMethod(screen, @selector(nativeScale)))) method_setImplementation(m, (IMP)my_nativeScale);
     }
-    Class pi = objc_getClass(@"NSProcessInfo");
+    Class pi = objc_getClass("NSProcessInfo");
     if (pi) {
         Method m;
         if ((m = class_getInstanceMethod(pi, @selector(physicalMemory)))) method_setImplementation(m, (IMP)my_physicalMemory);
@@ -423,7 +423,7 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
 
 // ========== 9. 初始化 ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1 init ===");
+    bypassLog(@"=== AliSecBypass v6.1.1 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -444,11 +444,11 @@ __attribute__((constructor(101))) static void constructor(void) {
     };
     rebind_symbols(rebinds, 9);
 
-    Class cls = objc_getClass(@"NSURLSession");
+    Class cls = objc_getClass("NSURLSession");
     if (cls) {
         Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.1 init complete ===");
 }
