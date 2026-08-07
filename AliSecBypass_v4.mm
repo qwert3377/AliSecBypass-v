@@ -115,7 +115,8 @@ static int my_getaddrinfo(const char *node, const char *service, const struct ad
 }
 
 // ========== 5. ObjC Runtime Hook NSURLSession - 应用层拦截 ==========
-static NSURLSessionDataTask *(*orig_dataTaskWithRequest)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+static IMP orig_dataTaskWithRequest = NULL;
+
 static NSURLSessionDataTask *my_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
     bypassLog(@"[NSURLSession] %@", url.absoluteString);
@@ -129,7 +130,7 @@ static NSURLSessionDataTask *my_dataTaskWithRequest(id self, SEL _cmd, NSURLRequ
     for (NSString *bh in blockHosts) {
         if ([url.host containsString:bh]) {
             bypassLog(@"[NSURLSession] BLOCKED: %@", url.host);
-            // 返回一个空 task，不发起实际请求
+            // 返回空 data task
             NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dataTaskWithRequest)(self, _cmd, request, completionHandler);
             [dummy cancel];
             return dummy;
@@ -153,7 +154,7 @@ static void hookNSURLSession(void) {
         return;
     }
 
-    orig_dataTaskWithRequest = (void *)method_getImplementation(m);
+    orig_dataTaskWithRequest = method_getImplementation(m);
     method_setImplementation(m, (IMP)my_dataTaskWithRequest);
     bypassLog(@"[Hook] NSURLSession dataTaskWithRequest: hooked");
 }
