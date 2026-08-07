@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.9.1 - 去掉Security DobbyHook（导致闪退），保留其他稳定hook
+// AliSecBypass v6.1.9.2 - 去掉UIScreen bounds hook（导致系统资源加载崩溃），保留其他所有功能
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -225,18 +225,7 @@ static void hookASIdentifierManager(void) {
     }
 }
 
-// ========== 3. UIScreen / NSProcessInfo ==========
-static CGRect my_screenBounds(id self, SEL _cmd) {
-    return CGRectMake(0, 0, [gDeviceProfile[@"screenW"] floatValue], [gDeviceProfile[@"screenH"] floatValue]);
-}
-static CGFloat my_screenScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
-static CGRect my_nativeBounds(id self, SEL _cmd) {
-    CGFloat s = [gDeviceProfile[@"scale"] floatValue] ?: 3.0f;
-    CGFloat w = [gDeviceProfile[@"screenW"] floatValue] ?: 393.0f;
-    CGFloat h = [gDeviceProfile[@"screenH"] floatValue] ?: 852.0f;
-    return CGRectMake(0, 0, w * s, h * s);
-}
-static CGFloat my_nativeScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
+// ========== 3. NSProcessInfo（去掉UIScreen hook，避免系统资源加载崩溃）==========
 static unsigned long long my_physicalMemory(id self, SEL _cmd) {
     return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024ULL * 1024ULL * 1024ULL;
 }
@@ -245,15 +234,7 @@ static NSString *my_osVerString(id self, SEL _cmd) {
 }
 static NSString *my_processName(id self, SEL _cmd) { return @"FanqieNovel"; }
 
-static void hookScreenAndProcessInfo(void) {
-    Class screen = objc_getClass("UIScreen");
-    if (screen) {
-        Method m;
-        if ((m = class_getInstanceMethod(screen, @selector(bounds)))) method_setImplementation(m, (IMP)my_screenBounds);
-        if ((m = class_getInstanceMethod(screen, @selector(scale)))) method_setImplementation(m, (IMP)my_screenScale);
-        if ((m = class_getInstanceMethod(screen, @selector(nativeBounds)))) method_setImplementation(m, (IMP)my_nativeBounds);
-        if ((m = class_getInstanceMethod(screen, @selector(nativeScale)))) method_setImplementation(m, (IMP)my_nativeScale);
-    }
+static void hookProcessInfo(void) {
     Class pi = objc_getClass("NSProcessInfo");
     if (pi) {
         Method m;
@@ -521,12 +502,12 @@ static void my_removeObject(id self, SEL _cmd, NSString *key) {
 
 // ========== 13. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.9.1 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.9.2 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
-    hookScreenAndProcessInfo();
+    hookProcessInfo();
     hookTTNetworkCommonParams();
 
     struct rebinding rebinds[] = {
@@ -596,5 +577,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.9.1 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.9.2 init complete ===");
 }
