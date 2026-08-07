@@ -1,6 +1,5 @@
-// AliSecBypass v6.0 - Hook commonParamsblock 执行，截获设备指纹字典
-// fishhook + Dobby + ObjC Runtime 混合方案
-// 纯库文件，无 Logos，TrollStore / 非越狱注入
+// AliSecBypass v6.1 - 深度修改 commonParamsblock 返回值 + 补全 sysctl HW_MACHINE
+// fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
@@ -15,7 +14,7 @@
 #include <dobby.h>
 #include <mach-o/dyld.h>
 
-// ========== 日志工具 ==========
+// ========== 日志 ==========
 static dispatch_queue_t gLogQueue = NULL;
 static void bypassLog(NSString *msg) {
     if (!gLogQueue) gLogQueue = dispatch_queue_create("com.bypass.log", DISPATCH_QUEUE_SERIAL);
@@ -30,7 +29,7 @@ static void bypassLog(NSString *msg) {
     });
 }
 
-// ========== 辅助：安全打印 ==========
+// ========== 安全打印 ==========
 static NSString *safeDesc(id obj) {
     if (!obj) return @"(nil)";
     if ([obj isKindOfClass:[NSString class]]) return obj;
@@ -54,10 +53,11 @@ static NSString *safeDesc(id obj) {
     return [obj description];
 }
 
-// ========== 设备指纹 ==========
+// ========== 全局伪装数据 ==========
 static NSDictionary *gDeviceProfile = nil;
 static NSString *gFakeIDFV = nil;
 static NSString *gFakeIDFA = nil;
+static NSDictionary *gFakeCommonParams = nil;
 
 static void initDeviceProfile(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -65,13 +65,13 @@ static void initDeviceProfile(void) {
     if (!saved) {
         NSArray *profiles = @[
             @{@"model": @"iPhone14,2", @"systemVersion": @"17.5.1", @"name": @"iPhone", @"machine": @"iPhone14,2",
-              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @6, @"disk": @128,
+              @"screenW": @393, @"screenH": @852, @"scale": @3, @"mem": @6, @"disk": @128,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国联通"},
             @{@"model": @"iPhone13,2", @"systemVersion": @"16.6.1", @"name": @"iPhone", @"machine": @"iPhone13,2",
-              @"screenW": @390, @"screenH": @844, @"scale": @3.0, @"mem": @4, @"disk": @256,
+              @"screenW": @390, @"screenH": @844, @"scale": @3, @"mem": @4, @"disk": @256,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国移动"},
             @{@"model": @"iPhone15,2", @"systemVersion": @"18.0", @"name": @"iPhone", @"machine": @"iPhone15,2",
-              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @8, @"disk": @512,
+              @"screenW": @393, @"screenH": @852, @"scale": @3, @"mem": @8, @"disk": @512,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国电信"},
         ];
         NSUInteger idx = arc4random_uniform((uint32_t)profiles.count);
@@ -89,64 +89,218 @@ static void initDeviceProfile(void) {
     if (!gFakeIDFA) { gFakeIDFA = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"]; [ud synchronize]; }
 }
 
-// ========== 1. 伪造 UIDevice ==========
-static IMP orig_idfv = NULL;
+// ========== 构建伪装参数字典模板（只执行一次） ==========
+static void buildFakeParams(NSDictionary *original) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary *mut = original ? [original mutableCopy] : [NSMutableDictionary dictionary];
+
+        // 核心硬件指纹替换
+        mut[@"vid"] = gFakeIDFV;
+        mut[@"idfv"] = gFakeIDFV;
+        mut[@"idfa"] = gFakeIDFA ?: @"00000000-0000-0000-0000-000000000000";
+        mut[@"cdid"] = [[NSUUID UUID] UUIDString];
+
+        if (gDeviceProfile) {
+            NSString *machine = gDeviceProfile[@"machine"] ?: gDeviceProfile[@"model"];
+            NSString *model   = gDeviceProfile[@"model"];
+            NSString *sysVer  = gDeviceProfile[@"systemVersion"];
+            NSNumber *sw = gDeviceProfile[@"screenW"];
+            NSNumber *sh = gDeviceProfile[@"screenH"];
+            NSNumber *sc = gDeviceProfile[@"scale"];
+
+            if (machine) mut[@"device_model"] = machine;
+            if (model)   mut[@"device_brand"] = [model lowercaseString];
+            if (sysVer)  mut[@"os_version"] = sysVer;
+
+            if (sw && sh && sc) {
+                int w = [sw intValue] * [sc intValue];
+                int h = [sh intValue] * [sc intValue];
+                mut[@"resolution"] = [NSString stringWithFormat:@"%d*%d", w, h];
+            }
+
+            static NSDictionary *typeMap = nil;
+            static dispatch_once_t mapOnce;
+            dispatch_once(&mapOnce, ^{
+                typeMap = @{
+                    @"iPhone14,2": @"iPhone 13 Pro",
+                    @"iPhone13,2": @"iPhone 13",
+                    @"iPhone15,2": @"iPhone 14 Pro",
+                    @"iPhone12,5": @"iPhone 11 Pro Max",
+                    @"iPhone14,5": @"iPhone 13",
+                    @"iPhone13,1": @"iPhone 13 mini",
+                    @"iPhone14,4": @"iPhone 13 mini",
+                    @"iPhone15,3": @"iPhone 14 Pro Max",
+                };
+            });
+            mut[@"device_type"] = typeMap[model] ?: [NSString stringWithFormat:@"iPhone (%@)", model];
+        }
+
+        gFakeCommonParams = [mut copy];
+        bypassLog(@"[FakeParams] fake commonParams template built");
+    });
+}
+
+// ========== TTNetworkManager Hook ==========
+typedef NSDictionary * (^CommonParamsBlock)(void);
+typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
+
+static IMP orig_commonParamsblock = NULL;
+static IMP orig_commonParamsblockWithURL = NULL;
+
+static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
+    if (!original) return nil;
+    return [^NSDictionary *(void) {
+        NSDictionary *result = original();
+        if (!gFakeCommonParams) buildFakeParams(result);
+        NSMutableDictionary *mut = [gFakeCommonParams mutableCopy];
+        // 保留 App 内部动态变化的字段，避免干扰计数/会话状态
+        NSArray *dynamicKeys = @[@"ip", @"cold_start_session_cnt_in_life", @"normal_session_cnt_in_day",
+                                 @"cold_start_session_cnt_in_day", @"normal_session_cnt_in_life",
+                                 @"update_version_code", @"need_personal_recommend", @"gender",
+                                 @"active_schema_params", @"compliance_status", @"ac",
+                                 @"device_id", @"iid", @"cold_start_session_id", @"normal_session_id"];
+        for (NSString *k in dynamicKeys) {
+            if (result[k]) mut[k] = result[k];
+        }
+        return mut;
+    } copy];
+}
+
+static CommonParamsBlockWithURL makeWrappedBlockWithURL(CommonParamsBlockWithURL original) {
+    if (!original) return nil;
+    return [^NSDictionary *(NSURL *url) {
+        NSDictionary *result = original(url);
+        if (!gFakeCommonParams) buildFakeParams(result);
+        NSMutableDictionary *mut = [gFakeCommonParams mutableCopy];
+        NSArray *dynamicKeys = @[@"ip", @"cold_start_session_cnt_in_life", @"normal_session_cnt_in_day",
+                                 @"cold_start_session_cnt_in_day", @"normal_session_cnt_in_life",
+                                 @"update_version_code", @"need_personal_recommend", @"gender",
+                                 @"active_schema_params", @"compliance_status", @"ac",
+                                 @"device_id", @"iid", @"cold_start_session_id", @"normal_session_id"];
+        for (NSString *k in dynamicKeys) {
+            if (result[k]) mut[k] = result[k];
+        }
+        return mut;
+    } copy];
+}
+
+static id my_commonParamsblock(id self, SEL _cmd) {
+    CommonParamsBlock original = ((CommonParamsBlock (*)(id, SEL))orig_commonParamsblock)(self, _cmd);
+    return makeWrappedBlock(original);
+}
+
+static id my_commonParamsblockWithURL(id self, SEL _cmd) {
+    CommonParamsBlockWithURL original = ((CommonParamsBlockWithURL (*)(id, SEL))orig_commonParamsblockWithURL)(self, _cmd);
+    return makeWrappedBlockWithURL(original);
+}
+
+static void hookTTNetworkCommonParams(void) {
+    Class ttMgr = objc_getClass(@"TTNetworkManager");
+    if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
+
+    Method m;
+    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParamsblock)))) {
+        orig_commonParamsblock = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_commonParamsblock);
+        bypassLog(@"[Hook] commonParamsblock hooked");
+    }
+    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParamsblockWithURL)))) {
+        orig_commonParamsblockWithURL = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
+        bypassLog(@"[Hook] commonParamsblockWithURL hooked");
+    }
+    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
+        IMP orig = method_getImplementation(m);
+        method_setImplementation(m, imp_implementationWithBlock(^id(id self) {
+            id result = ((id (*)(id, SEL))orig)(self, @selector(commonParams));
+            if (!gFakeCommonParams && [result isKindOfClass:[NSDictionary class]]) buildFakeParams(result);
+            if (gFakeCommonParams && [result isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *mut = [gFakeCommonParams mutableCopy];
+                NSArray *dynamicKeys = @[@"ip", @"cold_start_session_cnt_in_life", @"normal_session_cnt_in_day",
+                                         @"cold_start_session_cnt_in_day", @"normal_session_cnt_in_life",
+                                         @"update_version_code", @"need_personal_recommend", @"gender",
+                                         @"active_schema_params", @"compliance_status", @"ac",
+                                         @"device_id", @"iid", @"cold_start_session_id", @"normal_session_id"];
+                for (NSString *k in dynamicKeys) { if (result[k]) mut[k] = result[k]; }
+                return mut;
+            }
+            return result;
+        }));
+    }
+}
+
+// ========== 1. UIDevice ==========
 static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
 static NSString *my_model(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: @"iPhone"; }
+static NSString *my_localizedModel(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 
 static void hookUIDevice(void) {
-    Class uid = objc_getClass("UIDevice");
+    Class uid = objc_getClass(@"UIDevice");
     if (!uid) return;
     Method m;
-    if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) { orig_idfv = method_getImplementation(m); method_setImplementation(m, (IMP)my_idfv); }
+    if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) method_setImplementation(m, (IMP)my_idfv);
     if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"_uniqueVendorIdentifier")))) method_setImplementation(m, (IMP)my_uniqueVendor);
     if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"uniqueIdentifierForVendor")))) method_setImplementation(m, (IMP)my_uniqueVendor);
     if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) method_setImplementation(m, (IMP)my_sysVer);
     if ((m = class_getInstanceMethod(uid, @selector(model)))) method_setImplementation(m, (IMP)my_model);
     if ((m = class_getInstanceMethod(uid, @selector(name)))) method_setImplementation(m, (IMP)my_name);
+    if ((m = class_getInstanceMethod(uid, @selector(localizedModel)))) method_setImplementation(m, (IMP)my_localizedModel);
 }
 
-// ========== 2. 伪造 ASIdentifierManager ==========
-static IMP orig_adId = NULL;
+// ========== 2. ASIdentifierManager ==========
 static NSUUID *my_adId(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFA]; }
+
 static void hookASIdentifierManager(void) {
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ dlopen("/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY); });
-    Class asid = objc_getClass("ASIdentifierManager");
+    dispatch_once(&once, ^{ dlopen(@"/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY); });
+    Class asid = objc_getClass(@"ASIdentifierManager");
     if (asid) {
         Method m = class_getInstanceMethod(asid, @selector(advertisingIdentifier));
-        if (m) { orig_adId = method_getImplementation(m); method_setImplementation(m, (IMP)my_adId); }
+        if (m) method_setImplementation(m, (IMP)my_adId);
     }
 }
 
-// ========== 3. 伪造 UIScreen / NSProcessInfo ==========
-static IMP orig_screenBounds = NULL, orig_screenScale = NULL;
+// ========== 3. UIScreen / NSProcessInfo ==========
 static CGRect my_screenBounds(id self, SEL _cmd) {
     return CGRectMake(0, 0, [gDeviceProfile[@"screenW"] floatValue], [gDeviceProfile[@"screenH"] floatValue]);
 }
 static CGFloat my_screenScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
-static IMP orig_physicalMemory = NULL;
-static unsigned long long my_physicalMemory(id self, SEL _cmd) {
-    return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024 * 1024 * 1024;
+static CGRect my_nativeBounds(id self, SEL _cmd) {
+    CGFloat s = [gDeviceProfile[@"scale"] floatValue] ?: 3.0f;
+    CGFloat w = [gDeviceProfile[@"screenW"] floatValue] ?: 393.0f;
+    CGFloat h = [gDeviceProfile[@"screenH"] floatValue] ?: 852.0f;
+    return CGRectMake(0, 0, w * s, h * s);
 }
+static CGFloat my_nativeScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
+static unsigned long long my_physicalMemory(id self, SEL _cmd) {
+    return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024ULL * 1024ULL * 1024ULL;
+}
+static NSString *my_osVerString(id self, SEL _cmd) {
+    return [NSString stringWithFormat:@"Version %@ (Build 21F79)", gDeviceProfile[@"systemVersion"] ?: @"17.5.1"];
+}
+
 static void hookScreenAndProcessInfo(void) {
-    Class screen = objc_getClass("UIScreen");
+    Class screen = objc_getClass(@"UIScreen");
     if (screen) {
         Method m;
-        if ((m = class_getInstanceMethod(screen, @selector(bounds)))) { orig_screenBounds = method_getImplementation(m); method_setImplementation(m, (IMP)my_screenBounds); }
-        if ((m = class_getInstanceMethod(screen, @selector(scale)))) { orig_screenScale = method_getImplementation(m); method_setImplementation(m, (IMP)my_screenScale); }
+        if ((m = class_getInstanceMethod(screen, @selector(bounds)))) method_setImplementation(m, (IMP)my_screenBounds);
+        if ((m = class_getInstanceMethod(screen, @selector(scale)))) method_setImplementation(m, (IMP)my_screenScale);
+        if ((m = class_getInstanceMethod(screen, @selector(nativeBounds)))) method_setImplementation(m, (IMP)my_nativeBounds);
+        if ((m = class_getInstanceMethod(screen, @selector(nativeScale)))) method_setImplementation(m, (IMP)my_nativeScale);
     }
-    Class pi = objc_getClass("NSProcessInfo");
+    Class pi = objc_getClass(@"NSProcessInfo");
     if (pi) {
-        Method m = class_getInstanceMethod(pi, @selector(physicalMemory));
-        if (m) { orig_physicalMemory = method_getImplementation(m); method_setImplementation(m, (IMP)my_physicalMemory); }
+        Method m;
+        if ((m = class_getInstanceMethod(pi, @selector(physicalMemory)))) method_setImplementation(m, (IMP)my_physicalMemory);
+        if ((m = class_getInstanceMethod(pi, @selector(operatingSystemVersionString)))) method_setImplementation(m, (IMP)my_osVerString);
     }
 }
 
-// ========== 4. 伪造 uname ==========
+// ========== 4. uname ==========
 static int (*orig_uname)(struct utsname *);
 static int my_uname(struct utsname *name) {
     int ret = orig_uname(name);
@@ -193,8 +347,8 @@ static ssize_t my_sendto(int sockfd, const void *buf, size_t len, int flags, con
     return orig_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
 }
 
-static int (*orig_ptrace)(int, pid_t, caddr_t, int);
-static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+static int (*orig_ptrace)(int, pid_t, void *, int);
+static int my_ptrace(int request, pid_t pid, void *addr, int data) {
     if (request == 0) return 0;
     return orig_ptrace(request, pid, addr, data);
 }
@@ -202,9 +356,31 @@ static int my_ptrace(int request, pid_t pid, caddr_t addr, int data) {
 static int (*orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t);
 static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
     int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
-    if (ret == 0 && namelen >= 2 && name[0] == CTL_KERN && name[1] == KERN_PROC) {
-        if (oldp && oldlenp) memset(oldp, 0, *oldlenp);
-        return 0;
+    if (ret != 0) return ret;
+    if (namelen >= 2) {
+        if (name[0] == CTL_KERN && name[1] == KERN_PROC) {
+            if (oldp && oldlenp) memset(oldp, 0, *oldlenp);
+            return 0;
+        }
+        if (name[0] == CTL_HW && name[1] == HW_MACHINE) {
+            if (oldp && oldlenp && gDeviceProfile) {
+                NSString *machine = gDeviceProfile[@"machine"] ?: gDeviceProfile[@"model"];
+                const char *cstr = [machine UTF8String];
+                size_t len = strlen(cstr);
+                if (*oldlenp > len) {
+                    memcpy(oldp, cstr, len);
+                    ((char *)oldp)[len] = '\0';
+                    *oldlenp = len;
+                } else if (*oldlenp > 0) {
+                    size_t copyLen = *oldlenp - 1;
+                    if (copyLen > len) copyLen = len;
+                    memcpy(oldp, cstr, copyLen);
+                    ((char *)oldp)[copyLen] = '\0';
+                    *oldlenp = copyLen;
+                }
+            }
+            return 0;
+        }
     }
     return ret;
 }
@@ -245,87 +421,9 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 9. TTNetworkManager commonParamsblock Hook ==========
-// commonParamsblock 返回的是一个 block，真正的字典是执行 block 得到的
-// 我们 hook getter，返回一个包装 block，在包装 block 里记录/修改返回值
-
-static IMP orig_commonParamsblock = NULL;
-
-// 原始 block 的签名：NSDictionary * (^)(void)
-typedef NSDictionary * (^CommonParamsBlock)(void);
-
-static CommonParamsBlock gOriginalBlock = nil;
-
-static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
-    if (!original) return nil;
-    return [^NSDictionary *(void) {
-        NSDictionary *result = original();
-        bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParamsblock EXECUTED -> %@", safeDesc(result)]);
-        return result;
-    } copy];
-}
-
-static id my_commonParamsblock(id self, SEL _cmd) {
-    CommonParamsBlock original = ((CommonParamsBlock (*)(id, SEL))orig_commonParamsblock)(self, _cmd);
-    if (original && !gOriginalBlock) {
-        gOriginalBlock = original;
-    }
-    CommonParamsBlock wrapped = makeWrappedBlock(original);
-    return wrapped;
-}
-
-// 也 hook commonParamsblockWithURL，签名可能是 NSDictionary * (^)(NSURL *)
-typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
-static IMP orig_commonParamsblockWithURL = NULL;
-static CommonParamsBlockWithURL gOriginalBlockWithURL = nil;
-
-static CommonParamsBlockWithURL makeWrappedBlockWithURL(CommonParamsBlockWithURL original) {
-    if (!original) return nil;
-    return [^NSDictionary *(NSURL *url) {
-        NSDictionary *result = original(url);
-        bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParamsblockWithURL EXECUTED url=%@ -> %@", url.absoluteString, safeDesc(result)]);
-        return result;
-    } copy];
-}
-
-static id my_commonParamsblockWithURL(id self, SEL _cmd) {
-    CommonParamsBlockWithURL original = ((CommonParamsBlockWithURL (*)(id, SEL))orig_commonParamsblockWithURL)(self, _cmd);
-    if (original && !gOriginalBlockWithURL) {
-        gOriginalBlockWithURL = original;
-    }
-    CommonParamsBlockWithURL wrapped = makeWrappedBlockWithURL(original);
-    return wrapped;
-}
-
-static void hookTTNetworkCommonParams(void) {
-    Class ttMgr = objc_getClass("TTNetworkManager");
-    if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
-
-    Method m;
-    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParamsblock)))) {
-        orig_commonParamsblock = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_commonParamsblock);
-        bypassLog(@"[Hook] TTNetworkManager commonParamsblock hooked");
-    }
-    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParamsblockWithURL)))) {
-        orig_commonParamsblockWithURL = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
-        bypassLog(@"[Hook] TTNetworkManager commonParamsblockWithURL hooked");
-    }
-    // commonParams 直接属性也 hook，虽然可能是 nil
-    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
-        IMP orig = method_getImplementation(m);
-        method_setImplementation(m, imp_implementationWithBlock(^id(id self) {
-            id result = ((id (*)(id, SEL))orig)(self, @selector(commonParams));
-            bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParams -> %@", safeDesc(result)]);
-            return result;
-        }));
-    }
-}
-
-// ========== 10. 初始化 (priority 101) ==========
+// ========== 9. 初始化 ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.0 init ===");
+    bypassLog(@"=== AliSecBypass v6.1 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -346,11 +444,11 @@ __attribute__((constructor(101))) static void constructor(void) {
     };
     rebind_symbols(rebinds, 9);
 
-    Class cls = objc_getClass("NSURLSession");
+    Class cls = objc_getClass(@"NSURLSession");
     if (cls) {
         Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.0 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1 init complete ===");
 }
