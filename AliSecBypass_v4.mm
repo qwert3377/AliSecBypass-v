@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.6 - 补 hook commonParams 方法 + NSBundle路径伪装 + NSTimer监控
+// AliSecBypass v6.1.7 - 最早加载 + 全面请求监控 + NSUserDefaults监控 + 更多域名拦截
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -285,10 +285,11 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 域名拦截 ==========
+// ========== 6. 域名拦截（扩展）==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
-    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance"];
+    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"msdk.bytedance", @"volc.bytedance",
+                           @"mon11-misc.fqnovel", @"tnc", @"anti", @"risk", @"verify"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
     return NO;
 }
@@ -381,16 +382,44 @@ static void my_abort(void) {
     bypassLog([NSString stringWithFormat:@"[Block] abort() blocked, stack:\n%@", [[NSThread callStackSymbols] componentsJoinedByString:@"\n"]]);
 }
 
-// ========== 8. NSURLSession Hook ==========
+// ========== 8. NSURLSession 全面监控 ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
+    NSString *path = url.path ?: @"";
+    NSString *query = url.query ?: @"";
+
+    // 记录所有请求（只记录前20个避免刷屏）
+    static int reqCount = 0;
+    if (reqCount < 20) {
+        reqCount++;
+        bypassLog([NSString stringWithFormat:@"[Req] #%d %@ %@?%@", reqCount, host, path, query]);
+    }
+
     if (isBlockedHost(host)) {
+        bypassLog([NSString stringWithFormat:@"[Block] Blocked request to %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
         [dummy cancel]; return dummy;
     }
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
+}
+
+static IMP orig_dataTask = NULL;
+static NSURLSessionDataTask *my_dataTask(id self, SEL _cmd, NSURLRequest *request) {
+    NSURL *url = request.URL;
+    NSString *host = url.host ?: @"";
+    static int reqCount2 = 0;
+    if (reqCount2 < 20) {
+        reqCount2++;
+        bypassLog([NSString stringWithFormat:@"[Req2] #%d %@", reqCount2, host]);
+    }
+    if (isBlockedHost(host)) {
+        bypassLog([NSString stringWithFormat:@"[Block] Blocked dataTask to %@", host]);
+        NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_dataTask)(self, _cmd, request);
+        [dummy cancel]; return dummy;
+    }
+    return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_dataTask)(self, _cmd, request);
 }
 
 static IMP orig_taskCancel = NULL;
@@ -435,7 +464,7 @@ static id my_alertController(id self, SEL _cmd, NSString *title, NSString *messa
     return ((id (*)(id, SEL, NSString *, NSString *, UIAlertControllerStyle))orig_alertController)(self, _cmd, title, message, preferredStyle);
 }
 
-// ========== 10. UIApplication openURL 拦截（防止跳转App Store）==========
+// ========== 10. UIApplication openURL 拦截 ==========
 static IMP orig_openURL = NULL;
 static BOOL my_openURL(id self, SEL _cmd, NSURL *url) {
     NSString *urlStr = url.absoluteString ?: @"";
@@ -459,13 +488,12 @@ static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *optio
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
 }
 
-// ========== 11. NSBundle 路径伪装（隐藏LiveContainer路径）==========
+// ========== 11. NSBundle 路径伪装 ==========
 static IMP orig_bundlePath = NULL;
 static NSString *my_bundlePath(id self, SEL _cmd) {
     NSString *path = ((NSString *(*)(id, SEL))orig_bundlePath)(self, _cmd);
     if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
                  [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
-        // 返回一个看起来像正常App Store安装的路径
         return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app";
     }
     return path;
@@ -491,20 +519,32 @@ static NSString *my_executablePath(id self, SEL _cmd) {
     return path;
 }
 
-// ========== 12. NSTimer 监控（记录可疑定时器）==========
-static IMP orig_scheduledTimer = NULL;
-static id my_scheduledTimer(id self, SEL _cmd, NSTimeInterval interval, id target, SEL selector, id userInfo, BOOL repeats) {
-    NSString *targetName = NSStringFromClass([target class]) ?: @"(block)";
-    NSString *selName = NSStringFromSelector(selector) ?: @"(none)";
-    if (interval >= 30.0 && interval <= 300.0) {
-        bypassLog([NSString stringWithFormat:@"[Timer] suspicious timer: interval=%.1f target=%@ selector=%@", interval, targetName, selName]);
+// ========== 12. NSUserDefaults 监控（阻止写入检测标志）==========
+static IMP orig_setObject = NULL;
+static void my_setObject(id self, SEL _cmd, id value, NSString *key) {
+    if (key && ([key containsString:@"security"] || [key containsString:@"risk"] || [key containsString:@"check"] ||
+                 [key containsString:@"detect"] || [key containsString:@"unsafe"] || [key containsString:@"ban"] ||
+                 [key containsString:@"blacklist"] || [key containsString:@"violation"])) {
+        bypassLog([NSString stringWithFormat:@"[Block] NSUserDefaults setObject blocked for key=%@", key]);
+        return;
     }
-    return ((id (*)(id, SEL, NSTimeInterval, id, SEL, id, BOOL))orig_scheduledTimer)(self, _cmd, interval, target, selector, userInfo, repeats);
+    ((void (*)(id, SEL, id, NSString *))orig_setObject)(self, _cmd, value, key);
 }
 
-// ========== 13. 初始化 ==========
-__attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.6 init ===");
+static IMP orig_removeObject = NULL;
+static void my_removeObject(id self, SEL _cmd, NSString *key) {
+    if (key && ([key containsString:@"security"] || [key containsString:@"risk"] || [key containsString:@"check"] ||
+                 [key containsString:@"detect"] || [key containsString:@"unsafe"] || [key containsString:@"ban"] ||
+                 [key containsString:@"blacklist"] || [key containsString:@"violation"])) {
+        bypassLog([NSString stringWithFormat:@"[Block] NSUserDefaults removeObject blocked for key=%@", key]);
+        return;
+    }
+    ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
+}
+
+// ========== 13. 初始化（优先级1，最早执行）==========
+__attribute__((constructor(1))) static void constructor(void) {
+    bypassLog(@"=== AliSecBypass v6.1.7 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -531,6 +571,8 @@ __attribute__((constructor(101))) static void constructor(void) {
     if (cls) {
         Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
+        Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:));
+        if (m2) { orig_dataTask = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dataTask); }
     }
 
     Class taskCls = objc_getClass("NSURLSessionDataTask");
@@ -570,11 +612,13 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m3) { orig_executablePath = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_executablePath); }
     }
 
-    Class timerCls = objc_getClass("NSTimer");
-    if (timerCls) {
-        Method m = class_getClassMethod(timerCls, @selector(scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:));
-        if (m) { orig_scheduledTimer = method_getImplementation(m); method_setImplementation(m, (IMP)my_scheduledTimer); }
+    Class udCls = objc_getClass("NSUserDefaults");
+    if (udCls) {
+        Method m1 = class_getInstanceMethod(udCls, @selector(setObject:forKey:));
+        if (m1) { orig_setObject = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_setObject); }
+        Method m2 = class_getInstanceMethod(udCls, @selector(removeObjectForKey:));
+        if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.6 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.7 init complete ===");
 }
