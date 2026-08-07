@@ -1,4 +1,4 @@
-// AliSecBypass v5.9 - Hook commonParams + TTHttpTask init 截获设备指纹
+// AliSecBypass v6.0 - Hook commonParamsblock 执行，截获设备指纹字典
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -30,7 +30,7 @@ static void bypassLog(NSString *msg) {
     });
 }
 
-// ========== 辅助：安全打印对象 ==========
+// ========== 辅助：安全打印 ==========
 static NSString *safeDesc(id obj) {
     if (!obj) return @"(nil)";
     if ([obj isKindOfClass:[NSString class]]) return obj;
@@ -50,10 +50,6 @@ static NSString *safeDesc(id obj) {
         for (id item in a) [s appendFormat:@"%@,", safeDesc(item)];
         [s appendString:@"]"];
         return s;
-    }
-    if ([obj isKindOfClass:[NSData class]]) {
-        NSString *str = [[NSString alloc] initWithData:obj encoding:NSUTF8StringEncoding];
-        return str ?: [obj base64EncodedStringWithOptions:0];
     }
     return [obj description];
 }
@@ -187,7 +183,6 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
     if (addr && addr->sa_family == AF_INET) {
         struct sockaddr_in *sin = (struct sockaddr_in *)addr;
         NSString *ipStr = [NSString stringWithFormat:@"%s", inet_ntoa(sin->sin_addr)];
-        int port = ntohs(sin->sin_port);
         if ([ipStr hasPrefix:@"172.31."]) { errno = ECONNREFUSED; return -1; }
     }
     return orig_connect(sockfd, addr, addrlen);
@@ -250,40 +245,56 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 9. TTNetworkManager commonParams Hook ==========
-static IMP orig_commonParams = NULL;
-static id my_commonParams(id self, SEL _cmd) {
-    id result = ((id (*)(id, SEL))orig_commonParams)(self, _cmd);
-    bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParams -> %@", safeDesc(result)]);
-    return result;
-}
+// ========== 9. TTNetworkManager commonParamsblock Hook ==========
+// commonParamsblock 返回的是一个 block，真正的字典是执行 block 得到的
+// 我们 hook getter，返回一个包装 block，在包装 block 里记录/修改返回值
 
 static IMP orig_commonParamsblock = NULL;
+
+// 原始 block 的签名：NSDictionary * (^)(void)
+typedef NSDictionary * (^CommonParamsBlock)(void);
+
+static CommonParamsBlock gOriginalBlock = nil;
+
+static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
+    if (!original) return nil;
+    return [^NSDictionary *(void) {
+        NSDictionary *result = original();
+        bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParamsblock EXECUTED -> %@", safeDesc(result)]);
+        return result;
+    } copy];
+}
+
 static id my_commonParamsblock(id self, SEL _cmd) {
-    id result = ((id (*)(id, SEL))orig_commonParamsblock)(self, _cmd);
-    bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParamsblock -> %@", safeDesc(result)]);
-    return result;
+    CommonParamsBlock original = ((CommonParamsBlock (*)(id, SEL))orig_commonParamsblock)(self, _cmd);
+    if (original && !gOriginalBlock) {
+        gOriginalBlock = original;
+    }
+    CommonParamsBlock wrapped = makeWrappedBlock(original);
+    return wrapped;
 }
 
+// 也 hook commonParamsblockWithURL，签名可能是 NSDictionary * (^)(NSURL *)
+typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
 static IMP orig_commonParamsblockWithURL = NULL;
+static CommonParamsBlockWithURL gOriginalBlockWithURL = nil;
+
+static CommonParamsBlockWithURL makeWrappedBlockWithURL(CommonParamsBlockWithURL original) {
+    if (!original) return nil;
+    return [^NSDictionary *(NSURL *url) {
+        NSDictionary *result = original(url);
+        bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParamsblockWithURL EXECUTED url=%@ -> %@", url.absoluteString, safeDesc(result)]);
+        return result;
+    } copy];
+}
+
 static id my_commonParamsblockWithURL(id self, SEL _cmd) {
-    id result = ((id (*)(id, SEL))orig_commonParamsblockWithURL)(self, _cmd);
-    bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParamsblockWithURL -> %@", safeDesc(result)]);
-    return result;
-}
-
-static IMP orig_creatAppInfo = NULL;
-static id my_creatAppInfo(id self, SEL _cmd) {
-    id result = ((id (*)(id, SEL))orig_creatAppInfo)(self, _cmd);
-    bypassLog([NSString stringWithFormat:@"[TTNetwork] creatAppInfo -> %@", safeDesc(result)]);
-    return result;
-}
-
-static IMP orig_clientIP = NULL;
-static id my_clientIP(id self, SEL _cmd) {
-    id result = ((id (*)(id, SEL))orig_clientIP)(self, _cmd);
-    bypassLog([NSString stringWithFormat:@"[TTNetwork] clientIP -> %@", safeDesc(result)]);
-    return result;
+    CommonParamsBlockWithURL original = ((CommonParamsBlockWithURL (*)(id, SEL))orig_commonParamsblockWithURL)(self, _cmd);
+    if (original && !gOriginalBlockWithURL) {
+        gOriginalBlockWithURL = original;
+    }
+    CommonParamsBlockWithURL wrapped = makeWrappedBlockWithURL(original);
+    return wrapped;
 }
 
 static void hookTTNetworkCommonParams(void) {
@@ -291,11 +302,6 @@ static void hookTTNetworkCommonParams(void) {
     if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
 
     Method m;
-    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
-        orig_commonParams = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_commonParams);
-        bypassLog(@"[Hook] TTNetworkManager commonParams hooked");
-    }
     if ((m = class_getInstanceMethod(ttMgr, @selector(commonParamsblock)))) {
         orig_commonParamsblock = method_getImplementation(m);
         method_setImplementation(m, (IMP)my_commonParamsblock);
@@ -306,52 +312,26 @@ static void hookTTNetworkCommonParams(void) {
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] TTNetworkManager commonParamsblockWithURL hooked");
     }
-    if ((m = class_getInstanceMethod(ttMgr, @selector(creatAppInfo)))) {
-        orig_creatAppInfo = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_creatAppInfo);
-        bypassLog(@"[Hook] TTNetworkManager creatAppInfo hooked");
-    }
-    if ((m = class_getInstanceMethod(ttMgr, @selector(clientIP)))) {
-        orig_clientIP = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_clientIP);
-        bypassLog(@"[Hook] TTNetworkManager clientIP hooked");
-    }
-}
-
-// ========== 10. TTHttpTask init Hook - 截获请求对象 ==========
-static IMP orig_tt_init = NULL;
-static id my_tt_init(id self, SEL _cmd, id request, id scheduler, id engine, id dispatchQueue, id taskId, id enableHttpCache, id completedCallback, id uploadProgressCallback, id downloadProgressCallback) {
-    bypassLog([NSString stringWithFormat:@"[TTNetwork] TTHttpTask init request=%@", safeDesc(request)]);
-    return ((id (*)(id, SEL, id, id, id, id, id, id, id, id, id))orig_tt_init)(self, _cmd, request, scheduler, engine, dispatchQueue, taskId, enableHttpCache, completedCallback, uploadProgressCallback, downloadProgressCallback);
-}
-
-static void hookTTHttpTask(void) {
-    Class ttTask = objc_getClass("TTHttpTask");
-    if (!ttTask) { bypassLog(@"[TTNetwork] TTHttpTask not found"); return; }
-
-    // 尝试 hook initWithRequest: 变体
-    SEL sel = NSSelectorFromString(@"initWithRequest_fq_scheduler:engine:dispatchQueue:taskId:enableHttpCache:completedCallback:uploadProgressCallback:downloadProgressCallback:");
-    Method m = class_getInstanceMethod(ttTask, sel);
-    if (m) {
-        orig_tt_init = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_tt_init);
-        bypassLog(@"[Hook] TTHttpTask initWithRequest_fq_scheduler hooked");
-    } else {
-        // 尝试更短的变体
-        bypassLog(@"[TTNetwork] initWithRequest_fq_scheduler not found, trying alternatives");
+    // commonParams 直接属性也 hook，虽然可能是 nil
+    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
+        IMP orig = method_getImplementation(m);
+        method_setImplementation(m, imp_implementationWithBlock(^id(id self) {
+            id result = ((id (*)(id, SEL))orig)(self, @selector(commonParams));
+            bypassLog([NSString stringWithFormat:@"[TTNetwork] commonParams -> %@", safeDesc(result)]);
+            return result;
+        }));
     }
 }
 
-// ========== 11. 初始化 (priority 101) ==========
+// ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.9 init ===");
+    bypassLog(@"=== AliSecBypass v6.0 init ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
     hookTTNetworkCommonParams();
-    hookTTHttpTask();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -372,5 +352,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.9 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.0 init complete ===");
 }
