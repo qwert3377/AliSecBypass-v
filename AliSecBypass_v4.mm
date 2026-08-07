@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.8.2 - 去掉WebKit头文件依赖，纯Runtime操作WKWebView
+// AliSecBypass v6.1.9 - 稳定版：补回commonParams + Security签名验证拦截，去掉有问题的path伪装和WKWebView hook
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -64,14 +64,6 @@ static void initDeviceProfile(void) {
 
     gFakeIDFA = [ud stringForKey:@"AliSecBypass_FakeIDFA"];
     if (!gFakeIDFA) { gFakeIDFA = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"]; [ud synchronize]; }
-}
-
-// ========== 构建假UserAgent（用于WebView）==========
-static NSString *buildFakeUserAgent(void) {
-    if (!gDeviceProfile) return @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
-    NSString *sysVer = gDeviceProfile[@"systemVersion"] ?: @"17.5.1";
-    NSString *verUnderscore = [sysVer stringByReplacingOccurrencesOfString:@"." withString:@"_"];
-    return [NSString stringWithFormat:@"Mozilla/5.0 (iPhone; CPU iPhone OS %@ like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", verUnderscore];
 }
 
 // ========== 核心：基于原始字典修改，只换硬件指纹，保留所有其他字段 ==========
@@ -399,13 +391,12 @@ static char *my_getenv(const char *name) {
     return orig_getenv(name);
 }
 
-// ========== 8. NSURLSession 全面监控 ==========
+// ========== 8. NSURLSession Hook ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
     if (isBlockedHost(host)) {
-        bypassLog([NSString stringWithFormat:@"[Block] Blocked request to %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
         [dummy cancel]; return dummy;
     }
@@ -417,7 +408,6 @@ static NSURLSessionDataTask *my_dataTask(id self, SEL _cmd, NSURLRequest *reques
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
     if (isBlockedHost(host)) {
-        bypassLog([NSString stringWithFormat:@"[Block] Blocked dataTask to %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))orig_dataTask)(self, _cmd, request);
         [dummy cancel]; return dummy;
     }
@@ -490,37 +480,7 @@ static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *optio
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
 }
 
-// ========== 11. NSBundle 全面伪装 ==========
-static IMP orig_bundlePath = NULL;
-static NSString *my_bundlePath(id self, SEL _cmd) {
-    NSString *path = ((NSString *(*)(id, SEL))orig_bundlePath)(self, _cmd);
-    if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
-                 [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
-        return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app";
-    }
-    return path;
-}
-
-static IMP orig_resourcePath = NULL;
-static NSString *my_resourcePath(id self, SEL _cmd) {
-    NSString *path = ((NSString *(*)(id, SEL))orig_resourcePath)(self, _cmd);
-    if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
-                 [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
-        return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app";
-    }
-    return path;
-}
-
-static IMP orig_executablePath = NULL;
-static NSString *my_executablePath(id self, SEL _cmd) {
-    NSString *path = ((NSString *(*)(id, SEL))orig_executablePath)(self, _cmd);
-    if (path && ([path containsString:@"LiveContainer"] || [path containsString:@"livecontainer"] ||
-                 [path containsString:@"Documents"] || [path containsString:@"Containers"])) {
-        return @"/var/containers/Bundle/Application/00000000-0000-0000-0000-000000000000/FanqieNovel.app/FanqieNovel";
-    }
-    return path;
-}
-
+// ========== 11. NSBundle 只伪装Identifier，不伪装路径（避免资源加载失败）==========
 static IMP orig_bundleIdentifier = NULL;
 static NSString *my_bundleIdentifier(id self, SEL _cmd) {
     return @"com.dragon.read";
@@ -560,87 +520,44 @@ static void my_removeObject(id self, SEL _cmd, NSString *key) {
     ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
 }
 
-// ========== 13. WKWebView 纯Runtime伪装（无WebKit头文件依赖）==========
-static NSString *buildWKWebViewJSScript(void) {
-    NSString *fakeUA = buildFakeUserAgent();
-    NSString *sw = gDeviceProfile[@"screenW"] ?: @"393";
-    NSString *sh = gDeviceProfile[@"screenH"] ?: @"852";
-    NSString *sc = gDeviceProfile[@"scale"] ?: @"3";
-
-    NSMutableString *js = [NSMutableString string];
-    [js appendString:@"Object.defineProperty(navigator, 'platform', {get: function() { return 'iPhone'; }});"];
-    [js appendFormat:@"Object.defineProperty(navigator, 'userAgent', {get: function() { return '%@'; }});", fakeUA];
-    [js appendFormat:@"Object.defineProperty(screen, 'width', {get: function() { return %@; }});", sw];
-    [js appendFormat:@"Object.defineProperty(screen, 'height', {get: function() { return %@; }});", sh];
-    [js appendFormat:@"Object.defineProperty(screen, 'availWidth', {get: function() { return %@; }});", sw];
-    [js appendFormat:@"Object.defineProperty(screen, 'availHeight', {get: function() { return %@; }});", sh];
-    [js appendFormat:@"window.devicePixelRatio = %@;", sc];
-    return js;
+// ========== 13. Security.framework 签名验证拦截 ==========
+typedef int32_t OSStatus;
+static OSStatus (*orig_SecStaticCodeCheckValidity)(void *, uint32_t, void *, void **);
+static OSStatus my_SecStaticCodeCheckValidity(void *staticCode, uint32_t flags, void *requirement, void **errors) {
+    bypassLog(@"[Block] SecStaticCodeCheckValidity faked");
+    return 0; // errSecSuccess
 }
 
-static IMP orig_wkInit = NULL;
-static id my_wkInit(id self, SEL _cmd, CGRect frame, id configuration) {
-    if (!configuration) {
-        Class wkConfigClass = NSClassFromString(@"WKWebViewConfiguration");
-        configuration = [[wkConfigClass alloc] init];
-    }
-    // 设置假UserAgent
-    NSString *fakeUA = buildFakeUserAgent();
-    [configuration setValue:fakeUA forKey:@"applicationNameForUserAgent"];
-
-    // 注入JS脚本
-    NSString *js = buildWKWebViewJSScript();
-    Class userScriptClass = NSClassFromString(@"WKUserScript");
-    id script = [[userScriptClass alloc] init];
-    // 用KVC设置属性（避免依赖头文件）
-    [script setValue:js forKey:@"source"];
-    [script setValue:@(0) forKey:@"injectionTime"]; // AtDocumentStart = 0
-    [script setValue:@(NO) forKey:@"forMainFrameOnly"];
-
-    id contentController = [configuration valueForKey:@"userContentController"];
-    [contentController performSelector:@selector(addUserScript:) withObject:script];
-
-    return ((id (*)(id, SEL, CGRect, id))orig_wkInit)(self, _cmd, frame, configuration);
+static OSStatus (*orig_SecCodeCopySigningInformation)(void *, uint32_t, void **);
+static OSStatus my_SecCodeCopySigningInformation(void *code, uint32_t flags, void **information) {
+    bypassLog(@"[Block] SecCodeCopySigningInformation faked");
+    return 0;
 }
 
-static IMP orig_evalJS = NULL;
-static void my_evalJS(id self, SEL _cmd, NSString *js, void (^completion)(id, NSError *)) {
-    NSString *lowerJS = [js lowercaseString];
-    if ([lowerJS containsString:@"useragent"] || [lowerJS containsString:@"navigator"] ||
-        [lowerJS containsString:@"screen"] || [lowerJS containsString:@"device"] ||
-        [lowerJS containsString:@"platform"] || [lowerJS containsString:@"vendor"]) {
-        bypassLog([NSString stringWithFormat:@"[WebView] Blocked suspicious JS: %@", js]);
-        if (completion) {
-            if ([lowerJS containsString:@"useragent"]) completion(buildFakeUserAgent(), nil);
-            else if ([lowerJS containsString:@"screen.width"]) completion(gDeviceProfile[@"screenW"] ?: @"393", nil);
-            else if ([lowerJS containsString:@"screen.height"]) completion(gDeviceProfile[@"screenH"] ?: @"852", nil);
-            else completion(@"", nil);
-        }
-        return;
+static void hookSecurityFramework(void) {
+    dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+    void *secCheck = dlsym(RTLD_DEFAULT, "SecStaticCodeCheckValidity");
+    if (secCheck) {
+        DobbyHook(secCheck, (void *)my_SecStaticCodeCheckValidity, (void **)&orig_SecStaticCodeCheckValidity);
+        bypassLog(@"[Hook] SecStaticCodeCheckValidity hooked");
     }
-    ((void (*)(id, SEL, NSString *, void (^)(id, NSError *)))orig_evalJS)(self, _cmd, js, completion);
-}
-
-static IMP orig_wkLoadRequest = NULL;
-static id my_wkLoadRequest(id self, SEL _cmd, NSURLRequest *request) {
-    NSURL *url = request.URL;
-    NSString *host = url.host ?: @"";
-    if (isBlockedHost(host)) {
-        bypassLog([NSString stringWithFormat:@"[Block] WKWebView load blocked for %@", host]);
-        return nil;
+    void *secCopy = dlsym(RTLD_DEFAULT, "SecCodeCopySigningInformation");
+    if (secCopy) {
+        DobbyHook(secCopy, (void *)my_SecCodeCopySigningInformation, (void **)&orig_SecCodeCopySigningInformation);
+        bypassLog(@"[Hook] SecCodeCopySigningInformation hooked");
     }
-    return ((id (*)(id, SEL, NSURLRequest *))orig_wkLoadRequest)(self, _cmd, request);
 }
 
 // ========== 14. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.8.2 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.9 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
     hookTTNetworkCommonParams();
+    hookSecurityFramework();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -695,12 +612,6 @@ __attribute__((constructor(1))) static void constructor(void) {
 
     Class bundleCls = objc_getClass("NSBundle");
     if (bundleCls) {
-        Method m1 = class_getInstanceMethod(bundleCls, @selector(bundlePath));
-        if (m1) { orig_bundlePath = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_bundlePath); }
-        Method m2 = class_getInstanceMethod(bundleCls, @selector(resourcePath));
-        if (m2) { orig_resourcePath = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_resourcePath); }
-        Method m3 = class_getInstanceMethod(bundleCls, @selector(executablePath));
-        if (m3) { orig_executablePath = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_executablePath); }
         Method m4 = class_getInstanceMethod(bundleCls, @selector(bundleIdentifier));
         if (m4) { orig_bundleIdentifier = method_getImplementation(m4); method_setImplementation(m4, (IMP)my_bundleIdentifier); }
         Method m5 = class_getInstanceMethod(bundleCls, @selector(objectForInfoDictionaryKey:));
@@ -715,16 +626,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    // WKWebView hooks - 纯Runtime，不依赖WebKit头文件
-    Class wkCls = NSClassFromString(@"WKWebView");
-    if (wkCls) {
-        Method m1 = class_getInstanceMethod(wkCls, @selector(initWithFrame:configuration:));
-        if (m1) { orig_wkInit = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_wkInit); }
-        Method m2 = class_getInstanceMethod(wkCls, @selector(loadRequest:));
-        if (m2) { orig_wkLoadRequest = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_wkLoadRequest); }
-        Method m3 = class_getInstanceMethod(wkCls, @selector(evaluateJavaScript:completionHandler:));
-        if (m3) { orig_evalJS = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_evalJS); }
-    }
-
-    bypassLog(@"=== AliSecBypass v6.1.8.2 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.9 init complete ===");
 }
