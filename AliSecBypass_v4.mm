@@ -3,6 +3,7 @@
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
+#include <UIKit/UIKit.h>
 #include <objc/runtime.h>
 #include <dlfcn.h>
 #include <sys/socket.h>
@@ -13,7 +14,6 @@
 #include <fishhook.h>
 #include <dobby.h>
 #include <mach-o/dyld.h>
-#include <mach-o/nlist.h>
 
 // ========== 日志工具 ==========
 static dispatch_queue_t gLogQueue = NULL;
@@ -30,7 +30,7 @@ static void bypassLog(NSString *msg) {
     });
 }
 
-// ========== 1. 隐藏自身 dylib（从 _dyld_get_image_name 移除）==========
+// ========== 1. 隐藏自身 dylib ==========
 static const char *(*orig_dyld_get_image_name)(uint32_t);
 static const char *my_dyld_get_image_name(uint32_t image_index) {
     const char *name = orig_dyld_get_image_name(image_index);
@@ -48,13 +48,13 @@ static void initDeviceProfile(void) {
     if (!saved) {
         NSArray *profiles = @[
             @{@"model": @"iPhone14,2", @"systemVersion": @"17.5.1", @"name": @"iPhone", @"machine": @"iPhone14,2",
-              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @@6, @"disk": @@128,
+              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @6, @"disk": @128,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国联通"},
             @{@"model": @"iPhone13,2", @"systemVersion": @"16.6.1", @"name": @"iPhone", @"machine": @"iPhone13,2",
-              @"screenW": @390, @"screenH": @844, @"scale": @3.0, @"mem": @@4, @"disk": @@256,
+              @"screenW": @390, @"screenH": @844, @"scale": @3.0, @"mem": @4, @"disk": @256,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国移动"},
             @{@"model": @"iPhone15,2", @"systemVersion": @"18.0", @"name": @"iPhone", @"machine": @"iPhone15,2",
-              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @@8, @"disk": @@512,
+              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @8, @"disk": @512,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国电信"},
         ];
         NSUInteger idx = arc4random_uniform((uint32_t)profiles.count);
@@ -138,7 +138,7 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 6. 域名拦截（扩大范围）==========
+// ========== 6. 域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"tnc", @"tnc16", @"tnc0", @"mon11", @"mon16", @"security",
@@ -159,7 +159,6 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         NSString *ipStr = [NSString stringWithFormat:@"%s", inet_ntoa(sin->sin_addr)];
         int port = ntohs(sin->sin_port);
         bypassLog([NSString stringWithFormat:@"[connect] %@:%d", ipStr, port]);
-        // 拦截 UDP 53 端口（DNS）
         if (port == 53) {
             bypassLog(@"[connect] DNS 53 BLOCKED");
             errno = ECONNREFUSED;
@@ -225,7 +224,7 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 9. 初始化（立即执行，不延迟！）==========
+// ========== 9. 初始化（立即执行）==========
 __attribute__((constructor)) static void constructor(void) {
     bypassLog(@"=== AliSecBypass v5.0 init ===");
 
