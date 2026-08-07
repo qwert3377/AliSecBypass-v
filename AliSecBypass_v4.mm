@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.10.2 - 极简核心版：去掉taskCancel/getenv/exit/abort（导致TNC失败和检测），只保留最稳定hook
+// AliSecBypass v6.1.11 - 完全恢复v6.1.2稳定代码 + 只增加commonParams方法hook
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -128,12 +128,13 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     return mut;
 }
 
-// ========== TTNetworkManager Hook（只保留block）==========
+// ========== TTNetworkManager Hook（v6.1.2双block + 新增commonParams方法）==========
 typedef NSDictionary * (^CommonParamsBlock)(void);
 typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
 
 static IMP orig_commonParamsblock = NULL;
 static IMP orig_commonParamsblockWithURL = NULL;
+static IMP orig_commonParams = NULL;
 
 static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
     if (!original) return nil;
@@ -161,6 +162,12 @@ static id my_commonParamsblockWithURL(id self, SEL _cmd) {
     return makeWrappedBlockWithURL(original);
 }
 
+static id my_commonParams(id self, SEL _cmd) {
+    id result = ((id (*)(id, SEL))orig_commonParams)(self, _cmd);
+    if ([result isKindOfClass:[NSDictionary class]]) return patchCommonParams(result);
+    return result;
+}
+
 static void hookTTNetworkCommonParams(void) {
     Class ttMgr = objc_getClass("TTNetworkManager");
     if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
@@ -176,11 +183,20 @@ static void hookTTNetworkCommonParams(void) {
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] commonParamsblockWithURL hooked");
     }
+    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
+        orig_commonParams = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_commonParams);
+        bypassLog(@"[Hook] commonParams hooked");
+    }
 }
 
-// ========== 1. UIDevice（只hook idfv）==========
+// ========== 1. UIDevice（v6.1.2完整版）==========
 static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
+static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
+static NSString *my_model(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
+static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: @"iPhone"; }
+static NSString *my_localizedModel(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 
 static void hookUIDevice(void) {
     Class uid = objc_getClass("UIDevice");
@@ -189,6 +205,10 @@ static void hookUIDevice(void) {
     if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) method_setImplementation(m, (IMP)my_idfv);
     if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"_uniqueVendorIdentifier")))) method_setImplementation(m, (IMP)my_uniqueVendor);
     if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"uniqueIdentifierForVendor")))) method_setImplementation(m, (IMP)my_uniqueVendor);
+    if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) method_setImplementation(m, (IMP)my_sysVer);
+    if ((m = class_getInstanceMethod(uid, @selector(model)))) method_setImplementation(m, (IMP)my_model);
+    if ((m = class_getInstanceMethod(uid, @selector(name)))) method_setImplementation(m, (IMP)my_name);
+    if ((m = class_getInstanceMethod(uid, @selector(localizedModel)))) method_setImplementation(m, (IMP)my_localizedModel);
 }
 
 // ========== 2. ASIdentifierManager ==========
@@ -204,7 +224,43 @@ static void hookASIdentifierManager(void) {
     }
 }
 
-// ========== 3. uname ==========
+// ========== 3. UIScreen / NSProcessInfo（v6.1.2完整版）==========
+static CGRect my_screenBounds(id self, SEL _cmd) {
+    return CGRectMake(0, 0, [gDeviceProfile[@"screenW"] floatValue], [gDeviceProfile[@"screenH"] floatValue]);
+}
+static CGFloat my_screenScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
+static CGRect my_nativeBounds(id self, SEL _cmd) {
+    CGFloat s = [gDeviceProfile[@"scale"] floatValue] ?: 3.0f;
+    CGFloat w = [gDeviceProfile[@"screenW"] floatValue] ?: 393.0f;
+    CGFloat h = [gDeviceProfile[@"screenH"] floatValue] ?: 852.0f;
+    return CGRectMake(0, 0, w * s, h * s);
+}
+static CGFloat my_nativeScale(id self, SEL _cmd) { return [gDeviceProfile[@"scale"] floatValue] ?: 3.0f; }
+static unsigned long long my_physicalMemory(id self, SEL _cmd) {
+    return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024ULL * 1024ULL * 1024ULL;
+}
+static NSString *my_osVerString(id self, SEL _cmd) {
+    return [NSString stringWithFormat:@"Version %@ (Build 21F79)", gDeviceProfile[@"systemVersion"] ?: @"17.5.1"];
+}
+
+static void hookScreenAndProcessInfo(void) {
+    Class screen = objc_getClass("UIScreen");
+    if (screen) {
+        Method m;
+        if ((m = class_getInstanceMethod(screen, @selector(bounds)))) method_setImplementation(m, (IMP)my_screenBounds);
+        if ((m = class_getInstanceMethod(screen, @selector(scale)))) method_setImplementation(m, (IMP)my_screenScale);
+        if ((m = class_getInstanceMethod(screen, @selector(nativeBounds)))) method_setImplementation(m, (IMP)my_nativeBounds);
+        if ((m = class_getInstanceMethod(screen, @selector(nativeScale)))) method_setImplementation(m, (IMP)my_nativeScale);
+    }
+    Class pi = objc_getClass("NSProcessInfo");
+    if (pi) {
+        Method m;
+        if ((m = class_getInstanceMethod(pi, @selector(physicalMemory)))) method_setImplementation(m, (IMP)my_physicalMemory);
+        if ((m = class_getInstanceMethod(pi, @selector(operatingSystemVersionString)))) method_setImplementation(m, (IMP)my_osVerString);
+    }
+}
+
+// ========== 4. uname ==========
 static int (*orig_uname)(struct utsname *);
 static int my_uname(struct utsname *name) {
     int ret = orig_uname(name);
@@ -217,7 +273,7 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 4. 隐藏自身 dylib ==========
+// ========== 5. 隐藏自身 dylib ==========
 static const char *(*orig_dyld_get_image_name)(uint32_t);
 static const char *my_dyld_get_image_name(uint32_t image_index) {
     const char *name = orig_dyld_get_image_name(image_index);
@@ -227,16 +283,15 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 5. 域名拦截（精简，只拦核心安全域名）==========
+// ========== 6. 域名拦截（v6.1.2精简版）==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
-    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"msdk.bytedance", @"volc.bytedance",
-                           @"mon11-misc.fqnovel", @"tnc", @"anti", @"risk", @"verify"];
+    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
     return NO;
 }
 
-// ========== 6. fishhook 系统函数（精简版）==========
+// ========== 7. fishhook 系统函数（v6.1.2精简版）==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
@@ -245,6 +300,11 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         if ([ipStr hasPrefix:@"172.31."]) { errno = ECONNREFUSED; return -1; }
     }
     return orig_connect(sockfd, addr, addrlen);
+}
+
+static ssize_t (*orig_sendto)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+static ssize_t my_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t addrlen) {
+    return orig_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
 }
 
 static int (*orig_ptrace)(int, pid_t, void *, int);
@@ -309,7 +369,7 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-// ========== 7. NSURLSession Hook（只拦截请求创建，不拦截cancel）==========
+// ========== 8. NSURLSession Hook（v6.1.2原版）==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
@@ -321,17 +381,19 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 8. 初始化（优先级1，最早执行）==========
-__attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.10.2 init (priority 1) ===");
+// ========== 9. 初始化（v6.1.2原版 + commonParams方法hook）==========
+__attribute__((constructor(101))) static void constructor(void) {
+    bypassLog(@"=== AliSecBypass v6.1.11 init ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
+    hookScreenAndProcessInfo();
     hookTTNetworkCommonParams();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
+        {"sendto", (void *)my_sendto, (void **)&orig_sendto},
         {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace},
         {"sysctl", (void *)my_sysctl, (void **)&orig_sysctl},
         {"getaddrinfo", (void *)my_getaddrinfo, (void **)&orig_getaddrinfo},
@@ -340,7 +402,7 @@ __attribute__((constructor(1))) static void constructor(void) {
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    rebind_symbols(rebinds, 8);
+    rebind_symbols(rebinds, 9);
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
@@ -348,5 +410,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.10.2 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.11 init complete ===");
 }
