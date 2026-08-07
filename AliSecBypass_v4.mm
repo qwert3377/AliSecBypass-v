@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.9.2 - 去掉UIScreen bounds hook（导致系统资源加载崩溃），保留其他所有功能
+// AliSecBypass v6.1.9.3 - 去掉UIDevice.model/systemVersion hook（导致系统资源加载崩溃），保留idfv和网络层hook
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -191,13 +191,9 @@ static void hookTTNetworkCommonParams(void) {
     }
 }
 
-// ========== 1. UIDevice ==========
+// ========== 1. UIDevice（只hook idfv，不hook model/systemVersion，避免系统资源加载崩溃）==========
 static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
-static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
-static NSString *my_model(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
-static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: @"iPhone"; }
-static NSString *my_localizedModel(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 
 static void hookUIDevice(void) {
     Class uid = objc_getClass("UIDevice");
@@ -206,10 +202,6 @@ static void hookUIDevice(void) {
     if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) method_setImplementation(m, (IMP)my_idfv);
     if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"_uniqueVendorIdentifier")))) method_setImplementation(m, (IMP)my_uniqueVendor);
     if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"uniqueIdentifierForVendor")))) method_setImplementation(m, (IMP)my_uniqueVendor);
-    if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) method_setImplementation(m, (IMP)my_sysVer);
-    if ((m = class_getInstanceMethod(uid, @selector(model)))) method_setImplementation(m, (IMP)my_model);
-    if ((m = class_getInstanceMethod(uid, @selector(name)))) method_setImplementation(m, (IMP)my_name);
-    if ((m = class_getInstanceMethod(uid, @selector(localizedModel)))) method_setImplementation(m, (IMP)my_localizedModel);
 }
 
 // ========== 2. ASIdentifierManager ==========
@@ -225,22 +217,16 @@ static void hookASIdentifierManager(void) {
     }
 }
 
-// ========== 3. NSProcessInfo（去掉UIScreen hook，避免系统资源加载崩溃）==========
+// ========== 3. NSProcessInfo（只hook physicalMemory，不hook processName避免副作用）==========
 static unsigned long long my_physicalMemory(id self, SEL _cmd) {
     return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024ULL * 1024ULL * 1024ULL;
 }
-static NSString *my_osVerString(id self, SEL _cmd) {
-    return [NSString stringWithFormat:@"Version %@ (Build 21F79)", gDeviceProfile[@"systemVersion"] ?: @"17.5.1"];
-}
-static NSString *my_processName(id self, SEL _cmd) { return @"FanqieNovel"; }
 
 static void hookProcessInfo(void) {
     Class pi = objc_getClass("NSProcessInfo");
     if (pi) {
         Method m;
         if ((m = class_getInstanceMethod(pi, @selector(physicalMemory)))) method_setImplementation(m, (IMP)my_physicalMemory);
-        if ((m = class_getInstanceMethod(pi, @selector(operatingSystemVersionString)))) method_setImplementation(m, (IMP)my_osVerString);
-        if ((m = class_getInstanceMethod(pi, @selector(processName)))) method_setImplementation(m, (IMP)my_processName);
     }
 }
 
@@ -502,7 +488,7 @@ static void my_removeObject(id self, SEL _cmd, NSString *key) {
 
 // ========== 13. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.9.2 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.9.3 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -577,5 +563,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.9.2 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.9.3 init complete ===");
 }
