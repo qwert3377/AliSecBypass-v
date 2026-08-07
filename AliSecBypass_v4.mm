@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/utsname.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fishhook.h>
@@ -48,7 +49,6 @@ static void initDeviceProfile(void) {
     NSDictionary *saved = [ud objectForKey:@"AliSecBypass_DeviceProfile"];
 
     if (!saved) {
-        // 预定义几套真实设备指纹
         NSArray *profiles = @[
             @{@"model": @"iPhone14,2", @"systemVersion": @"17.5.1", @"name": @"iPhone", @"machine": @"iPhone14,2"},
             @{@"model": @"iPhone13,2", @"systemVersion": @"16.6.1", @"name": @"iPhone", @"machine": @"iPhone13,2"},
@@ -68,7 +68,7 @@ static void initDeviceProfile(void) {
 }
 
 // ========== 1. 伪造 UIDevice 信息 ==========
-static NSUUID *(*orig_identifierForVendor)(id, SEL);
+static IMP orig_identifierForVendor = NULL;
 static NSUUID *my_identifierForVendor(id self, SEL _cmd) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSString *fakeID = [ud stringForKey:@"AliSecBypass_FakeID"];
@@ -80,18 +80,18 @@ static NSUUID *my_identifierForVendor(id self, SEL _cmd) {
     return [[NSUUID alloc] initWithUUIDString:fakeID];
 }
 
-static NSString *(*orig_systemVersion)(id, SEL);
+static IMP orig_systemVersion = NULL;
 static NSString *my_systemVersion(id self, SEL _cmd) {
     return gDeviceProfile[@"systemVersion"] ?: @"17.0";
 }
 
-static NSString *(*orig_model)(id, SEL);
+static IMP orig_model = NULL;
 static NSString *my_model(id self, SEL _cmd) {
     return gDeviceProfile[@"model"] ?: @"iPhone";
 }
 
-static NSString *(*orig_name)(id, SEL);
-static NSString *my_name(id, SEL) {
+static IMP orig_name = NULL;
+static NSString *my_name(id self, SEL _cmd) {
     return gDeviceProfile[@"name"] ?: @"iPhone";
 }
 
@@ -100,29 +100,29 @@ static void hookUIDevice(void) {
     if (!cls) return;
 
     Method m1 = class_getInstanceMethod(cls, sel_registerName("identifierForVendor"));
-    if (m1) { orig_identifierForVendor = (void *)method_getImplementation(m1); method_setImplementation(m1, (IMP)my_identifierForVendor); }
+    if (m1) { orig_identifierForVendor = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_identifierForVendor); }
 
     Method m2 = class_getInstanceMethod(cls, sel_registerName("systemVersion"));
-    if (m2) { orig_systemVersion = (void *)method_getImplementation(m2); method_setImplementation(m2, (IMP)my_systemVersion); }
+    if (m2) { orig_systemVersion = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_systemVersion); }
 
     Method m3 = class_getInstanceMethod(cls, sel_registerName("model"));
-    if (m3) { orig_model = (void *)method_getImplementation(m3); method_setImplementation(m3, (IMP)my_model); }
+    if (m3) { orig_model = method_getImplementation(m3); method_setImplementation(m3, (IMP)my_model); }
 
     Method m4 = class_getInstanceMethod(cls, sel_registerName("name"));
-    if (m4) { orig_name = (void *)method_getImplementation(m4); method_setImplementation(m4, (IMP)my_name); }
+    if (m4) { orig_name = method_getImplementation(m4); method_setImplementation(m4, (IMP)my_name); }
 
     bypassLog(@"[Hook] UIDevice hooked");
 }
 
 // ========== 2. 伪造 ASIdentifierManager advertisingIdentifier ==========
-static NSUUID *(*orig_advertisingIdentifier)(id, SEL);
+static IMP orig_advertisingIdentifier = NULL;
 static NSUUID *my_advertisingIdentifier(id self, SEL _cmd) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSString *fakeID = [ud stringForKey:@"AliSecBypass_FakeID"];
     if (fakeID) {
         return [[NSUUID alloc] initWithUUIDString:fakeID];
     }
-    return orig_advertisingIdentifier(self, _cmd);
+    return ((NSUUID *(*)(id, SEL))orig_advertisingIdentifier)(self, _cmd);
 }
 
 static void hookASIdentifierManager(void) {
@@ -130,7 +130,7 @@ static void hookASIdentifierManager(void) {
     if (!cls) return;
     Method m = class_getInstanceMethod(cls, sel_registerName("advertisingIdentifier"));
     if (m) {
-        orig_advertisingIdentifier = (void *)method_getImplementation(m);
+        orig_advertisingIdentifier = method_getImplementation(m);
         method_setImplementation(m, (IMP)my_advertisingIdentifier);
         bypassLog(@"[Hook] ASIdentifierManager hooked");
     }
@@ -194,7 +194,6 @@ static BOOL isBlockedHost(NSString *host) {
 
 static BOOL isFirstLaunchReport(NSString *urlStr) {
     if (!urlStr) return NO;
-    // 首次上报的关键域名/路径
     NSArray *reportKeywords = @[@"wosms.cn", @"unicomAuth", @"device_register", @"service_register", @"active"];
     for (NSString *kw in reportKeywords) {
         if ([urlStr containsString:kw]) return YES;
@@ -223,7 +222,6 @@ static NSURLSessionDataTask *my_dataTaskWithRequest(id self, SEL _cmd, NSURLRequ
     NSString *urlStr = url.absoluteString;
     NSString *host = url.host ?: @"";
 
-    // 打印关键请求（首次上报 + 检测域名）
     BOOL isReport = isFirstLaunchReport(urlStr);
     BOOL isBlocked = isBlockedHost(host);
 
@@ -243,7 +241,6 @@ static NSURLSessionDataTask *my_dataTaskWithRequest(id self, SEL _cmd, NSURLRequ
         bypassLog(log);
     }
 
-    // 拦截检测域名
     if (isBlocked) {
         bypassLog([NSString stringWithFormat:@"[NSURLSession] BLOCKED: %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dataTaskWithRequest)(self, _cmd, request, completionHandler);
@@ -251,16 +248,13 @@ static NSURLSessionDataTask *my_dataTaskWithRequest(id self, SEL _cmd, NSURLRequ
         return dummy;
     }
 
-    // 拦截首次上报（让上报失败，App 继续运行）
     if (isReport) {
         bypassLog([NSString stringWithFormat:@"[NSURLSession] FIRST REPORT BLOCKED: %@", urlStr]);
-        // 返回伪造的失败响应
         if (completionHandler) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 completionHandler(nil, nil, [NSError errorWithDomain:@"NSURLErrorDomain" code:-1001 userInfo:@{NSLocalizedDescriptionKey: @"Request timeout"}]);
             });
         }
-        // 创建一个 dummy task 并立即完成
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dataTaskWithRequest)(self, _cmd, request, nil);
         return dummy;
     }
@@ -283,14 +277,10 @@ static void hookNSURLSession(void) {
 static void initAllHooks(void) {
     bypassLog(@"=== AliSecBypass v4.9 init ===");
 
-    // 先初始化设备指纹（必须在其他 Hook 之前）
     initDeviceProfile();
-
-    // Hook 设备信息
     hookUIDevice();
     hookASIdentifierManager();
 
-    // fishhook 系统函数
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
         {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace},
@@ -301,7 +291,6 @@ static void initAllHooks(void) {
     int ret = rebind_symbols(rebinds, 5);
     bypassLog([NSString stringWithFormat:@"[fishhook] rebind_symbols returned: %d", ret]);
 
-    // NSURLSession Hook
     hookNSURLSession();
 
     bypassLog(@"=== AliSecBypass v4.9 init complete ===");
