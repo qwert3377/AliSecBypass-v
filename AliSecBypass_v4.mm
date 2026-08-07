@@ -1,4 +1,4 @@
-// AliSecBypass v5.3-fix5 - 移除Keychain hook，专注IDFV/IDFA伪装
+// AliSecBypass v5.4 - IDFV/IDFA 分离伪装 + 独立假UUID
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -32,7 +32,8 @@ static void bypassLog(NSString *msg) {
 
 // ========== 设备指纹 ==========
 static NSDictionary *gDeviceProfile = nil;
-static NSString *gFakeUUID = nil;
+static NSString *gFakeIDFV = nil;   // 用于 identifierForVendor
+static NSString *gFakeIDFA = nil;   // 用于 advertisingIdentifier
 
 static void initDeviceProfile(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -59,27 +60,39 @@ static void initDeviceProfile(void) {
     }
     gDeviceProfile = saved;
 
-    gFakeUUID = [ud stringForKey:@"AliSecBypass_FakeID"];
-    if (!gFakeUUID) {
-        gFakeUUID = [[NSUUID UUID] UUIDString];
-        [ud setObject:gFakeUUID forKey:@"AliSecBypass_FakeID"];
+    // 独立的假 IDFV
+    gFakeIDFV = [ud stringForKey:@"AliSecBypass_FakeIDFV"];
+    if (!gFakeIDFV) {
+        gFakeIDFV = [[NSUUID UUID] UUIDString];
+        [ud setObject:gFakeIDFV forKey:@"AliSecBypass_FakeIDFV"];
         [ud synchronize];
-        bypassLog([NSString stringWithFormat:@"[ID] NEW FakeUUID: %@", gFakeUUID]);
+        bypassLog([NSString stringWithFormat:@"[ID] NEW FakeIDFV: %@", gFakeIDFV]);
     } else {
-        bypassLog([NSString stringWithFormat:@"[ID] REUSE FakeUUID: %@", gFakeUUID]);
+        bypassLog([NSString stringWithFormat:@"[ID] REUSE FakeIDFV: %@", gFakeIDFV]);
+    }
+
+    // 独立的假 IDFA
+    gFakeIDFA = [ud stringForKey:@"AliSecBypass_FakeIDFA"];
+    if (!gFakeIDFA) {
+        gFakeIDFA = [[NSUUID UUID] UUIDString];
+        [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"];
+        [ud synchronize];
+        bypassLog([NSString stringWithFormat:@"[ID] NEW FakeIDFA: %@", gFakeIDFA]);
+    } else {
+        bypassLog([NSString stringWithFormat:@"[ID] REUSE FakeIDFA: %@", gFakeIDFA]);
     }
 }
 
 // ========== 1. 伪造 UIDevice - identifierForVendor ==========
 static IMP orig_idfv = NULL;
 static NSUUID *my_idfv(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[IDFV] identifierForVendor -> %@", gFakeUUID]);
-    return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
+    bypassLog([NSString stringWithFormat:@"[IDFV] identifierForVendor -> %@", gFakeIDFV]);
+    return [[NSUUID alloc] initWithUUIDString:gFakeIDFV];
 }
 
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[IDFV] _uniqueVendorIdentifier -> %@", gFakeUUID]);
-    return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
+    bypassLog([NSString stringWithFormat:@"[IDFV] _uniqueVendorIdentifier -> %@", gFakeIDFV]);
+    return [[NSUUID alloc] initWithUUIDString:gFakeIDFV];
 }
 
 static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
@@ -116,8 +129,8 @@ static void hookUIDevice(void) {
 // ========== 2. 伪造 ASIdentifierManager - advertisingIdentifier ==========
 static IMP orig_adId = NULL;
 static NSUUID *my_adId(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[IDFA] advertisingIdentifier -> %@", gFakeUUID]);
-    return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
+    bypassLog([NSString stringWithFormat:@"[IDFA] advertisingIdentifier -> %@", gFakeIDFA]);
+    return [[NSUUID alloc] initWithUUIDString:gFakeIDFA];
 }
 
 static void hookASIdentifierManager(void) {
@@ -293,7 +306,7 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
 
 // ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.3-fix5 init ===");
+    bypassLog(@"=== AliSecBypass v5.4 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -320,5 +333,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m) { orig_dtwr = method_getImplementation(m); method_setImplementation(m, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.3-fix5 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.4 init complete ===");
 }
