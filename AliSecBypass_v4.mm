@@ -1,4 +1,4 @@
-// AliSecBypass v5.2 - 修复DNS阻断 + ID日志 + 保留LocalSocket
+// AliSecBypass v5.3 - 修复 IDFV/IDFA 伪装 + Keychain 清理 + 更早初始化
 // fishhook + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -12,8 +12,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fishhook.h>
-#include <dobby.h>
 #include <mach-o/dyld.h>
+#include <Security/Security.h>
 
 // ========== 日志工具 ==========
 static dispatch_queue_t gLogQueue = NULL;
@@ -30,17 +30,7 @@ static void bypassLog(NSString *msg) {
     });
 }
 
-// ========== 1. 隐藏自身 dylib ==========
-static const char *(*orig_dyld_get_image_name)(uint32_t);
-static const char *my_dyld_get_image_name(uint32_t image_index) {
-    const char *name = orig_dyld_get_image_name(image_index);
-    if (name && (strstr(name, "AliSecBypass") || strstr(name, "bypass") || strstr(name, "fishhook"))) {
-        return "/System/Library/Frameworks/Foundation.framework/Foundation";
-    }
-    return name;
-}
-
-// ========== 2. 设备指纹 ==========
+// ========== 设备指纹 ==========
 static NSDictionary *gDeviceProfile = nil;
 static NSString *gFakeUUID = nil;
 
@@ -56,7 +46,7 @@ static void initDeviceProfile(void) {
               @"screenW": @390, @"screenH": @844, @"scale": @3.0, @"mem": @4, @"disk": @256,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国移动"},
             @{@"model": @"iPhone15,2", @"systemVersion": @"18.0", @"name": @"iPhone", @"machine": @"iPhone15,2",
-              @"screenW": @393, @"screenH": @852, @"scale": @3.0, @"mem": @8, @"disk": @512,
+              @"screenW": @393, @"screenH": @"852", @"scale": @3.0, @"mem": @8, @"disk": @512,
               @"tz": @"Asia/Shanghai", @"lang": @"zh-Hans-CN", @"carrier": @"中国电信"},
         ];
         NSUInteger idx = arc4random_uniform((uint32_t)profiles.count);
@@ -81,17 +71,86 @@ static void initDeviceProfile(void) {
     }
 }
 
-// ========== 3. 伪造 UIDevice ==========
-static IMP orig_idfv = NULL, orig_sysVer = NULL, orig_model = NULL, orig_name = NULL;
+// ========== 1. 伪造 UIDevice - identifierForVendor ==========
+static IMP orig_idfv = NULL;
 static NSUUID *my_idfv(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[ID] identifierForVendor CALLED -> %@", gFakeUUID]);
+    bypassLog([NSString stringWithFormat:@"[IDFV] identifierForVendor CALLED -> %@", gFakeUUID]);
     return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
 }
+
+// 有些App通过私有方法获取
+static NSUUID *my_uniqueVendor(id self, SEL _cmd) {
+    bypassLog([NSString stringWithFormat:@"[IDFV] _uniqueVendorIdentifier CALLED -> %@", gFakeUUID]);
+    return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
+}
+
 static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
 static NSString *my_model(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: @"iPhone"; }
 
-// ========== 4. 伪造 UIScreen / NSProcessInfo ==========
+static void hookUIDevice(void) {
+    Class uid = objc_getClass("UIDevice");
+    if (!uid) { bypassLog(@"[Hook] UIDevice class not found!"); return; }
+
+    Method m;
+    if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) { 
+        orig_idfv = method_getImplementation(m); 
+        method_setImplementation(m, (IMP)my_idfv); 
+        bypassLog(@"[Hook] UIDevice identifierForVendor hooked"); 
+    }
+    // 私有方法：有些SDK用 _uniqueVendorIdentifier 或 uniqueIdentifierForVendor
+    if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"_uniqueVendorIdentifier")))) {
+        method_setImplementation(m, (IMP)my_uniqueVendor);
+        bypassLog(@"[Hook] UIDevice _uniqueVendorIdentifier hooked");
+    }
+    if ((m = class_getInstanceMethod(uid, NSSelectorFromString(@"uniqueIdentifierForVendor")))) {
+        method_setImplementation(m, (IMP)my_uniqueVendor);
+        bypassLog(@"[Hook] UIDevice uniqueIdentifierForVendor hooked");
+    }
+    if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) { method_setImplementation(m, (IMP)my_sysVer); }
+    if ((m = class_getInstanceMethod(uid, @selector(model)))) { method_setImplementation(m, (IMP)my_model); }
+    if ((m = class_getInstanceMethod(uid, @selector(name)))) { method_setImplementation(m, (IMP)my_name); }
+
+    // 自测确认 hook 生效
+    NSUUID *test = [[UIDevice currentDevice] identifierForVendor];
+    bypassLog([NSString stringWithFormat:@"[Test] UIDevice.identifierForVendor = %@", test.UUIDString]);
+}
+
+// ========== 2. 伪造 ASIdentifierManager - advertisingIdentifier ==========
+static IMP orig_adId = NULL;
+static NSUUID *my_adId(id self, SEL _cmd) {
+    bypassLog([NSString stringWithFormat:@"[IDFA] advertisingIdentifier CALLED -> %@", gFakeUUID]);
+    return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
+}
+
+static void hookASIdentifierManager(void) {
+    // 动态加载 AdSupport 框架，确保类存在
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dlopen("/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY);
+    });
+
+    Class asid = objc_getClass("ASIdentifierManager");
+    if (asid) {
+        Method m = class_getInstanceMethod(asid, @selector(advertisingIdentifier));
+        if (m) { 
+            orig_adId = method_getImplementation(m); 
+            method_setImplementation(m, (IMP)my_adId); 
+            bypassLog(@"[Hook] ASIdentifierManager advertisingIdentifier hooked"); 
+
+            // 自测
+            id mgr = [asid performSelector:@selector(sharedManager)];
+            if (mgr) {
+                NSUUID *test = [mgr advertisingIdentifier];
+                bypassLog([NSString stringWithFormat:@"[Test] ASIdentifierManager.advertisingIdentifier = %@", test.UUIDString]);
+            }
+        }
+    } else {
+        bypassLog(@"[Hook] ASIdentifierManager class not found (AdSupport not linked)");
+    }
+}
+
+// ========== 3. 伪造 UIScreen / NSProcessInfo ==========
 static IMP orig_screenBounds = NULL, orig_screenScale = NULL;
 static CGRect my_screenBounds(id self, SEL _cmd) {
     CGFloat w = [gDeviceProfile[@"screenW"] floatValue];
@@ -105,15 +164,7 @@ static unsigned long long my_physicalMemory(id self, SEL _cmd) {
     return ([gDeviceProfile[@"mem"] unsignedLongLongValue] ?: 6ULL) * 1024 * 1024 * 1024;
 }
 
-static void hookDeviceInfo(void) {
-    Class uid = objc_getClass("UIDevice");
-    if (uid) {
-        Method m; 
-        if ((m = class_getInstanceMethod(uid, @selector(identifierForVendor)))) { orig_idfv = method_getImplementation(m); method_setImplementation(m, (IMP)my_idfv); }
-        if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) { orig_sysVer = method_getImplementation(m); method_setImplementation(m, (IMP)my_sysVer); }
-        if ((m = class_getInstanceMethod(uid, @selector(model)))) { orig_model = method_getImplementation(m); method_setImplementation(m, (IMP)my_model); }
-        if ((m = class_getInstanceMethod(uid, @selector(name)))) { orig_name = method_getImplementation(m); method_setImplementation(m, (IMP)my_name); }
-    }
+static void hookScreenAndProcessInfo(void) {
     Class screen = objc_getClass("UIScreen");
     if (screen) {
         Method m;
@@ -125,25 +176,10 @@ static void hookDeviceInfo(void) {
         Method m = class_getInstanceMethod(pi, @selector(physicalMemory));
         if (m) { orig_physicalMemory = method_getImplementation(m); method_setImplementation(m, (IMP)my_physicalMemory); }
     }
-    bypassLog(@"[Hook] Device info hooked");
+    bypassLog(@"[Hook] Screen & ProcessInfo hooked");
 }
 
-// ========== 5. 伪造 ASIdentifierManager ==========
-static IMP orig_adId = NULL;
-static NSUUID *my_adId(id self, SEL _cmd) {
-    bypassLog([NSString stringWithFormat:@"[ID] advertisingIdentifier CALLED -> %@", gFakeUUID]);
-    return [[NSUUID alloc] initWithUUIDString:gFakeUUID];
-}
-
-static void hookASIdentifierManager(void) {
-    Class asid = objc_getClass("ASIdentifierManager");
-    if (asid) {
-        Method m = class_getInstanceMethod(asid, @selector(advertisingIdentifier));
-        if (m) { orig_adId = method_getImplementation(m); method_setImplementation(m, (IMP)my_adId); bypassLog(@"[Hook] ASIdentifierManager hooked"); }
-    }
-}
-
-// ========== 6. 伪造 uname ==========
+// ========== 4. 伪造 uname ==========
 static int (*orig_uname)(struct utsname *);
 static int my_uname(struct utsname *name) {
     int ret = orig_uname(name);
@@ -156,7 +192,65 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 7. 精确域名拦截（不拦DNS 53全局）==========
+// ========== 5. Keychain Hook - 防止读取真实设备指纹 ==========
+static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *);
+static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    OSStatus status = orig_SecItemCopyMatching(query, result);
+    if (status == errSecSuccess && result && *result) {
+        NSString *account = nil;
+        CFTypeRef acctRef = CFDictionaryGetValue(query, kSecAttrAccount);
+        if (acctRef) account = (__bridge NSString *)acctRef;
+
+        // 拦截常见的设备指纹 key
+        NSArray *deviceKeys = @[@"device_id", @"uuid", @"idfv", @"idfa", @"install_id", @"device_fingerprint", 
+                                 @"bd_did", @"tt_did", @"openudid", @"clientudid", @"mssdk_device_id"];
+        BOOL isDeviceKey = NO;
+        if (account) {
+            NSString *low = [account lowercaseString];
+            for (NSString *k in deviceKeys) {
+                if ([low containsString:k]) { isDeviceKey = YES; break; }
+            }
+        }
+        if (isDeviceKey) {
+            bypassLog([NSString stringWithFormat:@"[Keychain] BLOCKED read for key: %@", account]);
+            // 返回空数据
+            CFRelease(*result);
+            *result = NULL;
+            return errSecItemNotFound;
+        }
+    }
+    return status;
+}
+
+static OSStatus (*orig_SecItemAdd)(CFDictionaryRef, CFTypeRef *);
+static OSStatus my_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+    CFTypeRef acctRef = CFDictionaryGetValue(attributes, kSecAttrAccount);
+    if (acctRef) {
+        NSString *account = (__bridge NSString *)acctRef;
+        NSArray *deviceKeys = @[@"device_id", @"uuid", @"idfv", @"idfa", @"install_id", @"device_fingerprint",
+                                 @"bd_did", @"tt_did", @"openudid", @"clientudid", @"mssdk_device_id"];
+        NSString *low = [account lowercaseString];
+        for (NSString *k in deviceKeys) {
+            if ([low containsString:k]) {
+                bypassLog([NSString stringWithFormat:@"[Keychain] BLOCKED write for key: %@", account]);
+                return errSecSuccess; // 假装写入成功
+            }
+        }
+    }
+    return orig_SecItemAdd(attributes, result);
+}
+
+// ========== 6. 隐藏自身 dylib ==========
+static const char *(*orig_dyld_get_image_name)(uint32_t);
+static const char *my_dyld_get_image_name(uint32_t image_index) {
+    const char *name = orig_dyld_get_image_name(image_index);
+    if (name && (strstr(name, "AliSecBypass") || strstr(name, "bypass") || strstr(name, "fishhook"))) {
+        return "/System/Library/Frameworks/Foundation.framework/Foundation";
+    }
+    return name;
+}
+
+// ========== 7. 精确域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"tnc0-", @"tnc16-", @"mon11-misc", @"security-lq",
@@ -176,9 +270,6 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         NSString *ipStr = [NSString stringWithFormat:@"%s", inet_ntoa(sin->sin_addr)];
         int port = ntohs(sin->sin_port);
         bypassLog([NSString stringWithFormat:@"[connect] %@:%d", ipStr, port]);
-
-        // 只拦特定检测域名的连接，不拦全局DNS
-        // 127.0.0.1:3067 可能是App内部通信，不拦只记录
     }
     return orig_connect(sockfd, addr, addrlen);
 }
@@ -188,7 +279,6 @@ static ssize_t my_sendto(int sockfd, const void *buf, size_t len, int flags, con
     if (dest_addr && dest_addr->sa_family == AF_INET) {
         struct sockaddr_in *sin = (struct sockaddr_in *)dest_addr;
         int port = ntohs(sin->sin_port);
-        // 不全局拦DNS 53，只记录
         if (port == 53) {
             bypassLog(@"[sendto] DNS UDP 53 observed");
         }
@@ -258,13 +348,14 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 11. 初始化（立即执行）==========
-__attribute__((constructor)) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.2 init ===");
+// ========== 11. 初始化（最高优先级 101，确保最早执行）==========
+__attribute__((constructor(101))) static void constructor(void) {
+    bypassLog(@"=== AliSecBypass v5.3 init (priority 101) ===");
 
     initDeviceProfile();
-    hookDeviceInfo();
+    hookUIDevice();
     hookASIdentifierManager();
+    hookScreenAndProcessInfo();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -275,9 +366,11 @@ __attribute__((constructor)) static void constructor(void) {
         {"uname", (void *)my_uname, (void **)&orig_uname},
         {"dlopen", (void *)my_dlopen, (void **)&orig_dlopen},
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
+        {"SecItemCopyMatching", (void *)my_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching},
+        {"SecItemAdd", (void *)my_SecItemAdd, (void **)&orig_SecItemAdd},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    int ret = rebind_symbols(rebinds, 9);
+    int ret = rebind_symbols(rebinds, 11);
     bypassLog([NSString stringWithFormat:@"[fishhook] rebind: %d", ret]);
 
     Class cls = objc_getClass("NSURLSession");
@@ -286,5 +379,5 @@ __attribute__((constructor)) static void constructor(void) {
         if (m) { orig_dtwr = method_getImplementation(m); method_setImplementation(m, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.2 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.3 init complete ===");
 }
