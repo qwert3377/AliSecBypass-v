@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.10 - 极简稳定版：去掉所有UI/Bundle/UserDefaults hook，只保留核心网络参数+系统层伪装
+// AliSecBypass v6.1.10.1 - 测试：去掉commonParams方法hook + 去掉msv6.wosms.cn拦截
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -129,13 +129,12 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     return mut;
 }
 
-// ========== TTNetworkManager Hook ==========
+// ========== TTNetworkManager Hook（只保留block，去掉commonParams方法hook）==========
 typedef NSDictionary * (^CommonParamsBlock)(void);
 typedef NSDictionary * (^CommonParamsBlockWithURL)(NSURL *);
 
 static IMP orig_commonParamsblock = NULL;
 static IMP orig_commonParamsblockWithURL = NULL;
-static IMP orig_commonParams = NULL;
 
 static CommonParamsBlock makeWrappedBlock(CommonParamsBlock original) {
     if (!original) return nil;
@@ -163,12 +162,6 @@ static id my_commonParamsblockWithURL(id self, SEL _cmd) {
     return makeWrappedBlockWithURL(original);
 }
 
-static id my_commonParams(id self, SEL _cmd) {
-    id result = ((id (*)(id, SEL))orig_commonParams)(self, _cmd);
-    if ([result isKindOfClass:[NSDictionary class]]) return patchCommonParams(result);
-    return result;
-}
-
 static void hookTTNetworkCommonParams(void) {
     Class ttMgr = objc_getClass("TTNetworkManager");
     if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
@@ -184,14 +177,10 @@ static void hookTTNetworkCommonParams(void) {
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] commonParamsblockWithURL hooked");
     }
-    if ((m = class_getInstanceMethod(ttMgr, @selector(commonParams)))) {
-        orig_commonParams = method_getImplementation(m);
-        method_setImplementation(m, (IMP)my_commonParams);
-        bypassLog(@"[Hook] commonParams hooked");
-    }
+    // 不 hook commonParams 方法，避免冲突
 }
 
-// ========== 1. UIDevice（只hook idfv，不动model/systemVersion）==========
+// ========== 1. UIDevice（只hook idfv）==========
 static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 
@@ -240,12 +229,11 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 5. 域名拦截 ==========
+// ========== 5. 域名拦截（去掉msv6.wosms.cn和wosms.cn）==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"msdk.bytedance", @"volc.bytedance",
-                           @"mon11-misc.fqnovel", @"tnc", @"anti", @"risk", @"verify",
-                           @"msv6.wosms.cn", @"wosms.cn"];
+                           @"mon11-misc.fqnovel", @"tnc", @"anti", @"risk", @"verify"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
     return NO;
 }
@@ -370,7 +358,7 @@ static void my_taskCancel(id self, SEL _cmd) {
 
 // ========== 8. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.10 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.10.1 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -406,5 +394,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m) { orig_taskCancel = method_getImplementation(m); method_setImplementation(m, (IMP)my_taskCancel); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.10 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.10.1 init complete ===");
 }
