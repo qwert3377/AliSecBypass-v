@@ -1,4 +1,4 @@
-// AliSecBypass v5.0 - 激进版：立即Hook + 全指纹伪造 + UDP DNS拦截 + 自我隐藏
+// AliSecBypass v5.1 - 精确域名拦截 + dlopen/dlsym隐藏 + LocalSocket检测
 // fishhook + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -40,7 +40,7 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 2. 设备指纹池 ==========
+// ========== 2. 设备指纹 ==========
 static NSDictionary *gDeviceProfile = nil;
 static void initDeviceProfile(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -102,26 +102,22 @@ static void hookDeviceInfo(void) {
         if ((m = class_getInstanceMethod(uid, @selector(model)))) { orig_model = method_getImplementation(m); method_setImplementation(m, (IMP)my_model); }
         if ((m = class_getInstanceMethod(uid, @selector(name)))) { orig_name = method_getImplementation(m); method_setImplementation(m, (IMP)my_name); }
     }
-
     Class screen = objc_getClass("UIScreen");
     if (screen) {
         Method m;
         if ((m = class_getInstanceMethod(screen, @selector(bounds)))) { orig_screenBounds = method_getImplementation(m); method_setImplementation(m, (IMP)my_screenBounds); }
         if ((m = class_getInstanceMethod(screen, @selector(scale)))) { orig_screenScale = method_getImplementation(m); method_setImplementation(m, (IMP)my_screenScale); }
     }
-
     Class pi = objc_getClass("NSProcessInfo");
     if (pi) {
         Method m = class_getInstanceMethod(pi, @selector(physicalMemory));
         if (m) { orig_physicalMemory = method_getImplementation(m); method_setImplementation(m, (IMP)my_physicalMemory); }
     }
-
     Class asid = objc_getClass("ASIdentifierManager");
     if (asid) {
         Method m = class_getInstanceMethod(asid, @selector(advertisingIdentifier));
         if (m) { method_setImplementation(m, (IMP)my_idfv); }
     }
-
     bypassLog(@"[Hook] Device info hooked");
 }
 
@@ -138,32 +134,60 @@ static int my_uname(struct utsname *name) {
     return ret;
 }
 
-// ========== 6. 域名拦截 ==========
+// ========== 6. 精确域名拦截（只拦检测域名，不拦业务）==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
-    NSArray *keywords = @[@"tnc", @"tnc16", @"tnc0", @"mon11", @"mon16", @"security",
-                          @"pitaya", @"mssdk", @"dahhxxttxs", @"bytemastatic", @"bytemaimg",
-                          @"snssdk", @"zijieapi", @"byteoversea", @"fqnovel", @"douyin",
-                          @"applog", @"rtlog", @"active", @"device_register"];
+    // 精确检测域名关键字（不要加 fqnovel/douyin 等业务域名）
+    NSArray *keywords = @[@"tnc0-", @"tnc16-", @"mon11-misc", @"security-lq",
+                          @"pitaya.bytedance", @"mssdk3-normal", @"dahhxxttxs",
+                          @"bytemastatic", @"bytemaimg", @"applog", @"rtlog"];
     for (NSString *kw in keywords) {
         if ([host containsString:kw]) return YES;
     }
     return NO;
 }
 
-// ========== 7. fishhook 系统函数 ==========
+// ========== 7. dlopen/dlsym 隐藏注入库 ==========
+static void *(*orig_dlopen)(const char *, int);
+static void *my_dlopen(const char *path, int mode) {
+    if (path && (strstr(path, "AliSecBypass") || strstr(path, "bypass") || strstr(path, "fishhook"))) {
+        bypassLog([NSString stringWithFormat:@"[dlopen] HIDDEN: %s", path]);
+        return orig_dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", mode);
+    }
+    return orig_dlopen(path, mode);
+}
+
+static void *(*orig_dlsym)(void *, const char *);
+static void *my_dlsym(void *handle, const char *symbol) {
+    void *ret = orig_dlsym(handle, symbol);
+    if (symbol && (strstr(symbol, "Dobby") || strstr(symbol, "fishhook") || strstr(symbol, "rebind"))) {
+        bypassLog([NSString stringWithFormat:@"[dlsym] HIDDEN: %s", symbol]);
+        return NULL;
+    }
+    return ret;
+}
+
+// ========== 8. fishhook 系统函数 ==========
 static int (*orig_connect)(int, const struct sockaddr *, socklen_t);
 static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     if (addr && addr->sa_family == AF_INET) {
         struct sockaddr_in *sin = (struct sockaddr_in *)addr;
         NSString *ipStr = [NSString stringWithFormat:@"%s", inet_ntoa(sin->sin_addr)];
         int port = ntohs(sin->sin_port);
-        bypassLog([NSString stringWithFormat:@"[connect] %@:%d", ipStr, port]);
+
+        // 拦截 LocalSocket 检测（127.0.0.1:3067 可能是检测通道）
+        if ([ipStr isEqualToString:@"127.0.0.1"] && port == 3067) {
+            bypassLog(@"[connect] LocalSocket 127.0.0.1:3067 BLOCKED");
+            errno = ECONNREFUSED;
+            return -1;
+        }
+        // 拦截 DNS 53
         if (port == 53) {
             bypassLog(@"[connect] DNS 53 BLOCKED");
             errno = ECONNREFUSED;
             return -1;
         }
+        bypassLog([NSString stringWithFormat:@"[connect] %@:%d", ipStr, port]);
     }
     return orig_connect(sockfd, addr, addrlen);
 }
@@ -211,7 +235,7 @@ static int my_getaddrinfo(const char *node, const char *service, const struct ad
     return orig_getaddrinfo(node, service, hints, res);
 }
 
-// ========== 8. NSURLSession Hook ==========
+// ========== 9. NSURLSession Hook ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
@@ -224,9 +248,9 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 9. 初始化（立即执行）==========
+// ========== 10. 初始化（立即执行）==========
 __attribute__((constructor)) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.0 init ===");
+    bypassLog(@"=== AliSecBypass v5.1 init ===");
 
     initDeviceProfile();
     hookDeviceInfo();
@@ -238,9 +262,11 @@ __attribute__((constructor)) static void constructor(void) {
         {"sysctl", (void *)my_sysctl, (void **)&orig_sysctl},
         {"getaddrinfo", (void *)my_getaddrinfo, (void **)&orig_getaddrinfo},
         {"uname", (void *)my_uname, (void **)&orig_uname},
+        {"dlopen", (void *)my_dlopen, (void **)&orig_dlopen},
+        {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    int ret = rebind_symbols(rebinds, 7);
+    int ret = rebind_symbols(rebinds, 9);
     bypassLog([NSString stringWithFormat:@"[fishhook] rebind: %d", ret]);
 
     Class cls = objc_getClass("NSURLSession");
@@ -249,5 +275,5 @@ __attribute__((constructor)) static void constructor(void) {
         if (m) { orig_dtwr = method_getImplementation(m); method_setImplementation(m, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.0 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.1 init complete ===");
 }
