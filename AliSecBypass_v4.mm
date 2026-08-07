@@ -1,4 +1,4 @@
-// AliSecBypass v5.5 - 请求体自记录 + 去掉TNC拦截 + IDFV/IDFA分离
+// AliSecBypass v5.6 - 精简拦截：只拦纯安全检测，放行业务日志
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -208,13 +208,11 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 精确域名拦截（去掉TNC，保留纯安全检测）==========
+// ========== 6. 精简域名拦截：只拦纯安全检测，放行业务日志 ==========
+// 已移除：applog、rtlog、mssdk（业务需要，拦了反而异常）
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
-    // 注意：tnc0-/tnc16- 已移除，避免网络变慢
-    NSArray *keywords = @[@"mon11-misc", @"security-lq",
-                          @"pitaya.bytedance", @"mssdk3-normal", @"dahhxxttxs",
-                          @"bytemastatic", @"bytemaimg", @"applog", @"rtlog"];
+    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"bytemastatic", @"bytemaimg"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
     return NO;
 }
@@ -290,29 +288,22 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-// ========== 9. NSURLSession Hook - 请求体自记录 + 域名拦截 ==========
+// ========== 9. NSURLSession Hook - 请求体自记录 ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
-    NSString *path = url.path ?: @"";
 
-    // 记录所有请求体（帮用户找设备指纹字段）
     NSData *body = request.HTTPBody;
-    if (!body && request.HTTPBodyStream) {
-        // 流式 body 无法直接读取，只记录 URL
-    }
     if (body && body.length > 0) {
         NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
         if (!bodyStr) bodyStr = [body base64EncodedStringWithOptions:0];
-        // 只记录前 2KB，避免日志过大
         if (bodyStr.length > 2048) bodyStr = [bodyStr substringToIndex:2048];
         bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@ | body: %@", request.HTTPMethod, url.absoluteString, bodyStr]);
     } else {
         bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@", request.HTTPMethod, url.absoluteString]);
     }
 
-    // 域名拦截
     if (isBlockedHost(host)) {
         bypassLog([NSString stringWithFormat:@"[NSURLSession] BLOCKED: %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
@@ -321,7 +312,6 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// 同时 hook dataTaskWithURL: 版本
 static IMP orig_dtwu = NULL;
 static NSURLSessionDataTask *my_dtwu(id self, SEL _cmd, NSURL *url, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     bypassLog([NSString stringWithFormat:@"[HTTP] GET %@", url.absoluteString]);
@@ -336,7 +326,7 @@ static NSURLSessionDataTask *my_dtwu(id self, SEL _cmd, NSURL *url, void (^ch)(N
 
 // ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.5 init ===");
+    bypassLog(@"=== AliSecBypass v5.6 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -365,5 +355,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m2) { orig_dtwu = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dtwu); bypassLog(@"[Hook] NSURLSession dataTaskWithURL hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.5 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.6 init complete ===");
 }
