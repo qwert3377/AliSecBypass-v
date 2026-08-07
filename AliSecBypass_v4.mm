@@ -1,4 +1,4 @@
-// AliSecBypass v5.7 - 增强截包：流式body + Cronet + 更多网络入口
+// AliSecBypass v5.8 - Hook TTNetwork + 探测设备指纹上报 + 隐藏容器内网IP
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -30,56 +30,36 @@ static void bypassLog(NSString *msg) {
     });
 }
 
-// ========== 辅助：读取流式body ==========
-static NSData *readStreamBody(NSInputStream *stream) {
-    if (!stream) return nil;
-    NSMutableData *data = [NSMutableData data];
-    [stream open];
-    uint8_t buffer[4096];
-    while ([stream hasBytesAvailable]) {
-        NSInteger len = [stream read:buffer maxLength:sizeof(buffer)];
-        if (len > 0) [data appendBytes:buffer length:len];
-        else break;
+// ========== 辅助：打印对象描述（递归安全）==========
+static NSString *safeDescription(id obj) {
+    if (!obj) return @"(nil)";
+    if ([obj isKindOfClass:[NSString class]]) return obj;
+    if ([obj isKindOfClass:[NSNumber class]]) return [obj stringValue];
+    if ([obj isKindOfClass:[NSArray class]]) {
+        NSArray *arr = obj;
+        if (arr.count == 0) return @"[]";
+        NSMutableString *s = [NSMutableString stringWithString:@"["];
+        for (id item in arr) { [s appendFormat:@"%@,", safeDescription(item)]; }
+        [s appendString:@"]"];
+        return s;
     }
-    [stream close];
-    return data.length > 0 ? data : nil;
-}
-
-// ========== 辅助：记录请求详情 ==========
-static void logRequestDetails(NSURLRequest *request) {
-    NSURL *url = request.URL;
-    NSString *host = url.host ?: @"";
-    NSString *path = url.path ?: @"";
-
-    // 尝试读取 body
-    NSData *body = request.HTTPBody;
-    if (!body && request.HTTPBodyStream) {
-        body = readStreamBody(request.HTTPBodyStream);
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = obj;
+        if (dict.count == 0) return @"{}";
+        NSMutableString *s = [NSMutableString stringWithString:@"{"];
+        [dict enumerateKeysAndObjectsUsingBlock:^(id key, id val, BOOL *stop) {
+            [s appendFormat:@"%@=%@;", key, safeDescription(val)];
+        }];
+        [s appendString:@"}"];
+        return s;
     }
-
-    NSString *bodyStr = nil;
-    if (body && body.length > 0) {
-        bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-        if (!bodyStr) bodyStr = [body base64EncodedStringWithOptions:0];
-        if (bodyStr.length > 4096) bodyStr = [bodyStr substringToIndex:4096];
+    if ([obj isKindOfClass:[NSData class]]) {
+        NSData *d = obj;
+        NSString *str = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (str) return str;
+        return [d base64EncodedStringWithOptions:0];
     }
-
-    // 记录 headers（过滤掉 cookie 等敏感信息，只保留关键头）
-    NSDictionary *headers = request.allHTTPHeaderFields;
-    NSMutableString *headerStr = [NSMutableString string];
-    NSArray *keys = @[@"Content-Type", @"User-Agent", @"X-Argus", @"X-Gorgon", @"X-Khronos", @"X-Ladon"];
-    for (NSString *key in keys) {
-        NSString *val = headers[key];
-        if (val) [headerStr appendFormat:@"%@=%@;", key, val];
-    }
-
-    if (bodyStr) {
-        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@%@ | H:%@ | B:%@", 
-            request.HTTPMethod, host, path, headerStr, bodyStr]);
-    } else {
-        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@%@ | H:%@", 
-            request.HTTPMethod, host, path, headerStr]);
-    }
+    return [obj description];
 }
 
 // ========== 设备指纹 ==========
@@ -113,34 +93,16 @@ static void initDeviceProfile(void) {
     gDeviceProfile = saved;
 
     gFakeIDFV = [ud stringForKey:@"AliSecBypass_FakeIDFV"];
-    if (!gFakeIDFV) {
-        gFakeIDFV = [[NSUUID UUID] UUIDString];
-        [ud setObject:gFakeIDFV forKey:@"AliSecBypass_FakeIDFV"];
-        [ud synchronize];
-        bypassLog([NSString stringWithFormat:@"[ID] NEW FakeIDFV: %@", gFakeIDFV]);
-    } else {
-        bypassLog([NSString stringWithFormat:@"[ID] REUSE FakeIDFV: %@", gFakeIDFV]);
-    }
+    if (!gFakeIDFV) { gFakeIDFV = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFV forKey:@"AliSecBypass_FakeIDFV"]; [ud synchronize]; }
 
     gFakeIDFA = [ud stringForKey:@"AliSecBypass_FakeIDFA"];
-    if (!gFakeIDFA) {
-        gFakeIDFA = [[NSUUID UUID] UUIDString];
-        [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"];
-        [ud synchronize];
-        bypassLog([NSString stringWithFormat:@"[ID] NEW FakeIDFA: %@", gFakeIDFA]);
-    } else {
-        bypassLog([NSString stringWithFormat:@"[ID] REUSE FakeIDFA: %@", gFakeIDFA]);
-    }
+    if (!gFakeIDFA) { gFakeIDFA = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"]; [ud synchronize]; }
 }
 
 // ========== 1. 伪造 UIDevice ==========
 static IMP orig_idfv = NULL;
-static NSUUID *my_idfv(id self, SEL _cmd) {
-    return [[NSUUID alloc] initWithUUIDString:gFakeIDFV];
-}
-static NSUUID *my_uniqueVendor(id self, SEL _cmd) {
-    return [[NSUUID alloc] initWithUUIDString:gFakeIDFV];
-}
+static NSUUID *my_idfv(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
+static NSUUID *my_uniqueVendor(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFV]; }
 static NSString *my_sysVer(id self, SEL _cmd) { return gDeviceProfile[@"systemVersion"] ?: @"17.0"; }
 static NSString *my_model(id self, SEL _cmd) { return gDeviceProfile[@"model"] ?: @"iPhone"; }
 static NSString *my_name(id self, SEL _cmd) { return gDeviceProfile[@"name"] ?: @"iPhone"; }
@@ -155,14 +117,11 @@ static void hookUIDevice(void) {
     if ((m = class_getInstanceMethod(uid, @selector(systemVersion)))) method_setImplementation(m, (IMP)my_sysVer);
     if ((m = class_getInstanceMethod(uid, @selector(model)))) method_setImplementation(m, (IMP)my_model);
     if ((m = class_getInstanceMethod(uid, @selector(name)))) method_setImplementation(m, (IMP)my_name);
-    bypassLog([NSString stringWithFormat:@"[Test] IDFV=%@", [[UIDevice currentDevice] identifierForVendor].UUIDString]);
 }
 
 // ========== 2. 伪造 ASIdentifierManager ==========
 static IMP orig_adId = NULL;
-static NSUUID *my_adId(id self, SEL _cmd) {
-    return [[NSUUID alloc] initWithUUIDString:gFakeIDFA];
-}
+static NSUUID *my_adId(id self, SEL _cmd) { return [[NSUUID alloc] initWithUUIDString:gFakeIDFA]; }
 static void hookASIdentifierManager(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ dlopen("/System/Library/Frameworks/AdSupport.framework/AdSupport", RTLD_LAZY); });
@@ -220,7 +179,7 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 精简域名拦截 ==========
+// ========== 6. 域名拦截 ==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
     NSArray *keywords = @[@"security-lq", @"pitaya.bytedance"];
@@ -235,6 +194,13 @@ static int my_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen
         struct sockaddr_in *sin = (struct sockaddr_in *)addr;
         NSString *ipStr = [NSString stringWithFormat:@"%s", inet_ntoa(sin->sin_addr)];
         int port = ntohs(sin->sin_port);
+        // 隐藏容器内网IP连接（172.31.x.x 是 AWS/阿里云内网，暴露容器环境）
+        if ([ipStr hasPrefix:@"172.31."]) {
+            bypassLog([NSString stringWithFormat:@"[connect] HIDDEN container IP: %@:%d", ipStr, port]);
+            // 返回连接失败，让App以为这个服务不可用
+            errno = ECONNREFUSED;
+            return -1;
+        }
         bypassLog([NSString stringWithFormat:@"[connect] %@:%d", ipStr, port]);
     }
     return orig_connect(sockfd, addr, addrlen);
@@ -265,10 +231,7 @@ static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo
 static int my_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
     if (node) {
         NSString *host = [NSString stringWithUTF8String:node];
-        if (isBlockedHost(host)) {
-            bypassLog([NSString stringWithFormat:@"[getaddrinfo] BLOCKED: %@", host]);
-            return EAI_NONAME;
-        }
+        if (isBlockedHost(host)) return EAI_NONAME;
     }
     return orig_getaddrinfo(node, service, hints, res);
 }
@@ -288,12 +251,12 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-// ========== 8. NSURLSession Hook - 增强截包 ==========
+// ========== 8. NSURLSession Hook ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
-    logRequestDetails(request);
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
+    bypassLog([NSString stringWithFormat:@"[NSURLSession] %@ %@", request.HTTPMethod, url.absoluteString]);
     if (isBlockedHost(host)) {
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
         [dummy cancel]; return dummy;
@@ -301,55 +264,117 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-static IMP orig_dtwu = NULL;
-static NSURLSessionDataTask *my_dtwu(id self, SEL _cmd, NSURL *url, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
-    bypassLog([NSString stringWithFormat:@"[HTTP] GET %@", url.absoluteString]);
-    NSString *host = url.host ?: @"";
-    if (isBlockedHost(host)) {
-        NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwu)(self, _cmd, url, ch);
-        [dummy cancel]; return dummy;
+// ========== 9. TTNetwork Hook - 截获字节自研网络库请求 ==========
+static void logTTRequest(id requestObj) {
+    if (!requestObj) return;
+    // 尝试读取 URL
+    NSString *url = nil;
+    if ([requestObj respondsToSelector:@selector(URL)]) url = [requestObj performSelector:@selector(URL)];
+    if (!url && [requestObj respondsToSelector:@selector(url)]) url = [requestObj performSelector:@selector(url)];
+    if (!url && [requestObj respondsToSelector:@selector(requestURL)]) url = [requestObj performSelector:@selector(requestURL)];
+
+    // 尝试读取 params
+    id params = nil;
+    if ([requestObj respondsToSelector:@selector(params)]) params = [requestObj performSelector:@selector(params)];
+    if (!params && [requestObj respondsToSelector:@selector(requestParams)]) params = [requestObj performSelector:@selector(requestParams)];
+
+    // 尝试读取 method
+    NSString *method = @"GET";
+    if ([requestObj respondsToSelector:@selector(method)]) {
+        id m = [requestObj performSelector:@selector(method)];
+        if (m) method = [m description];
     }
-    return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwu)(self, _cmd, url, ch);
+
+    bypassLog([NSString stringWithFormat:@"[TTNetwork] %@ %@ | params: %@", method, url ?: @"(no url)", safeDescription(params)]);
 }
 
-// ========== 9. Cronet / 自定义网络库 Hook ==========
-// 字节跳动常用 Cronet 发核心请求，尝试 hook 其关键方法
-static void hookCronetIfExists(void) {
-    // CronetEngine 类
-    Class cronetEngine = objc_getClass("CronetEngine");
-    if (cronetEngine) {
-        bypassLog(@"[Cronet] CronetEngine found");
-        // 尝试找 URLRequest 相关方法
-        unsigned int count;
-        Method *methods = class_copyMethodList(cronetEngine, &count);
-        for (unsigned int i = 0; i < count; i++) {
-            SEL sel = method_getName(methods[i]);
-            NSString *name = NSStringFromSelector(sel);
-            if ([name containsString:@"Request"] || [name containsString:@"URL"] || [name containsString:@"send"]) {
-                bypassLog([NSString stringWithFormat:@"[Cronet] Method: %@", name]);
-            }
+// Hook TTNetworkManager 的通用请求方法
+static IMP orig_tt_request = NULL;
+static id my_tt_request(id self, SEL _cmd, id arg1, id arg2, id arg3, id arg4, id arg5, id arg6, id arg7, id arg8) {
+    logTTRequest(arg1);
+    bypassLog([NSString stringWithFormat:@"[TTNetwork] request called: %@", NSStringFromSelector(_cmd)]);
+    return ((id (*)(id, SEL, id, id, id, id, id, id, id, id))orig_tt_request)(self, _cmd, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8);
+}
+
+static void hookTTNetwork(void) {
+    Class ttMgr = objc_getClass("TTNetworkManager");
+    if (!ttMgr) { bypassLog(@"[TTNetwork] TTNetworkManager not found"); return; }
+
+    bypassLog(@"[TTNetwork] Hooking TTNetworkManager...");
+
+    // 探测所有方法
+    unsigned int count;
+    Method *methods = class_copyMethodList(object_getClass(ttMgr), &count); // 类方法
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        bypassLog([NSString stringWithFormat:@"[TTNetwork] ClassMethod: %@", name]);
+    }
+    free(methods);
+
+    methods = class_copyMethodList(ttMgr, &count); // 实例方法
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        bypassLog([NSString stringWithFormat:@"[TTNetwork] InstanceMethod: %@", name]);
+
+        // Hook 包含 request/Request 且参数较多的方法（通常是网络请求）
+        if ([name containsString:@"request"] || [name containsString:@"Request"]) {
+            int nargs = method_getNumberOfArguments(methods[i]);
+            bypassLog([NSString stringWithFormat:@"[TTNetwork] Will hook: %@ (args=%d)", name, nargs]);
+            // 用 DobbyHook 替换实现
+            IMP oldIMP = method_getImplementation(methods[i]);
+            // 创建通用 hook，记录调用
+            // 由于方法签名不同，这里用 method_setImplementation 做简单替换
+            // 实际替换需要匹配参数数量
         }
-        free(methods);
+    }
+    free(methods);
+
+    // Hook TTNetworkManager sharedInstance 获取单例后，hook 其 request 方法
+    // 常见方法名尝试
+    NSArray *methodNames = @[
+        @"requestForJSONWithURL:params:method:needCommonParams:requestSerializer:responseSerializer:success:failure:",
+        @"requestForBinaryWithURL:params:method:needCommonParams:requestSerializer:responseSerializer:success:failure:",
+        @"requestWithURL:params:method:needCommonParams:requestSerializer:responseSerializer:success:failure:",
+        @"requestForJSONWithURL:params:method:needCommonParams:requestSerializer:responseSerializer:progress:success:failure:",
+        @"requestForBinaryWithURL:params:method:needCommonParams:requestSerializer:responseSerializer:progress:success:failure:",
+        @"requestWithURL:params:method:needCommonParams:requestSerializer:responseSerializer:progress:success:failure:",
+    ];
+
+    for (NSString *mname in methodNames) {
+        SEL sel = NSSelectorFromString(mname);
+        Method m = class_getInstanceMethod(ttMgr, sel);
+        if (m) {
+            bypassLog([NSString stringWithFormat:@"[TTNetwork] Hooked: %@", mname]);
+            // 用 block 方式 hook，记录参数
+            orig_tt_request = method_getImplementation(m);
+            method_setImplementation(m, (IMP)my_tt_request);
+        }
     }
 
-    // 其他可能的网络类
-    NSArray *possibleClasses = @[@"TTHttpTask", @"TTNetworkManager", @"BDHttpTask", @"BDNetworkManager", 
-                                  @"CronetURLRequest", @"CronetHttpClient"];
-    for (NSString *clsName in possibleClasses) {
-        Class cls = objc_getClass([clsName UTF8String]);
-        if (cls) bypassLog([NSString stringWithFormat:@"[Network] Found class: %@", clsName]);
+    // 也尝试 hook TTHttpTask
+    Class ttTask = objc_getClass("TTHttpTask");
+    if (ttTask) {
+        Method *taskMethods = class_copyMethodList(ttTask, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            SEL sel = method_getName(taskMethods[i]);
+            NSString *name = NSStringFromSelector(sel);
+            bypassLog([NSString stringWithFormat:@"[TTNetwork] TTHttpTask method: %@", name]);
+        }
+        free(taskMethods);
     }
 }
 
 // ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.7 init ===");
+    bypassLog(@"=== AliSecBypass v5.8 init ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
-    hookCronetIfExists();
+    hookTTNetwork();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -368,9 +393,7 @@ __attribute__((constructor(101))) static void constructor(void) {
     if (cls) {
         Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
-        Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
-        if (m2) { orig_dtwu = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dtwu); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.7 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.8 init complete ===");
 }
