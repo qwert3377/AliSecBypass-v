@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.2 - 修复网络错误：每次基于原始字典修改，不缓存模板
+// AliSecBypass v6.1.5 - 弹窗拦截 + 防App自杀 + 防网络取消 + 防跳转AppStore
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -13,6 +13,7 @@
 #include <fishhook.h>
 #include <dobby.h>
 #include <mach-o/dyld.h>
+#include <stdlib.h>
 
 // ========== 日志 ==========
 static dispatch_queue_t gLogQueue = NULL;
@@ -33,6 +34,7 @@ static void bypassLog(NSString *msg) {
 static NSDictionary *gDeviceProfile = nil;
 static NSString *gFakeIDFV = nil;
 static NSString *gFakeIDFA = nil;
+static BOOL gLoggedFirstPatch = NO;
 
 static void initDeviceProfile(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -70,7 +72,10 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
     NSMutableDictionary *mut = [original mutableCopy];
     if (!mut) return original;
 
-    // 只替换硬件指纹字段，服务器生成的字段（device_id/iid/ac/session等）全部保留原始值
+    NSString *origVid = original[@"vid"];
+    NSString *origModel = original[@"device_model"];
+    NSString *origRes = original[@"resolution"];
+
     mut[@"vid"] = gFakeIDFV;
     mut[@"idfv"] = gFakeIDFV;
     mut[@"idfa"] = gFakeIDFA ?: @"00000000-0000-0000-0000-000000000000";
@@ -109,6 +114,17 @@ static NSDictionary *patchCommonParams(NSDictionary *original) {
             };
         });
         mut[@"device_type"] = typeMap[model] ?: [NSString stringWithFormat:@"iPhone (%@)", model];
+    }
+
+    if (!gLoggedFirstPatch) {
+        gLoggedFirstPatch = YES;
+        bypassLog([NSString stringWithFormat:@"[Patch] vid: %@ -> %@", origVid ?: @"(nil)", mut[@"vid"]]);
+        bypassLog([NSString stringWithFormat:@"[Patch] device_model: %@ -> %@", origModel ?: @"(nil)", mut[@"device_model"]]);
+        bypassLog([NSString stringWithFormat:@"[Patch] resolution: %@ -> %@", origRes ?: @"(nil)", mut[@"resolution"]]);
+        bypassLog([NSString stringWithFormat:@"[Patch] idfa: %@ -> %@", original[@"idfa"] ?: @"(nil)", mut[@"idfa"]]);
+        bypassLog([NSString stringWithFormat:@"[Patch] os_version: %@ -> %@", original[@"os_version"] ?: @"(nil)", mut[@"os_version"]]);
+        bypassLog([NSString stringWithFormat:@"[Patch] device_type: %@ -> %@", original[@"device_type"] ?: @"(nil)", mut[@"device_type"]]);
+        bypassLog(@"[Patch] first patch logged, subsequent patches suppressed");
     }
 
     return mut;
@@ -162,7 +178,6 @@ static void hookTTNetworkCommonParams(void) {
         method_setImplementation(m, (IMP)my_commonParamsblockWithURL);
         bypassLog(@"[Hook] commonParamsblockWithURL hooked");
     }
-    // 不 hook commonParams 方法，避免与 block hook 冲突
 }
 
 // ========== 1. UIDevice ==========
@@ -344,6 +359,16 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
+static void (*orig_exit)(int);
+static void my_exit(int status) {
+    bypassLog([NSString stringWithFormat:@"[Block] exit(%d) blocked, stack:\n%@", status, [[NSThread callStackSymbols] componentsJoinedByString:@"\n"]]);
+}
+
+static void (*orig_abort)(void);
+static void my_abort(void) {
+    bypassLog([NSString stringWithFormat:@"[Block] abort() blocked, stack:\n%@", [[NSThread callStackSymbols] componentsJoinedByString:@"\n"]]);
+}
+
 // ========== 8. NSURLSession Hook ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
@@ -356,9 +381,76 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
-// ========== 9. 初始化 ==========
+static IMP orig_taskCancel = NULL;
+static void my_taskCancel(id self, SEL _cmd) {
+    NSString *urlStr = @"";
+    if ([self respondsToSelector:@selector(currentRequest)]) {
+        NSURLRequest *req = [self currentRequest];
+        urlStr = req.URL.absoluteString ?: @"";
+    }
+    if (urlStr.length > 0) {
+        bypassLog([NSString stringWithFormat:@"[Cancel] Task cancel blocked for %@", urlStr]);
+    }
+    // 不调用原始 cancel，强制继续请求
+}
+
+// ========== 9. 弹窗拦截 + 调用栈记录 ==========
+static IMP orig_presentVC = NULL;
+static void my_presentViewController(id self, SEL _cmd, UIViewController *vc, BOOL animated, void (^completion)(void)) {
+    if ([vc isKindOfClass:[UIAlertController class]]) {
+        UIAlertController *alert = (UIAlertController *)vc;
+        NSString *title = alert.title ?: @"";
+        NSString *message = alert.message ?: @"";
+        if ([title containsString:@"不安全"] || [title containsString:@"版本"] ||
+            [message containsString:@"正规应用市场"] || [message containsString:@"不安全"] ||
+            [message containsString:@"下载"]) {
+            bypassLog([NSString stringWithFormat:@"[Block] Alert presentation blocked: title=%@ message=%@", title, message]);
+            if (completion) completion();
+            return;
+        }
+    }
+    ((void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))orig_presentVC)(self, _cmd, vc, animated, completion);
+}
+
+static IMP orig_alertController = NULL;
+static id my_alertController(id self, SEL _cmd, NSString *title, NSString *message, UIAlertControllerStyle preferredStyle) {
+    if ([title containsString:@"不安全"] || [title containsString:@"版本"] ||
+        [message containsString:@"正规应用市场"] || [message containsString:@"不安全"] ||
+        [message containsString:@"下载"]) {
+        NSArray *symbols = [NSThread callStackSymbols];
+        NSString *stack = [symbols componentsJoinedByString:@"\n"];
+        bypassLog([NSString stringWithFormat:@"[Alert] Blocked alert creation: title=%@ message=%@\n[Stack]\n%@", title, message, stack]);
+    }
+    return ((id (*)(id, SEL, NSString *, NSString *, UIAlertControllerStyle))orig_alertController)(self, _cmd, title, message, preferredStyle);
+}
+
+// ========== 10. UIApplication openURL 拦截（防止跳转App Store）==========
+static IMP orig_openURL = NULL;
+static BOOL my_openURL(id self, SEL _cmd, NSURL *url) {
+    NSString *urlStr = url.absoluteString ?: @"";
+    if ([urlStr containsString:@"itunes.apple.com"] || [urlStr containsString:@"apps.apple.com"] ||
+        [urlStr containsString:@"itms-apps"] || [urlStr containsString:@"appstore"]) {
+        bypassLog([NSString stringWithFormat:@"[Block] App Store openURL blocked: %@", urlStr]);
+        return NO;
+    }
+    return ((BOOL (*)(id, SEL, NSURL *))orig_openURL)(self, _cmd, url);
+}
+
+static IMP orig_openURLOptions = NULL;
+static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *options, void (^completion)(BOOL)) {
+    NSString *urlStr = url.absoluteString ?: @"";
+    if ([urlStr containsString:@"itunes.apple.com"] || [urlStr containsString:@"apps.apple.com"] ||
+        [urlStr containsString:@"itms-apps"] || [urlStr containsString:@"appstore"]) {
+        bypassLog([NSString stringWithFormat:@"[Block] App Store openURL:options blocked: %@", urlStr]);
+        if (completion) completion(NO);
+        return;
+    }
+    ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
+}
+
+// ========== 11. 初始化 ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.2 init ===");
+    bypassLog(@"=== AliSecBypass v6.1.5 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -375,9 +467,11 @@ __attribute__((constructor(101))) static void constructor(void) {
         {"uname", (void *)my_uname, (void **)&orig_uname},
         {"dlopen", (void *)my_dlopen, (void **)&orig_dlopen},
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
-        {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
+        {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name},
+        {"exit", (void *)my_exit, (void **)&orig_exit},
+        {"abort", (void *)my_abort, (void **)&orig_abort}
     };
-    rebind_symbols(rebinds, 9);
+    rebind_symbols(rebinds, 11);
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
@@ -385,5 +479,32 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.2 init complete ===");
+    Class taskCls = objc_getClass("NSURLSessionDataTask");
+    if (!taskCls) taskCls = objc_getClass("__NSCFLocalDataTask");
+    if (taskCls) {
+        Method m = class_getInstanceMethod(taskCls, @selector(cancel));
+        if (m) { orig_taskCancel = method_getImplementation(m); method_setImplementation(m, (IMP)my_taskCancel); }
+    }
+
+    Class alertCls = objc_getClass("UIAlertController");
+    if (alertCls) {
+        Method m = class_getClassMethod(alertCls, @selector(alertControllerWithTitle:message:preferredStyle:));
+        if (m) { orig_alertController = method_getImplementation(m); method_setImplementation(m, (IMP)my_alertController); }
+    }
+
+    Class vcCls = objc_getClass("UIViewController");
+    if (vcCls) {
+        Method m = class_getInstanceMethod(vcCls, @selector(presentViewController:animated:completion:));
+        if (m) { orig_presentVC = method_getImplementation(m); method_setImplementation(m, (IMP)my_presentViewController); }
+    }
+
+    Class appCls = objc_getClass("UIApplication");
+    if (appCls) {
+        Method m1 = class_getInstanceMethod(appCls, @selector(openURL:));
+        if (m1) { orig_openURL = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_openURL); }
+        Method m2 = class_getInstanceMethod(appCls, @selector(openURL:options:completionHandler:));
+        if (m2) { orig_openURLOptions = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_openURLOptions); }
+    }
+
+    bypassLog(@"=== AliSecBypass v6.1.5 init complete ===");
 }
