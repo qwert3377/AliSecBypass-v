@@ -1,4 +1,4 @@
-// AliSecBypass v6.1.9 - 稳定版：补回commonParams + Security签名验证拦截，去掉有问题的path伪装和WKWebView hook
+// AliSecBypass v6.1.9.1 - 去掉Security DobbyHook（导致闪退），保留其他稳定hook
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱注入
 
 #include <Foundation/Foundation.h>
@@ -11,7 +11,6 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <fishhook.h>
-#include <dobby.h>
 #include <mach-o/dyld.h>
 #include <stdlib.h>
 
@@ -480,7 +479,7 @@ static void my_openURLOptions(id self, SEL _cmd, NSURL *url, NSDictionary *optio
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void (^)(BOOL)))orig_openURLOptions)(self, _cmd, url, options, completion);
 }
 
-// ========== 11. NSBundle 只伪装Identifier，不伪装路径（避免资源加载失败）==========
+// ========== 11. NSBundle 只伪装Identifier和Info.plist key，不伪装路径==========
 static IMP orig_bundleIdentifier = NULL;
 static NSString *my_bundleIdentifier(id self, SEL _cmd) {
     return @"com.dragon.read";
@@ -520,44 +519,15 @@ static void my_removeObject(id self, SEL _cmd, NSString *key) {
     ((void (*)(id, SEL, NSString *))orig_removeObject)(self, _cmd, key);
 }
 
-// ========== 13. Security.framework 签名验证拦截 ==========
-typedef int32_t OSStatus;
-static OSStatus (*orig_SecStaticCodeCheckValidity)(void *, uint32_t, void *, void **);
-static OSStatus my_SecStaticCodeCheckValidity(void *staticCode, uint32_t flags, void *requirement, void **errors) {
-    bypassLog(@"[Block] SecStaticCodeCheckValidity faked");
-    return 0; // errSecSuccess
-}
-
-static OSStatus (*orig_SecCodeCopySigningInformation)(void *, uint32_t, void **);
-static OSStatus my_SecCodeCopySigningInformation(void *code, uint32_t flags, void **information) {
-    bypassLog(@"[Block] SecCodeCopySigningInformation faked");
-    return 0;
-}
-
-static void hookSecurityFramework(void) {
-    dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
-    void *secCheck = dlsym(RTLD_DEFAULT, "SecStaticCodeCheckValidity");
-    if (secCheck) {
-        DobbyHook(secCheck, (void *)my_SecStaticCodeCheckValidity, (void **)&orig_SecStaticCodeCheckValidity);
-        bypassLog(@"[Hook] SecStaticCodeCheckValidity hooked");
-    }
-    void *secCopy = dlsym(RTLD_DEFAULT, "SecCodeCopySigningInformation");
-    if (secCopy) {
-        DobbyHook(secCopy, (void *)my_SecCodeCopySigningInformation, (void **)&orig_SecCodeCopySigningInformation);
-        bypassLog(@"[Hook] SecCodeCopySigningInformation hooked");
-    }
-}
-
-// ========== 14. 初始化（优先级1，最早执行）==========
+// ========== 13. 初始化（优先级1，最早执行）==========
 __attribute__((constructor(1))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.9 init (priority 1) ===");
+    bypassLog(@"=== AliSecBypass v6.1.9.1 init (priority 1) ===");
 
     initDeviceProfile();
     hookUIDevice();
     hookASIdentifierManager();
     hookScreenAndProcessInfo();
     hookTTNetworkCommonParams();
-    hookSecurityFramework();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
@@ -626,5 +596,5 @@ __attribute__((constructor(1))) static void constructor(void) {
         if (m2) { orig_removeObject = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_removeObject); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.9 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.9.1 init complete ===");
 }
