@@ -14,7 +14,6 @@ LIBRARY_NAME = AliSecBypass_v4
 AliSecBypass_v4_FILES = AliSecBypass_v4.mm
 
 # ========== 第三方库路径配置 ==========
-# GitHub Actions 上 $(PWD) 不可靠，用 $(shell pwd)
 PROJECT_DIR = $(shell pwd)
 FISHHOOK_PATH = $(PROJECT_DIR)/fishhook
 DOBBY_PATH = $(PROJECT_DIR)/Dobby
@@ -51,6 +50,7 @@ else
 endif
 
 # ========== 链接标志 ==========
-AliSecBypass_v4_LDFLAGS += -Wl,-segalign,4000
+# 修复：添加 UIKit 和 Foundation 框架链接，解决 UIDevice 符号未定义
+AliSecBypass_v4_LDFLAGS += -framework UIKit -framework Foundation -Wl,-segalign,4000
 
 include $(THEOS_MAKE_PATH)/library.mk
