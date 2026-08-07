@@ -1,4 +1,4 @@
-// AliSecBypass v5.4 - IDFV/IDFA 分离伪装 + 独立假UUID
+// AliSecBypass v5.5 - 请求体自记录 + 去掉TNC拦截 + IDFV/IDFA分离
 // fishhook + Dobby + ObjC Runtime 混合方案
 // 纯库文件，无 Logos，TrollStore / 非越狱注入
 
@@ -32,8 +32,8 @@ static void bypassLog(NSString *msg) {
 
 // ========== 设备指纹 ==========
 static NSDictionary *gDeviceProfile = nil;
-static NSString *gFakeIDFV = nil;   // 用于 identifierForVendor
-static NSString *gFakeIDFA = nil;   // 用于 advertisingIdentifier
+static NSString *gFakeIDFV = nil;
+static NSString *gFakeIDFA = nil;
 
 static void initDeviceProfile(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
@@ -60,7 +60,6 @@ static void initDeviceProfile(void) {
     }
     gDeviceProfile = saved;
 
-    // 独立的假 IDFV
     gFakeIDFV = [ud stringForKey:@"AliSecBypass_FakeIDFV"];
     if (!gFakeIDFV) {
         gFakeIDFV = [[NSUUID UUID] UUIDString];
@@ -71,7 +70,6 @@ static void initDeviceProfile(void) {
         bypassLog([NSString stringWithFormat:@"[ID] REUSE FakeIDFV: %@", gFakeIDFV]);
     }
 
-    // 独立的假 IDFA
     gFakeIDFA = [ud stringForKey:@"AliSecBypass_FakeIDFA"];
     if (!gFakeIDFA) {
         gFakeIDFA = [[NSUUID UUID] UUIDString];
@@ -210,10 +208,11 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
     return name;
 }
 
-// ========== 6. 精确域名拦截 ==========
+// ========== 6. 精确域名拦截（去掉TNC，保留纯安全检测）==========
 static BOOL isBlockedHost(NSString *host) {
     if (!host || host.length == 0) return NO;
-    NSArray *keywords = @[@"tnc0-", @"tnc16-", @"mon11-misc", @"security-lq",
+    // 注意：tnc0-/tnc16- 已移除，避免网络变慢
+    NSArray *keywords = @[@"mon11-misc", @"security-lq",
                           @"pitaya.bytedance", @"mssdk3-normal", @"dahhxxttxs",
                           @"bytemastatic", @"bytemaimg", @"applog", @"rtlog"];
     for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
@@ -291,11 +290,29 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-// ========== 9. NSURLSession Hook ==========
+// ========== 9. NSURLSession Hook - 请求体自记录 + 域名拦截 ==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
     NSString *host = url.host ?: @"";
+    NSString *path = url.path ?: @"";
+
+    // 记录所有请求体（帮用户找设备指纹字段）
+    NSData *body = request.HTTPBody;
+    if (!body && request.HTTPBodyStream) {
+        // 流式 body 无法直接读取，只记录 URL
+    }
+    if (body && body.length > 0) {
+        NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+        if (!bodyStr) bodyStr = [body base64EncodedStringWithOptions:0];
+        // 只记录前 2KB，避免日志过大
+        if (bodyStr.length > 2048) bodyStr = [bodyStr substringToIndex:2048];
+        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@ | body: %@", request.HTTPMethod, url.absoluteString, bodyStr]);
+    } else {
+        bypassLog([NSString stringWithFormat:@"[HTTP] %@ %@", request.HTTPMethod, url.absoluteString]);
+    }
+
+    // 域名拦截
     if (isBlockedHost(host)) {
         bypassLog([NSString stringWithFormat:@"[NSURLSession] BLOCKED: %@", host]);
         NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
@@ -304,9 +321,22 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
 }
 
+// 同时 hook dataTaskWithURL: 版本
+static IMP orig_dtwu = NULL;
+static NSURLSessionDataTask *my_dtwu(id self, SEL _cmd, NSURL *url, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
+    bypassLog([NSString stringWithFormat:@"[HTTP] GET %@", url.absoluteString]);
+    NSString *host = url.host ?: @"";
+    if (isBlockedHost(host)) {
+        bypassLog([NSString stringWithFormat:@"[NSURLSession] BLOCKED: %@", host]);
+        NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwu)(self, _cmd, url, ch);
+        [dummy cancel]; return dummy;
+    }
+    return ((NSURLSessionDataTask *(*)(id, SEL, NSURL *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwu)(self, _cmd, url, ch);
+}
+
 // ========== 10. 初始化 (priority 101) ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v5.4 init ===");
+    bypassLog(@"=== AliSecBypass v5.5 init ===");
 
     initDeviceProfile();
     hookUIDevice();
@@ -329,9 +359,11 @@ __attribute__((constructor(101))) static void constructor(void) {
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
-        Method m = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-        if (m) { orig_dtwr = method_getImplementation(m); method_setImplementation(m, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession hooked"); }
+        Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
+        if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); bypassLog(@"[Hook] NSURLSession dataTaskWithRequest hooked"); }
+        Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
+        if (m2) { orig_dtwu = method_getImplementation(m2); method_setImplementation(m2, (IMP)my_dtwu); bypassLog(@"[Hook] NSURLSession dataTaskWithURL hooked"); }
     }
 
-    bypassLog(@"=== AliSecBypass v5.4 init complete ===");
+    bypassLog(@"=== AliSecBypass v5.5 init complete ===");
 }
