@@ -1,4 +1,5 @@
-// AliSecBypass v6.1.13 - 仅伪装 IDFA + IDFV，移除所有硬件伪装
+// AliSecBypass v6.1.14 - 仅伪装 IDFA/IDFV + 环境特征（Bundle/路径/Keychain）
+// 硬件伪装（型号/系统/屏幕）已移除
 // fishhook + ObjC Runtime 纯库方案，无 Logos，TrollStore / 非越狱 / LiveContainer 注入
 
 #include <Foundation/Foundation.h>
@@ -41,6 +42,11 @@ static void initFakeIDs(void) {
 
     gFakeIDFA = [ud stringForKey:@"AliSecBypass_FakeIDFA"];
     if (!gFakeIDFA) { gFakeIDFA = [[NSUUID UUID] UUIDString]; [ud setObject:gFakeIDFA forKey:@"AliSecBypass_FakeIDFA"]; [ud synchronize]; }
+
+    // 清理可能残留的旧真实指纹
+    NSArray *keysToRemove = @[@"kOpenUDID", @"openUDID", @"BDOpenUDID", @"RangersOpenUDID", @"ttinstall_id", @"tt_device_id", @"device_id_local"];
+    for (NSString *k in keysToRemove) { if ([ud objectForKey:k]) [ud removeObjectForKey:k]; }
+    [ud synchronize];
 
     bypassLog([NSString stringWithFormat:@"[Init] IDFV=%@ IDFA=%@", gFakeIDFV, gFakeIDFA]);
 }
@@ -157,6 +163,95 @@ static void hookASIdentifierManager(void) {
     }
 }
 
+// ========== NSBundle Hook（伪装 Bundle ID / 路径 / 签名特征）==========
+static NSString *gOriginalBundleID = nil;
+static NSString *gOriginalBundlePath = nil;
+static IMP orig_bundleIdentifier = NULL;
+static IMP orig_bundlePath = NULL;
+static IMP orig_infoDictionary = NULL;
+static IMP orig_executablePath = NULL;
+static IMP orig_resourcePath = NULL;
+
+static NSString *my_bundleIdentifier(id self, SEL _cmd) {
+    return gOriginalBundleID ?: @"com.dragon.read";
+}
+static NSString *my_bundlePath(id self, SEL _cmd) {
+    return gOriginalBundlePath ?: @"/var/containers/Bundle/Application/XXXX/番茄畅听.app";
+}
+static NSDictionary *my_infoDictionary(id self, SEL _cmd) {
+    NSDictionary *orig = ((NSDictionary *(*)(id, SEL))orig_infoDictionary)(self, @selector(infoDictionary));
+    NSMutableDictionary *mut = [orig mutableCopy];
+    if (gOriginalBundleID) mut[@"CFBundleIdentifier"] = gOriginalBundleID;
+    return mut;
+}
+static NSString *my_executablePath(id self, SEL _cmd) {
+    NSString *orig = ((NSString *(*)(id, SEL))orig_executablePath)(self, @selector(executablePath));
+    if (gOriginalBundlePath) {
+        return [gOriginalBundlePath stringByAppendingPathComponent:@"番茄畅听"];
+    }
+    return orig;
+}
+static NSString *my_resourcePath(id self, SEL _cmd) {
+    if (gOriginalBundlePath) return gOriginalBundlePath;
+    return ((NSString *(*)(id, SEL))orig_resourcePath)(self, @selector(resourcePath));
+}
+
+static void hookNSBundle(void) {
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    gOriginalBundleID = mainBundle.bundleIdentifier;
+    gOriginalBundlePath = mainBundle.bundlePath;
+
+    if (gOriginalBundleID && ([gOriginalBundleID containsString:@"LiveContainer"] || [gOriginalBundleID containsString:@"esign"] || [gOriginalBundleID containsString:@"troll"])) {
+        bypassLog([NSString stringWithFormat:@"[Bundle] Container detected: %@", gOriginalBundleID]);
+        gOriginalBundleID = @"com.dragon.read";
+        gOriginalBundlePath = @"/var/containers/Bundle/Application/XXXX/番茄畅听.app";
+    }
+
+    Class bundleCls = objc_getClass("NSBundle");
+    Method m;
+    if ((m = class_getInstanceMethod(bundleCls, @selector(bundleIdentifier)))) {
+        orig_bundleIdentifier = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_bundleIdentifier);
+    }
+    if ((m = class_getInstanceMethod(bundleCls, @selector(bundlePath)))) {
+        orig_bundlePath = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_bundlePath);
+    }
+    if ((m = class_getInstanceMethod(bundleCls, @selector(infoDictionary)))) {
+        orig_infoDictionary = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_infoDictionary);
+    }
+    if ((m = class_getInstanceMethod(bundleCls, @selector(executablePath)))) {
+        orig_executablePath = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_executablePath);
+    }
+    if ((m = class_getInstanceMethod(bundleCls, @selector(resourcePath)))) {
+        orig_resourcePath = method_getImplementation(m);
+        method_setImplementation(m, (IMP)my_resourcePath);
+    }
+    bypassLog(@"[Bundle] NSBundle hooked");
+}
+
+// ========== NSHomeDirectory / NSTemporaryDirectory 伪装 ==========
+static NSString *gFakeHomeDir = nil;
+static NSString *gFakeTmpDir = nil;
+
+static NSString *my_NSHomeDirectory(void) {
+    return gFakeHomeDir ?: @"/var/mobile/Containers/Data/Application/XXXX";
+}
+static NSString *my_NSTemporaryDirectory(void) {
+    return gFakeTmpDir ?: @"/var/mobile/Containers/Data/Application/XXXX/tmp";
+}
+
+static void hookPaths(void) {
+    NSString *realHome = NSHomeDirectory();
+    if ([realHome containsString:@"LiveContainer"] || [realHome containsString:@"esign"]) {
+        bypassLog([NSString stringWithFormat:@"[Path] Real home: %@", realHome]);
+        gFakeHomeDir = @"/var/mobile/Containers/Data/Application/XXXX";
+        gFakeTmpDir = @"/var/mobile/Containers/Data/Application/XXXX/tmp";
+    }
+}
+
 // ========== 隐藏自身 dylib ==========
 static const char *(*orig_dyld_get_image_name)(uint32_t);
 static const char *my_dyld_get_image_name(uint32_t image_index) {
@@ -165,14 +260,6 @@ static const char *my_dyld_get_image_name(uint32_t image_index) {
         return "/System/Library/Frameworks/Foundation.framework/Foundation";
     }
     return name;
-}
-
-// ========== 域名拦截 ==========
-static BOOL isBlockedHost(NSString *host) {
-    if (!host || host.length == 0) return NO;
-    NSArray *keywords = @[@"security-lq", @"pitaya.bytedance", @"mon11-misc.fqnovel", @"tnc.bytedance", @"toblog"];
-    for (NSString *kw in keywords) { if ([host containsString:kw]) return YES; }
-    return NO;
 }
 
 // ========== fishhook 系统函数 ==========
@@ -203,15 +290,6 @@ static int my_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void
     return ret;
 }
 
-static int (*orig_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
-static int my_getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
-    if (node) {
-        NSString *host = [NSString stringWithUTF8String:node];
-        if (isBlockedHost(host)) return EAI_NONAME;
-    }
-    return orig_getaddrinfo(node, service, hints, res);
-}
-
 static void *(*orig_dlopen)(const char *, int);
 static void *my_dlopen(const char *path, int mode) {
     if (path && (strstr(path, "AliSecBypass") || strstr(path, "bypass") || strstr(path, "fishhook"))) {
@@ -227,7 +305,7 @@ static void *my_dlsym(void *handle, const char *symbol) {
     return ret;
 }
 
-// ========== NSURLSession Hook ==========
+// ========== NSURLSession Hook（仅日志，不拦截）==========
 static IMP orig_dtwr = NULL;
 static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, void (^ch)(NSData *, NSURLResponse *, NSError *)) {
     NSURL *url = request.URL;
@@ -238,12 +316,6 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
         NSData *body = request.HTTPBody;
         NSString *bodyStr = body ? [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] : @"(no body)";
         bypassLog([NSString stringWithFormat:@"[HTTP-REQ] %@ %@ | Body: %@", host, path, bodyStr]);
-    }
-
-    if (isBlockedHost(host)) {
-        bypassLog([NSString stringWithFormat:@"[HTTP-BLOCK] %@%@", host, path]);
-        NSURLSessionDataTask *dummy = ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)))orig_dtwr)(self, _cmd, request, ch);
-        [dummy cancel]; return dummy;
     }
 
     void (^wrappedCh)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -260,22 +332,23 @@ static NSURLSessionDataTask *my_dtwr(id self, SEL _cmd, NSURLRequest *request, v
 
 // ========== 初始化 ==========
 __attribute__((constructor(101))) static void constructor(void) {
-    bypassLog(@"=== AliSecBypass v6.1.13 init ===");
+    bypassLog(@"=== AliSecBypass v6.1.14 init ===");
     initFakeIDs();
     hookUIDevice();
     hookASIdentifierManager();
     hookTTNetworkCommonParams();
+    hookNSBundle();
+    hookPaths();
 
     struct rebinding rebinds[] = {
         {"connect", (void *)my_connect, (void **)&orig_connect},
         {"ptrace", (void *)my_ptrace, (void **)&orig_ptrace},
         {"sysctl", (void *)my_sysctl, (void **)&orig_sysctl},
-        {"getaddrinfo", (void *)my_getaddrinfo, (void **)&orig_getaddrinfo},
         {"dlopen", (void *)my_dlopen, (void **)&orig_dlopen},
         {"dlsym", (void *)my_dlsym, (void **)&orig_dlsym},
         {"_dyld_get_image_name", (void *)my_dyld_get_image_name, (void **)&orig_dyld_get_image_name}
     };
-    rebind_symbols(rebinds, 7);
+    rebind_symbols(rebinds, 6);
 
     Class cls = objc_getClass("NSURLSession");
     if (cls) {
@@ -283,5 +356,5 @@ __attribute__((constructor(101))) static void constructor(void) {
         if (m1) { orig_dtwr = method_getImplementation(m1); method_setImplementation(m1, (IMP)my_dtwr); }
     }
 
-    bypassLog(@"=== AliSecBypass v6.1.13 init complete ===");
+    bypassLog(@"=== AliSecBypass v6.1.14 init complete ===");
 }
