@@ -1,6 +1,6 @@
 //
-//  SSLBypass_fixed.mm
-//  修复: 删除自定义 SecTrustRef typedef，避免与 SDK 冲突
+//  SSLBypass_safe.mm
+//  安全版: 只 attach 打印，不强制替换，避免破坏 Cronet
 //
 
 #import <Foundation/Foundation.h>
@@ -36,61 +36,68 @@ static void SSL_LOG(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - BoringSSL Hooks
+#pragma mark - BoringSSL (只监控，不拦截)
 
 static void (*orig_SSL_CTX_set_custom_verify)(void *ctx, int mode, void *callbacks);
 static void fake_SSL_CTX_set_custom_verify(void *ctx, int mode, void *callbacks) {
-    SSL_LOG(@"[SSL] SSL_CTX_set_custom_verify bypassed");
+    SSL_LOG(@"[SSL] SSL_CTX_set_custom_verify called, mode=%d", mode);
+    orig_SSL_CTX_set_custom_verify(ctx, mode, callbacks); // 透传，不破坏
 }
 
 static void (*orig_SSL_set_verify)(void *ssl, int mode, void *callback);
 static void fake_SSL_set_verify(void *ssl, int mode, void *callback) {
-    SSL_LOG(@"[SSL] SSL_set_verify bypassed");
+    SSL_LOG(@"[SSL] SSL_set_verify called, mode=%d", mode);
+    orig_SSL_set_verify(ssl, mode, callback); // 透传
 }
 
-#pragma mark - Security.framework Hooks
+#pragma mark - Security.framework (只监控)
 
-// 不用 typedef，直接用 void * 代替 SecTrustRef
 static int (*orig_SecTrustEvaluate)(void *trust, void *result);
 static int fake_SecTrustEvaluate(void *trust, void *result) {
-    SSL_LOG(@"[SSL] SecTrustEvaluate bypassed");
-    if (result) {
-        *(int *)result = 4; // kSecTrustResultProceed
+    int ret = orig_SecTrustEvaluate(trust, result);
+    SSL_LOG(@"[SSL] SecTrustEvaluate returned %d", ret);
+    if (ret == 0 && result) {
+        *(int *)result = 4; // 只改结果，不改流程
     }
-    return 0; // errSecSuccess
+    return 0;
 }
 
 static int (*orig_SecTrustEvaluateWithError)(void *trust, void *error);
 static int fake_SecTrustEvaluateWithError(void *trust, void *error) {
-    SSL_LOG(@"[SSL] SecTrustEvaluateWithError bypassed");
-    if (error) {
-        *(void **)error = NULL;
-    }
-    return 1; // true
+    int ret = orig_SecTrustEvaluateWithError(trust, error);
+    SSL_LOG(@"[SSL] SecTrustEvaluateWithError returned %d", ret);
+    if (error) *(void **)error = NULL;
+    return 1;
 }
 
-#pragma mark - NSURLSession Pinning Hook
+#pragma mark - NSURLSession (安全遍历)
 
 static void hookNSURLSessionPinning(void) {
-    unsigned int count;
-    Class *classes = objc_copyClassList(&count);
-    for (unsigned int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        SEL sel = @selector(URLSession:didReceiveChallenge:completionHandler:);
-        if (class_respondsToSelector(cls, sel)) {
-            Method m = class_getInstanceMethod(cls, sel);
-            if (m) {
-                IMP orig = method_getImplementation(m);
-                IMP fake = imp_implementationWithBlock(^(id self, id session, id challenge, void (^completionHandler)(NSInteger, id)) {
-                    SSL_LOG(@"[SSL] Challenge from %@", NSStringFromClass(cls));
-                    completionHandler(0, nil); // NSURLSessionAuthChallengeUseCredential
-                });
-                method_setImplementation(m, fake);
+    @try {
+        unsigned int count;
+        Class *classes = objc_copyClassList(&count);
+        int hooked = 0;
+        for (unsigned int i = 0; i < count && hooked < 20; i++) { // 限制最多 hook 20 个类
+            Class cls = classes[i];
+            SEL sel = @selector(URLSession:didReceiveChallenge:completionHandler:);
+            if (class_respondsToSelector(cls, sel)) {
+                Method m = class_getInstanceMethod(cls, sel);
+                if (m) {
+                    IMP orig = method_getImplementation(m);
+                    IMP fake = imp_implementationWithBlock(^(id self, id session, id challenge, void (^completionHandler)(NSInteger, id)) {
+                        SSL_LOG(@"[SSL] Challenge from %@", NSStringFromClass(cls));
+                        completionHandler(0, nil);
+                    });
+                    method_setImplementation(m, fake);
+                    hooked++;
+                }
             }
         }
+        free(classes);
+        SSL_LOG(@"[SSL] Hooked %d challenge handlers", hooked);
+    } @catch (NSException *e) {
+        SSL_LOG(@"[SSL] Exception in hookNSURLSessionPinning: %@", e);
     }
-    free(classes);
-    SSL_LOG(@"[SSL] Hooked challenge handlers");
 }
 
 #pragma mark - Constructor
@@ -98,7 +105,7 @@ static void hookNSURLSessionPinning(void) {
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        SSL_LOG(@"=== SSLBypass loaded ===");
+        SSL_LOG(@"=== SSLBypass_safe loaded ===");
 
         struct rebinding rebindings[] = {
             {"SSL_CTX_set_custom_verify", (void *)fake_SSL_CTX_set_custom_verify, (void **)&orig_SSL_CTX_set_custom_verify},
@@ -112,6 +119,6 @@ static void init(void) {
 
         hookNSURLSessionPinning();
 
-        SSL_LOG(@"=== SSLBypass init complete ===");
+        SSL_LOG(@"=== SSLBypass_safe init complete ===");
     }
 }
