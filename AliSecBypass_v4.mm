@@ -1,18 +1,19 @@
 //
-//  AliSecBypass_v4.mm
-//  番茄小说脱壳检测绕过插件 (基于 Frida 探测结果)
+//  AliSecBypass_v4_1.mm
+//  番茄小说脱壳检测绕过插件 (修复 syscall 绕过)
 //  纯库文件，无 Logos，TrollStore / 非越狱注入
-//  日志: App Documents/AliBypass.log
 //
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <sys/sysctl.h>
+#import <sys/syscall.h>
 #import <fcntl.h>
 #import <stdarg.h>
 #import <string.h>
 #import <stdint.h>
+#import <unistd.h>
 #import "fishhook.h"
 
 #pragma mark - Logger
@@ -176,6 +177,75 @@ static char *fake_getenv(const char *name) {
     return orig_getenv(name);
 }
 
+// ==================== CRITICAL: syscall hook ====================
+// App may bypass libc csops/ptrace by calling syscall() directly
+
+static int (*orig_syscall)(int, ...);
+
+static int fake_syscall(int number, ...) {
+    // 使用 va_list 获取变参
+    va_list ap;
+    va_start(ap, number);
+
+    if (number == SYS_csops) {
+        // syscall(SYS_csops, pid, ops, useraddr, usersize)
+        pid_t pid = va_arg(ap, pid_t);
+        unsigned int ops = va_arg(ap, unsigned int);
+        void *useraddr = va_arg(ap, void *);
+        size_t usersize = va_arg(ap, size_t);
+        va_end(ap);
+
+        BYPASS_LOG(@"[syscall] SYS_csops(pid=%d, ops=%u) intercepted", pid, ops);
+
+        int ret = orig_syscall(SYS_csops, pid, ops, useraddr, usersize);
+        if (ret != 0) {
+            BYPASS_LOG(@"[syscall] csops failed, forcing success");
+            ret = 0;
+        }
+        if (ops == 0 && useraddr && usersize >= 4) {
+            *(uint32_t *)useraddr = 0x00020001;
+            BYPASS_LOG(@"[syscall] csops CS_OPS_STATUS -> forged valid");
+        } else if ((ops == 11 || ops == 16) && useraddr) {
+            size_t limit = usersize < 64 ? usersize : 64;
+            memset(useraddr, 0, limit);
+            BYPASS_LOG(@"[syscall] csops ops=%u -> forged pass", ops);
+        }
+        return ret;
+    }
+
+    if (number == SYS_ptrace) {
+        // syscall(SYS_ptrace, request, pid, addr, data)
+        int request = va_arg(ap, int);
+        va_end(ap);
+
+        if (request == 0) {
+            BYPASS_LOG(@"[syscall] SYS_ptrace(PT_DENY_ATTACH) blocked");
+            return 0;
+        }
+    }
+
+    va_end(ap);
+
+    // 其他 syscall 透传
+    va_start(ap, number);
+    // 无法直接用 va_list 透传给变参函数，这里简化处理
+    // 对于非 csops/ptrace 的 syscall，调用原始函数
+    // 但由于 syscall 是变参，需要特殊处理
+    va_end(ap);
+
+    // 简化：对于非目标 syscall，直接调用原始函数（需要重新组织参数）
+    // 这里用一个小技巧：syscall 最多 6 个参数
+    va_start(ap, number);
+    long a1 = va_arg(ap, long);
+    long a2 = va_arg(ap, long);
+    long a3 = va_arg(ap, long);
+    long a4 = va_arg(ap, long);
+    long a5 = va_arg(ap, long);
+    long a6 = va_arg(ap, long);
+    va_end(ap);
+    return orig_syscall(number, a1, a2, a3, a4, a5, a6);
+}
+
 #pragma mark - ObjC Method Hooks
 
 static void hookObjCMethods(void) {
@@ -244,7 +314,7 @@ static void hookObjCMethods(void) {
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4 (DragonRead) loaded ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.1 (DragonRead) loaded ===");
 
         struct rebinding rebindings[] = {
             {"csops",     (void *)fake_csops,     (void **)&orig_csops},
@@ -255,7 +325,8 @@ static void init(void) {
             {"fopen",     (void *)fake_fopen,     (void **)&orig_fopen},
             {"sysctl",    (void *)fake_sysctl,    (void **)&orig_sysctl},
             {"ptrace",    (void *)fake_ptrace,    (void **)&orig_ptrace},
-            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv}
+            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv},
+            {"syscall",   (void *)fake_syscall,   (void **)&orig_syscall}
         };
         int count = sizeof(rebindings) / sizeof(rebindings[0]);
         int ret = rebind_symbols(rebindings, count);
@@ -263,6 +334,6 @@ static void init(void) {
 
         hookObjCMethods();
 
-        BYPASS_LOG(@"=== AliSecBypass v4 init complete ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.1 init complete ===");
     }
 }
