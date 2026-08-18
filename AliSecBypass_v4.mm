@@ -1,7 +1,7 @@
 //
-//  AliSecBypass_v4_1.mm
-//  番茄小说脱壳检测绕过插件 (修复 syscall 绕过)
-//  纯库文件，无 Logos，TrollStore / 非越狱注入
+//  AliSecBypass_v4_3.mm
+//  修复: NSBundle bundleIdentifier 只在检测上下文中伪造
+//  避免破坏 App 正常初始化
 //
 
 #import <Foundation/Foundation.h>
@@ -14,6 +14,7 @@
 #import <string.h>
 #import <stdint.h>
 #import <unistd.h>
+#import <execinfo.h>
 #import "fishhook.h"
 
 #pragma mark - Logger
@@ -69,7 +70,45 @@ static BOOL isJailbreakPath(const char *path) {
     return NO;
 }
 
-#pragma mark - C Function Hooks (fishhook)
+#pragma mark - Stack Trace Checker
+
+// 检查调用栈是否来自检测相关代码
+static BOOL isFromSecurityCheck(void) {
+    void *buffer[10];
+    int count = backtrace(buffer, 10);
+    if (count <= 0) return NO;
+
+    char **symbols = backtrace_symbols(buffer, count);
+    if (!symbols) return NO;
+
+    BOOL result = NO;
+    for (int i = 0; i < count; i++) {
+        NSString *sym = [NSString stringWithUTF8String:symbols[i]];
+        // 检测相关特征：包含 check/verify/detect/security/env 等
+        if ([sym rangeOfString:@"Check"].location != NSNotFound ||
+            [sym rangeOfString:@"check"].location != NSNotFound ||
+            [sym rangeOfString:@"Verify"].location != NSNotFound ||
+            [sym rangeOfString:@"verify"].location != NSNotFound ||
+            [sym rangeOfString:@"Detect"].location != NSNotFound ||
+            [sym rangeOfString:@"detect"].location != NSNotFound ||
+            [sym rangeOfString:@"Security"].location != NSNotFound ||
+            [sym rangeOfString:@"security"].location != NSNotFound ||
+            [sym rangeOfString:@"Jail"].location != NSNotFound ||
+            [sym rangeOfString:@"jail"].location != NSNotFound ||
+            [sym rangeOfString:@"Env"].location != NSNotFound ||
+            [sym rangeOfString:@"env"].location != NSNotFound ||
+            [sym rangeOfString:@"Safe"].location != NSNotFound ||
+            [sym rangeOfString:@"safe"].location != NSNotFound) {
+            result = YES;
+            break;
+        }
+    }
+
+    free(symbols);
+    return result;
+}
+
+#pragma mark - C Function Hooks
 
 static int (*orig_csops)(pid_t, unsigned int, void *, size_t);
 static int fake_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) {
@@ -177,78 +216,10 @@ static char *fake_getenv(const char *name) {
     return orig_getenv(name);
 }
 
-// ==================== CRITICAL: syscall hook ====================
-// App may bypass libc csops/ptrace by calling syscall() directly
-
-static int (*orig_syscall)(int, ...);
-
-static int fake_syscall(int number, ...) {
-    // 使用 va_list 获取变参
-    va_list ap;
-    va_start(ap, number);
-
-    if (number == SYS_csops) {
-        // syscall(SYS_csops, pid, ops, useraddr, usersize)
-        pid_t pid = va_arg(ap, pid_t);
-        unsigned int ops = va_arg(ap, unsigned int);
-        void *useraddr = va_arg(ap, void *);
-        size_t usersize = va_arg(ap, size_t);
-        va_end(ap);
-
-        BYPASS_LOG(@"[syscall] SYS_csops(pid=%d, ops=%u) intercepted", pid, ops);
-
-        int ret = orig_syscall(SYS_csops, pid, ops, useraddr, usersize);
-        if (ret != 0) {
-            BYPASS_LOG(@"[syscall] csops failed, forcing success");
-            ret = 0;
-        }
-        if (ops == 0 && useraddr && usersize >= 4) {
-            *(uint32_t *)useraddr = 0x00020001;
-            BYPASS_LOG(@"[syscall] csops CS_OPS_STATUS -> forged valid");
-        } else if ((ops == 11 || ops == 16) && useraddr) {
-            size_t limit = usersize < 64 ? usersize : 64;
-            memset(useraddr, 0, limit);
-            BYPASS_LOG(@"[syscall] csops ops=%u -> forged pass", ops);
-        }
-        return ret;
-    }
-
-    if (number == SYS_ptrace) {
-        // syscall(SYS_ptrace, request, pid, addr, data)
-        int request = va_arg(ap, int);
-        va_end(ap);
-
-        if (request == 0) {
-            BYPASS_LOG(@"[syscall] SYS_ptrace(PT_DENY_ATTACH) blocked");
-            return 0;
-        }
-    }
-
-    va_end(ap);
-
-    // 其他 syscall 透传
-    va_start(ap, number);
-    // 无法直接用 va_list 透传给变参函数，这里简化处理
-    // 对于非 csops/ptrace 的 syscall，调用原始函数
-    // 但由于 syscall 是变参，需要特殊处理
-    va_end(ap);
-
-    // 简化：对于非目标 syscall，直接调用原始函数（需要重新组织参数）
-    // 这里用一个小技巧：syscall 最多 6 个参数
-    va_start(ap, number);
-    long a1 = va_arg(ap, long);
-    long a2 = va_arg(ap, long);
-    long a3 = va_arg(ap, long);
-    long a4 = va_arg(ap, long);
-    long a5 = va_arg(ap, long);
-    long a6 = va_arg(ap, long);
-    va_end(ap);
-    return orig_syscall(number, a1, a2, a3, a4, a5, a6);
-}
-
 #pragma mark - ObjC Method Hooks
 
 static void hookObjCMethods(void) {
+    // 1. NSFileManager - 保留，相对安全
     Class fileMgr = objc_getClass("NSFileManager");
     if (fileMgr) {
         Method m = class_getInstanceMethod(fileMgr, @selector(fileExistsAtPath:));
@@ -266,6 +237,7 @@ static void hookObjCMethods(void) {
         }
     }
 
+    // 2. UIApplication canOpenURL - 保留，相对安全
     Class app = objc_getClass("UIApplication");
     if (app) {
         Method m = class_getInstanceMethod(app, @selector(canOpenURL:));
@@ -287,6 +259,7 @@ static void hookObjCMethods(void) {
         }
     }
 
+    // 3. NSBundle bundleIdentifier - 关键修复：只在检测上下文中伪造
     Class bundle = objc_getClass("NSBundle");
     if (bundle) {
         Method m = class_getInstanceMethod(bundle, @selector(bundleIdentifier));
@@ -294,17 +267,18 @@ static void hookObjCMethods(void) {
             IMP orig = method_getImplementation(m);
             IMP fake = imp_implementationWithBlock(^NSString *(id self) {
                 NSString *bid = ((NSString * (*)(id, SEL))orig)(self, @selector(bundleIdentifier));
-                if ([bid isEqualToString:@"com.dragon.read1"]) {
-                    static dispatch_once_t onceToken;
-                    dispatch_once(&onceToken, ^{
-                        BYPASS_LOG(@"[NSBundle] forged bundleIdentifier");
-                    });
+
+                // 只有调用栈来自检测代码时才伪造
+                if ([bid isEqualToString:@"com.dragon.read1"] && isFromSecurityCheck()) {
+                    BYPASS_LOG(@"[NSBundle] forged bundleIdentifier (security check context)");
                     return @"com.dragon.read";
                 }
+
+                // 正常业务逻辑返回真实的
                 return bid;
             });
             method_setImplementation(m, fake);
-            BYPASS_LOG(@"[hook] NSBundle bundleIdentifier");
+            BYPASS_LOG(@"[hook] NSBundle bundleIdentifier (context-aware)");
         }
     }
 }
@@ -314,7 +288,7 @@ static void hookObjCMethods(void) {
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4.1 (DragonRead) loaded ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.3 (DragonRead) loaded ===");
 
         struct rebinding rebindings[] = {
             {"csops",     (void *)fake_csops,     (void **)&orig_csops},
@@ -325,8 +299,7 @@ static void init(void) {
             {"fopen",     (void *)fake_fopen,     (void **)&orig_fopen},
             {"sysctl",    (void *)fake_sysctl,    (void **)&orig_sysctl},
             {"ptrace",    (void *)fake_ptrace,    (void **)&orig_ptrace},
-            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv},
-            {"syscall",   (void *)fake_syscall,   (void **)&orig_syscall}
+            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv}
         };
         int count = sizeof(rebindings) / sizeof(rebindings[0]);
         int ret = rebind_symbols(rebindings, count);
@@ -334,6 +307,6 @@ static void init(void) {
 
         hookObjCMethods();
 
-        BYPASS_LOG(@"=== AliSecBypass v4.1 init complete ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.3 init complete ===");
     }
 }
