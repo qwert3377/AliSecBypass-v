@@ -1,11 +1,11 @@
 //
-//  SSLBypass_safe.mm
-//  安全版: 只 attach 打印，不强制替换，避免破坏 Cronet
+//  SSLBypass_minimal.mm
+//  极简版: 延迟加载 + 只 hook NSURLSession delegate
+//  不碰 BoringSSL/SecTrustEvaluate，避免闪退
 //
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import "fishhook.h"
 
 #pragma mark - Logger
 
@@ -36,89 +36,120 @@ static void SSL_LOG(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - BoringSSL (只监控，不拦截)
+#pragma mark - Safe Hook Helper
 
-static void (*orig_SSL_CTX_set_custom_verify)(void *ctx, int mode, void *callbacks);
-static void fake_SSL_CTX_set_custom_verify(void *ctx, int mode, void *callbacks) {
-    SSL_LOG(@"[SSL] SSL_CTX_set_custom_verify called, mode=%d", mode);
-    orig_SSL_CTX_set_custom_verify(ctx, mode, callbacks); // 透传，不破坏
-}
+static void safeSwizzle(Class cls, SEL origSel, SEL newSel) {
+    if (!cls) return;
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    Method newMethod = class_getInstanceMethod(cls, newSel);
+    if (!origMethod || !newMethod) return;
 
-static void (*orig_SSL_set_verify)(void *ssl, int mode, void *callback);
-static void fake_SSL_set_verify(void *ssl, int mode, void *callback) {
-    SSL_LOG(@"[SSL] SSL_set_verify called, mode=%d", mode);
-    orig_SSL_set_verify(ssl, mode, callback); // 透传
-}
-
-#pragma mark - Security.framework (只监控)
-
-static int (*orig_SecTrustEvaluate)(void *trust, void *result);
-static int fake_SecTrustEvaluate(void *trust, void *result) {
-    int ret = orig_SecTrustEvaluate(trust, result);
-    SSL_LOG(@"[SSL] SecTrustEvaluate returned %d", ret);
-    if (ret == 0 && result) {
-        *(int *)result = 4; // 只改结果，不改流程
+    BOOL didAdd = class_addMethod(cls, origSel,
+                                  method_getImplementation(newMethod),
+                                  method_getTypeEncoding(newMethod));
+    if (didAdd) {
+        class_replaceMethod(cls, newSel,
+                           method_getImplementation(origMethod),
+                           method_getTypeEncoding(origMethod));
+    } else {
+        method_exchangeImplementations(origMethod, newMethod);
     }
-    return 0;
 }
 
-static int (*orig_SecTrustEvaluateWithError)(void *trust, void *error);
-static int fake_SecTrustEvaluateWithError(void *trust, void *error) {
-    int ret = orig_SecTrustEvaluateWithError(trust, error);
-    SSL_LOG(@"[SSL] SecTrustEvaluateWithError returned %d", ret);
-    if (error) *(void **)error = NULL;
-    return 1;
+#pragma mark - NSURLSession Challenge Bypass
+
+@interface NSURLSessionDelegateHook : NSObject
+@end
+
+@implementation NSURLSessionDelegateHook
+
+// 替换 URLSession:didReceiveChallenge:completionHandler:
+- (void)hook_URLSession:(NSURLSession *)session
+    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+      completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+
+    SSL_LOG(@"[SSL] Challenge for %@", challenge.protectionSpace.host);
+
+    // 信任所有证书
+    NSURLCredential *credential = [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust];
+    completionHandler(NSURLSessionAuthChallengeUseCredential, credential);
 }
 
-#pragma mark - NSURLSession (安全遍历)
+@end
 
-static void hookNSURLSessionPinning(void) {
+#pragma mark - Delayed Setup
+
+static void setupSSLBypass(void) {
     @try {
-        unsigned int count;
-        Class *classes = objc_copyClassList(&count);
+        SSL_LOG(@"[SSL] Setting up bypass...");
+
+        // 1. Hook NSURLSession 的 delegate 方法
+        Class hookCls = [NSURLSessionDelegateHook class];
+        SEL origSel = @selector(URLSession:didReceiveChallenge:completionHandler:);
+        SEL hookSel = @selector(hook_URLSession:didReceiveChallenge:completionHandler:);
+
+        // 遍历常见网络管理类
+        const char *targetClasses[] = {
+            "TTNetworkManager",
+            "BDNetworkManager",
+            "AliNetworkManager",
+            "CronetNetworkManager",
+            "TTHttpTask",
+            "BDHttpTask",
+            "NSURLSessionTask",
+            "__NSCFURLSessionTask",
+            nil
+        };
+
         int hooked = 0;
-        for (unsigned int i = 0; i < count && hooked < 20; i++) { // 限制最多 hook 20 个类
-            Class cls = classes[i];
-            SEL sel = @selector(URLSession:didReceiveChallenge:completionHandler:);
-            if (class_respondsToSelector(cls, sel)) {
-                Method m = class_getInstanceMethod(cls, sel);
+        for (int i = 0; targetClasses[i]; i++) {
+            Class cls = objc_getClass(targetClasses[i]);
+            if (cls && class_respondsToSelector(cls, origSel)) {
+                safeSwizzle(cls, origSel, hookSel);
+                SSL_LOG(@"[SSL] Hooked %s", targetClasses[i]);
+                hooked++;
+            }
+        }
+
+        // 2. 如果没有找到特定类，尝试通用 hook：替换 NSURLSession 的 sharedSession
+        if (hooked == 0) {
+            Class sessionCls = objc_getClass("NSURLSession");
+            if (sessionCls) {
+                // 尝试 hook dataTaskWithRequest 来监控
+                SEL origDataTask = @selector(dataTaskWithRequest:);
+                Method m = class_getInstanceMethod(sessionCls, origDataTask);
                 if (m) {
                     IMP orig = method_getImplementation(m);
-                    IMP fake = imp_implementationWithBlock(^(id self, id session, id challenge, void (^completionHandler)(NSInteger, id)) {
-                        SSL_LOG(@"[SSL] Challenge from %@", NSStringFromClass(cls));
-                        completionHandler(0, nil);
+                    IMP fake = imp_implementationWithBlock(^id(id self, NSURLRequest *request) {
+                        SSL_LOG(@"[SSL] dataTaskWithRequest: %@", request.URL.absoluteString);
+                        return ((id (*)(id, SEL, NSURLRequest *))orig)(self, origDataTask, request);
                     });
                     method_setImplementation(m, fake);
-                    hooked++;
+                    SSL_LOG(@"[SSL] Hooked NSURLSession dataTaskWithRequest:");
                 }
             }
         }
-        free(classes);
-        SSL_LOG(@"[SSL] Hooked %d challenge handlers", hooked);
+
+        SSL_LOG(@"[SSL] Setup complete, hooked %d classes", hooked);
+
     } @catch (NSException *e) {
-        SSL_LOG(@"[SSL] Exception in hookNSURLSessionPinning: %@", e);
+        SSL_LOG(@"[SSL] Exception: %@", e);
     }
 }
 
-#pragma mark - Constructor
+#pragma mark - Constructor (delayed)
 
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        SSL_LOG(@"=== SSLBypass_safe loaded ===");
+        SSL_LOG(@"=== SSLBypass_minimal loaded ===");
 
-        struct rebinding rebindings[] = {
-            {"SSL_CTX_set_custom_verify", (void *)fake_SSL_CTX_set_custom_verify, (void **)&orig_SSL_CTX_set_custom_verify},
-            {"SSL_set_verify",            (void *)fake_SSL_set_verify,            (void **)&orig_SSL_set_verify},
-            {"SecTrustEvaluate",          (void *)fake_SecTrustEvaluate,          (void **)&orig_SecTrustEvaluate},
-            {"SecTrustEvaluateWithError", (void *)fake_SecTrustEvaluateWithError, (void **)&orig_SecTrustEvaluateWithError}
-        };
-        int count = sizeof(rebindings) / sizeof(rebindings[0]);
-        int ret = rebind_symbols(rebindings, count);
-        SSL_LOG(@"[init] fishhook returned %d", ret);
+        // 延迟 3 秒执行，等 App 完全启动
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            setupSSLBypass();
+        });
 
-        hookNSURLSessionPinning();
-
-        SSL_LOG(@"=== SSLBypass_safe init complete ===");
+        SSL_LOG(@"[init] Will setup in 3 seconds...");
     }
 }
