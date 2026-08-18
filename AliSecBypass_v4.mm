@@ -1,6 +1,7 @@
 //
-//  AliSecBypass_v4_1.mm
-//  番茄小说脱壳检测绕过插件 (修复 syscall 绕过)
+//  AliSecBypass_v4_2.mm
+//  番茄小说脱壳检测绕过插件
+//  关键修复: Dobby inline hook syscall + constructor(101) 最高优先级
 //  纯库文件，无 Logos，TrollStore / 非越狱注入
 //
 
@@ -15,6 +16,7 @@
 #import <stdint.h>
 #import <unistd.h>
 #import "fishhook.h"
+#import "dobby.h"
 
 #pragma mark - Logger
 
@@ -69,7 +71,7 @@ static BOOL isJailbreakPath(const char *path) {
     return NO;
 }
 
-#pragma mark - C Function Hooks (fishhook)
+#pragma mark - C Function Hooks
 
 static int (*orig_csops)(pid_t, unsigned int, void *, size_t);
 static int fake_csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize) {
@@ -177,18 +179,17 @@ static char *fake_getenv(const char *name) {
     return orig_getenv(name);
 }
 
-// ==================== CRITICAL: syscall hook ====================
-// App may bypass libc csops/ptrace by calling syscall() directly
+// ==================== CRITICAL: Dobby inline hook syscall ====================
+// fishhook 对 syscall 无效（libc 中 syscall 是内联 svc 指令，不走 PLT）
+// 必须用 Dobby 做 inline hook 才能拦截
 
 static int (*orig_syscall)(int, ...);
 
 static int fake_syscall(int number, ...) {
-    // 使用 va_list 获取变参
     va_list ap;
     va_start(ap, number);
 
     if (number == SYS_csops) {
-        // syscall(SYS_csops, pid, ops, useraddr, usersize)
         pid_t pid = va_arg(ap, pid_t);
         unsigned int ops = va_arg(ap, unsigned int);
         void *useraddr = va_arg(ap, void *);
@@ -214,27 +215,25 @@ static int fake_syscall(int number, ...) {
     }
 
     if (number == SYS_ptrace) {
-        // syscall(SYS_ptrace, request, pid, addr, data)
         int request = va_arg(ap, int);
         va_end(ap);
-
         if (request == 0) {
             BYPASS_LOG(@"[syscall] SYS_ptrace(PT_DENY_ATTACH) blocked");
             return 0;
         }
+        // 重新组装参数调用原始函数
+        va_start(ap, number);
+        va_arg(ap, int); // skip request
+        pid_t pid = va_arg(ap, pid_t);
+        caddr_t addr = va_arg(ap, caddr_t);
+        int data = va_arg(ap, int);
+        va_end(ap);
+        return orig_syscall(SYS_ptrace, request, pid, addr, data);
     }
 
     va_end(ap);
 
-    // 其他 syscall 透传
-    va_start(ap, number);
-    // 无法直接用 va_list 透传给变参函数，这里简化处理
-    // 对于非 csops/ptrace 的 syscall，调用原始函数
-    // 但由于 syscall 是变参，需要特殊处理
-    va_end(ap);
-
-    // 简化：对于非目标 syscall，直接调用原始函数（需要重新组织参数）
-    // 这里用一个小技巧：syscall 最多 6 个参数
+    // 透传其他 syscall（最多 6 个参数）
     va_start(ap, number);
     long a1 = va_arg(ap, long);
     long a2 = va_arg(ap, long);
@@ -309,13 +308,18 @@ static void hookObjCMethods(void) {
     }
 }
 
-#pragma mark - Constructor
+#pragma mark - Constructor (priority 101 = earliest)
 
-__attribute__((constructor))
+__attribute__((constructor(101)))
 static void init(void) {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4.1 (DragonRead) loaded ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.2 (DragonRead) loaded ===");
 
+        // 1. Dobby inline hook syscall (critical: fishhook can't hook syscall)
+        int dobbyRet = DobbyHook((void *)syscall, (void *)fake_syscall, (void **)&orig_syscall);
+        BYPASS_LOG(@"[init] DobbyHook syscall returned %d", dobbyRet);
+
+        // 2. fishhook other libc functions
         struct rebinding rebindings[] = {
             {"csops",     (void *)fake_csops,     (void **)&orig_csops},
             {"access",    (void *)fake_access,    (void **)&orig_access},
@@ -325,15 +329,15 @@ static void init(void) {
             {"fopen",     (void *)fake_fopen,     (void **)&orig_fopen},
             {"sysctl",    (void *)fake_sysctl,    (void **)&orig_sysctl},
             {"ptrace",    (void *)fake_ptrace,    (void **)&orig_ptrace},
-            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv},
-            {"syscall",   (void *)fake_syscall,   (void **)&orig_syscall}
+            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv}
         };
         int count = sizeof(rebindings) / sizeof(rebindings[0]);
-        int ret = rebind_symbols(rebindings, count);
-        BYPASS_LOG(@"[init] fishhook rebind_symbols returned %d", ret);
+        int fhRet = rebind_symbols(rebindings, count);
+        BYPASS_LOG(@"[init] fishhook rebind_symbols returned %d", fhRet);
 
+        // 3. ObjC hooks
         hookObjCMethods();
 
-        BYPASS_LOG(@"=== AliSecBypass v4.1 init complete ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.2 init complete ===");
     }
 }
