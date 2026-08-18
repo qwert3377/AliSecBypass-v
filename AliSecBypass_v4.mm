@@ -1,8 +1,7 @@
 //
-//  AliSecBypass_v4_2.mm
-//  番茄小说脱壳检测绕过插件
-//  关键修复: Dobby inline hook syscall + constructor(101) 最高优先级
-//  纯库文件，无 Logos，TrollStore / 非越狱注入
+//  AliSecBypass_v4_2_nodobby.mm
+//  番茄小说脱壳检测绕过插件 (无 Dobby 版)
+//  纯 fishhook，hook __syscall 拦截 syscall(169)
 //
 
 #import <Foundation/Foundation.h>
@@ -16,7 +15,6 @@
 #import <stdint.h>
 #import <unistd.h>
 #import "fishhook.h"
-#import "dobby.h"
 
 #pragma mark - Logger
 
@@ -179,13 +177,12 @@ static char *fake_getenv(const char *name) {
     return orig_getenv(name);
 }
 
-// ==================== CRITICAL: Dobby inline hook syscall ====================
-// fishhook 对 syscall 无效（libc 中 syscall 是内联 svc 指令，不走 PLT）
-// 必须用 Dobby 做 inline hook 才能拦截
+// ==================== CRITICAL: hook __syscall (libc internal wrapper) ====================
+// fishhook can't hook "syscall" directly on iOS (inlined svc), but can hook "__syscall"
 
-static int (*orig_syscall)(int, ...);
+static int (*orig___syscall)(int, ...);
 
-static int fake_syscall(int number, ...) {
+static int fake___syscall(int number, ...) {
     va_list ap;
     va_start(ap, number);
 
@@ -196,20 +193,20 @@ static int fake_syscall(int number, ...) {
         size_t usersize = va_arg(ap, size_t);
         va_end(ap);
 
-        BYPASS_LOG(@"[syscall] SYS_csops(pid=%d, ops=%u) intercepted", pid, ops);
+        BYPASS_LOG(@"[__syscall] SYS_csops(pid=%d, ops=%u) intercepted", pid, ops);
 
-        int ret = orig_syscall(SYS_csops, pid, ops, useraddr, usersize);
+        int ret = orig___syscall(SYS_csops, pid, ops, useraddr, usersize);
         if (ret != 0) {
-            BYPASS_LOG(@"[syscall] csops failed, forcing success");
+            BYPASS_LOG(@"[__syscall] csops failed, forcing success");
             ret = 0;
         }
         if (ops == 0 && useraddr && usersize >= 4) {
             *(uint32_t *)useraddr = 0x00020001;
-            BYPASS_LOG(@"[syscall] csops CS_OPS_STATUS -> forged valid");
+            BYPASS_LOG(@"[__syscall] csops CS_OPS_STATUS -> forged valid");
         } else if ((ops == 11 || ops == 16) && useraddr) {
             size_t limit = usersize < 64 ? usersize : 64;
             memset(useraddr, 0, limit);
-            BYPASS_LOG(@"[syscall] csops ops=%u -> forged pass", ops);
+            BYPASS_LOG(@"[__syscall] csops ops=%u -> forged pass", ops);
         }
         return ret;
     }
@@ -218,22 +215,19 @@ static int fake_syscall(int number, ...) {
         int request = va_arg(ap, int);
         va_end(ap);
         if (request == 0) {
-            BYPASS_LOG(@"[syscall] SYS_ptrace(PT_DENY_ATTACH) blocked");
+            BYPASS_LOG(@"[__syscall] SYS_ptrace(PT_DENY_ATTACH) blocked");
             return 0;
         }
-        // 重新组装参数调用原始函数
         va_start(ap, number);
-        va_arg(ap, int); // skip request
+        va_arg(ap, int);
         pid_t pid = va_arg(ap, pid_t);
         caddr_t addr = va_arg(ap, caddr_t);
         int data = va_arg(ap, int);
         va_end(ap);
-        return orig_syscall(SYS_ptrace, request, pid, addr, data);
+        return orig___syscall(SYS_ptrace, request, pid, addr, data);
     }
 
     va_end(ap);
-
-    // 透传其他 syscall（最多 6 个参数）
     va_start(ap, number);
     long a1 = va_arg(ap, long);
     long a2 = va_arg(ap, long);
@@ -242,7 +236,7 @@ static int fake_syscall(int number, ...) {
     long a5 = va_arg(ap, long);
     long a6 = va_arg(ap, long);
     va_end(ap);
-    return orig_syscall(number, a1, a2, a3, a4, a5, a6);
+    return orig___syscall(number, a1, a2, a3, a4, a5, a6);
 }
 
 #pragma mark - ObjC Method Hooks
@@ -308,36 +302,31 @@ static void hookObjCMethods(void) {
     }
 }
 
-#pragma mark - Constructor (priority 101 = earliest)
+#pragma mark - Constructor
 
-__attribute__((constructor(101)))
+__attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4.2 (DragonRead) loaded ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.2-nodobby (DragonRead) loaded ===");
 
-        // 1. Dobby inline hook syscall (critical: fishhook can't hook syscall)
-        int dobbyRet = DobbyHook((void *)syscall, (void *)fake_syscall, (void **)&orig_syscall);
-        BYPASS_LOG(@"[init] DobbyHook syscall returned %d", dobbyRet);
-
-        // 2. fishhook other libc functions
         struct rebinding rebindings[] = {
-            {"csops",     (void *)fake_csops,     (void **)&orig_csops},
-            {"access",    (void *)fake_access,    (void **)&orig_access},
-            {"stat",      (void *)fake_stat,      (void **)&orig_stat},
-            {"stat64",    (void *)fake_stat64,    (void **)&orig_stat64},
-            {"open",      (void *)fake_open,      (void **)&orig_open},
-            {"fopen",     (void *)fake_fopen,     (void **)&orig_fopen},
-            {"sysctl",    (void *)fake_sysctl,    (void **)&orig_sysctl},
-            {"ptrace",    (void *)fake_ptrace,    (void **)&orig_ptrace},
-            {"getenv",    (void *)fake_getenv,    (void **)&orig_getenv}
+            {"csops",      (void *)fake_csops,      (void **)&orig_csops},
+            {"access",     (void *)fake_access,     (void **)&orig_access},
+            {"stat",       (void *)fake_stat,       (void **)&orig_stat},
+            {"stat64",     (void *)fake_stat64,     (void **)&orig_stat64},
+            {"open",       (void *)fake_open,       (void **)&orig_open},
+            {"fopen",      (void *)fake_fopen,      (void **)&orig_fopen},
+            {"sysctl",     (void *)fake_sysctl,     (void **)&orig_sysctl},
+            {"ptrace",     (void *)fake_ptrace,     (void **)&orig_ptrace},
+            {"getenv",     (void *)fake_getenv,     (void **)&orig_getenv},
+            {"__syscall",  (void *)fake___syscall,  (void **)&orig___syscall}
         };
         int count = sizeof(rebindings) / sizeof(rebindings[0]);
-        int fhRet = rebind_symbols(rebindings, count);
-        BYPASS_LOG(@"[init] fishhook rebind_symbols returned %d", fhRet);
+        int ret = rebind_symbols(rebindings, count);
+        BYPASS_LOG(@"[init] fishhook rebind_symbols returned %d", ret);
 
-        // 3. ObjC hooks
         hookObjCMethods();
 
-        BYPASS_LOG(@"=== AliSecBypass v4.2 init complete ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.2-nodobby init complete ===");
     }
 }
