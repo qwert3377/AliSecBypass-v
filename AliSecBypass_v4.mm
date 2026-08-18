@@ -1,8 +1,6 @@
 //
-//  SSLBypass.mm
-//  SSL Pinning Bypass for iOS (TrollStore / 非越狱)
-//  配合 mitmproxy/Charles 抓 HTTPS 包
-//  日志: App Documents/SSLBypass.log
+//  SSLBypass_fixed.mm
+//  修复: 删除自定义 SecTrustRef typedef，避免与 SDK 冲突
 //
 
 #import <Foundation/Foundation.h>
@@ -38,64 +36,42 @@ static void SSL_LOG(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - BoringSSL / OpenSSL Hooks
+#pragma mark - BoringSSL Hooks
 
-typedef void *SSL_CTX;
-typedef void *SSL;
-
-static void (*orig_SSL_CTX_set_custom_verify)(SSL_CTX *ctx, int mode, void *callbacks);
-static void fake_SSL_CTX_set_custom_verify(SSL_CTX *ctx, int mode, void *callbacks) {
+static void (*orig_SSL_CTX_set_custom_verify)(void *ctx, int mode, void *callbacks);
+static void fake_SSL_CTX_set_custom_verify(void *ctx, int mode, void *callbacks) {
     SSL_LOG(@"[SSL] SSL_CTX_set_custom_verify bypassed");
-    // 不做任何事，直接返回，跳过证书校验
 }
 
-static void (*orig_SSL_set_verify)(SSL *ssl, int mode, void *callback);
-static void fake_SSL_set_verify(SSL *ssl, int mode, void *callback) {
+static void (*orig_SSL_set_verify)(void *ssl, int mode, void *callback);
+static void fake_SSL_set_verify(void *ssl, int mode, void *callback) {
     SSL_LOG(@"[SSL] SSL_set_verify bypassed");
-    // 不做任何事
 }
 
 #pragma mark - Security.framework Hooks
 
-typedef void *SecTrustRef;
-typedef int OSStatus;
-
-static OSStatus (*orig_SecTrustEvaluate)(SecTrustRef trust, void *result);
-static OSStatus fake_SecTrustEvaluate(SecTrustRef trust, void *result) {
-    SSL_LOG(@"[SSL] SecTrustEvaluate bypassed -> errSecSuccess");
+// 不用 typedef，直接用 void * 代替 SecTrustRef
+static int (*orig_SecTrustEvaluate)(void *trust, void *result);
+static int fake_SecTrustEvaluate(void *trust, void *result) {
+    SSL_LOG(@"[SSL] SecTrustEvaluate bypassed");
     if (result) {
-        // kSecTrustResultProceed = 4
-        *(int *)result = 4;
+        *(int *)result = 4; // kSecTrustResultProceed
     }
     return 0; // errSecSuccess
 }
 
-static OSStatus (*orig_SecTrustEvaluateWithError)(SecTrustRef trust, void *error);
-static OSStatus fake_SecTrustEvaluateWithError(SecTrustRef trust, void *error) {
-    SSL_LOG(@"[SSL] SecTrustEvaluateWithError bypassed -> YES");
+static int (*orig_SecTrustEvaluateWithError)(void *trust, void *error);
+static int fake_SecTrustEvaluateWithError(void *trust, void *error) {
+    SSL_LOG(@"[SSL] SecTrustEvaluateWithError bypassed");
     if (error) {
         *(void **)error = NULL;
     }
     return 1; // true
 }
 
-#pragma mark - NSURLSession Pinning Hook (ObjC)
+#pragma mark - NSURLSession Pinning Hook
 
 static void hookNSURLSessionPinning(void) {
-    Class NSURLSession = objc_getClass("NSURLSession");
-    if (!NSURLSession) return;
-
-    // Hook _CFNetworkIsConnectedToCellular (可选，干扰网络检测)
-    Class cfNetHelper = objc_getClass("__NSCFURLSessionConfiguration");
-    if (!cfNetHelper) cfNetHelper = objc_getClass("NSURLSessionConfiguration");
-
-    // Hook NSURLSessionDelegate 的 didReceiveChallenge
-    // 很多 App 在 delegate 里做证书校验
-    Class delegateCls = objc_getClass("TTNetworkManager"); // 字节跳动
-    if (!delegateCls) delegateCls = objc_getClass("BDNetworkManager"); // 百度
-    if (!delegateCls) delegateCls = objc_getClass("AliNetworkManager"); // 阿里
-
-    // 通用：hook 所有类的 URLSession:didReceiveChallenge:completionHandler:
     unsigned int count;
     Class *classes = objc_copyClassList(&count);
     for (unsigned int i = 0; i < count; i++) {
@@ -106,17 +82,15 @@ static void hookNSURLSessionPinning(void) {
             if (m) {
                 IMP orig = method_getImplementation(m);
                 IMP fake = imp_implementationWithBlock(^(id self, id session, id challenge, void (^completionHandler)(NSInteger, id)) {
-                    SSL_LOG(@"[SSL] URLSession challenge from %@", NSStringFromClass(cls));
-                    // NSURLSessionAuthChallengeUseCredential = 0, 传空 credential 表示信任
-                    completionHandler(0, nil);
+                    SSL_LOG(@"[SSL] Challenge from %@", NSStringFromClass(cls));
+                    completionHandler(0, nil); // NSURLSessionAuthChallengeUseCredential
                 });
                 method_setImplementation(m, fake);
             }
         }
     }
     free(classes);
-
-    SSL_LOG(@"[SSL] Hooked NSURLSession challenge handlers");
+    SSL_LOG(@"[SSL] Hooked challenge handlers");
 }
 
 #pragma mark - Constructor
