@@ -1,7 +1,7 @@
 //
-//  AliSecBypass_v4_2_nodobby.mm
-//  番茄小说脱壳检测绕过插件 (无 Dobby 版)
-//  纯 fishhook，hook __syscall 拦截 syscall(169)
+//  AliSecBypass_v4_1_plus.mm
+//  基于 v4.1 成功代码，只添加 __syscall hook
+//  纯 fishhook，无 Dobby
 //
 
 #import <Foundation/Foundation.h>
@@ -177,8 +177,7 @@ static char *fake_getenv(const char *name) {
     return orig_getenv(name);
 }
 
-// ==================== CRITICAL: hook __syscall (libc internal wrapper) ====================
-// fishhook can't hook "syscall" directly on iOS (inlined svc), but can hook "__syscall"
+// ==================== NEW: __syscall hook ====================
 
 static int (*orig___syscall)(int, ...);
 
@@ -193,11 +192,11 @@ static int fake___syscall(int number, ...) {
         size_t usersize = va_arg(ap, size_t);
         va_end(ap);
 
-        BYPASS_LOG(@"[__syscall] SYS_csops(pid=%d, ops=%u) intercepted", pid, ops);
+        BYPASS_LOG(@"[__syscall] SYS_csops(pid=%d, ops=%u)", pid, ops);
 
         int ret = orig___syscall(SYS_csops, pid, ops, useraddr, usersize);
         if (ret != 0) {
-            BYPASS_LOG(@"[__syscall] csops failed, forcing success");
+            BYPASS_LOG(@"[__syscall] csops failed -> forcing success");
             ret = 0;
         }
         if (ops == 0 && useraddr && usersize >= 4) {
@@ -307,7 +306,7 @@ static void hookObjCMethods(void) {
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        BYPASS_LOG(@"=== AliSecBypass v4.2-nodobby (DragonRead) loaded ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.1-plus (DragonRead) loaded ===");
 
         struct rebinding rebindings[] = {
             {"csops",      (void *)fake_csops,      (void **)&orig_csops},
@@ -327,6 +326,6 @@ static void init(void) {
 
         hookObjCMethods();
 
-        BYPASS_LOG(@"=== AliSecBypass v4.2-nodobby init complete ===");
+        BYPASS_LOG(@"=== AliSecBypass v4.1-plus init complete ===");
     }
 }
