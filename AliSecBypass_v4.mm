@@ -1,11 +1,13 @@
 //
-//  SSLBypass_minimal.mm
-//  极简版: 延迟加载 + 只 hook NSURLSession delegate
-//  不碰 BoringSSL/SecTrustEvaluate，避免闪退
+//  SSLBypass_final.mm
+//  最终版: 只 hook SecTrustEvaluate，安全模式，延迟加载
+//  如果还闪退，说明 TrollStore 环境下无法 hook 系统安全函数，请改用 Frida
 //
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
+#import "fishhook.h"
 
 #pragma mark - Logger
 
@@ -36,120 +38,71 @@ static void SSL_LOG(NSString *fmt, ...) {
     }
 }
 
-#pragma mark - Safe Hook Helper
+#pragma mark - SecTrustEvaluate Hook (Safe Mode)
 
-static void safeSwizzle(Class cls, SEL origSel, SEL newSel) {
-    if (!cls) return;
-    Method origMethod = class_getInstanceMethod(cls, origSel);
-    Method newMethod = class_getInstanceMethod(cls, newSel);
-    if (!origMethod || !newMethod) return;
+// 使用 void * 避免与 SDK 的 SecTrustRef 冲突
+static int (*orig_SecTrustEvaluate)(void *trust, void *result);
 
-    BOOL didAdd = class_addMethod(cls, origSel,
-                                  method_getImplementation(newMethod),
-                                  method_getTypeEncoding(newMethod));
-    if (didAdd) {
-        class_replaceMethod(cls, newSel,
-                           method_getImplementation(origMethod),
-                           method_getTypeEncoding(origMethod));
-    } else {
-        method_exchangeImplementations(origMethod, newMethod);
+static int fake_SecTrustEvaluate(void *trust, void *result) {
+    // 先调用原始函数，保持正常流程
+    int ret = 0;
+    if (orig_SecTrustEvaluate) {
+        ret = orig_SecTrustEvaluate(trust, result);
     }
+
+    // 然后修改结果为"信任"
+    if (result) {
+        // kSecTrustResultProceed = 4, kSecTrustResultUnspecified = 2
+        // 写 4 表示用户明确信任
+        *(int *)result = 4;
+    }
+
+    SSL_LOG(@"[SSL] SecTrustEvaluate bypassed (orig_ret=%d)", ret);
+    return 0; // errSecSuccess
 }
-
-#pragma mark - NSURLSession Challenge Bypass
-
-@interface NSURLSessionDelegateHook : NSObject
-@end
-
-@implementation NSURLSessionDelegateHook
-
-// 替换 URLSession:didReceiveChallenge:completionHandler:
-- (void)hook_URLSession:(NSURLSession *)session
-    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
-      completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
-
-    SSL_LOG(@"[SSL] Challenge for %@", challenge.protectionSpace.host);
-
-    // 信任所有证书
-    NSURLCredential *credential = [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust];
-    completionHandler(NSURLSessionAuthChallengeUseCredential, credential);
-}
-
-@end
 
 #pragma mark - Delayed Setup
 
 static void setupSSLBypass(void) {
     @try {
-        SSL_LOG(@"[SSL] Setting up bypass...");
+        SSL_LOG(@"[SSL] Setting up...");
 
-        // 1. Hook NSURLSession 的 delegate 方法
-        Class hookCls = [NSURLSessionDelegateHook class];
-        SEL origSel = @selector(URLSession:didReceiveChallenge:completionHandler:);
-        SEL hookSel = @selector(hook_URLSession:didReceiveChallenge:completionHandler:);
-
-        // 遍历常见网络管理类
-        const char *targetClasses[] = {
-            "TTNetworkManager",
-            "BDNetworkManager",
-            "AliNetworkManager",
-            "CronetNetworkManager",
-            "TTHttpTask",
-            "BDHttpTask",
-            "NSURLSessionTask",
-            "__NSCFURLSessionTask",
-            nil
+        struct rebinding rebindings[] = {
+            {"SecTrustEvaluate", (void *)fake_SecTrustEvaluate, (void **)&orig_SecTrustEvaluate}
         };
+        int ret = rebind_symbols(rebindings, 1);
+        SSL_LOG(@"[SSL] fishhook returned %d", ret);
 
-        int hooked = 0;
-        for (int i = 0; targetClasses[i]; i++) {
-            Class cls = objc_getClass(targetClasses[i]);
-            if (cls && class_respondsToSelector(cls, origSel)) {
-                safeSwizzle(cls, origSel, hookSel);
-                SSL_LOG(@"[SSL] Hooked %s", targetClasses[i]);
-                hooked++;
+        if (ret != 0) {
+            SSL_LOG(@"[SSL] fishhook failed, trying dlsym...");
+            // 备用：通过 dlsym 获取地址，手动替换
+            void *handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW);
+            if (handle) {
+                void *sym = dlsym(handle, "SecTrustEvaluate");
+                SSL_LOG(@"[SSL] SecTrustEvaluate @ %p", sym);
             }
         }
 
-        // 2. 如果没有找到特定类，尝试通用 hook：替换 NSURLSession 的 sharedSession
-        if (hooked == 0) {
-            Class sessionCls = objc_getClass("NSURLSession");
-            if (sessionCls) {
-                // 尝试 hook dataTaskWithRequest 来监控
-                SEL origDataTask = @selector(dataTaskWithRequest:);
-                Method m = class_getInstanceMethod(sessionCls, origDataTask);
-                if (m) {
-                    IMP orig = method_getImplementation(m);
-                    IMP fake = imp_implementationWithBlock(^id(id self, NSURLRequest *request) {
-                        SSL_LOG(@"[SSL] dataTaskWithRequest: %@", request.URL.absoluteString);
-                        return ((id (*)(id, SEL, NSURLRequest *))orig)(self, origDataTask, request);
-                    });
-                    method_setImplementation(m, fake);
-                    SSL_LOG(@"[SSL] Hooked NSURLSession dataTaskWithRequest:");
-                }
-            }
-        }
-
-        SSL_LOG(@"[SSL] Setup complete, hooked %d classes", hooked);
+        SSL_LOG(@"[SSL] Setup complete");
 
     } @catch (NSException *e) {
         SSL_LOG(@"[SSL] Exception: %@", e);
     }
 }
 
-#pragma mark - Constructor (delayed)
+#pragma mark - Constructor
 
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        SSL_LOG(@"=== SSLBypass_minimal loaded ===");
+        SSL_LOG(@"=== SSLBypass_final loaded ===");
 
-        // 延迟 3 秒执行，等 App 完全启动
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+        // 延迟 5 秒，等 App 完全启动后再 hook
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             setupSSLBypass();
         });
 
-        SSL_LOG(@"[init] Will setup in 3 seconds...");
+        SSL_LOG(@"[init] Will setup in 5 seconds...");
     }
 }
