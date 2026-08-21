@@ -1,10 +1,9 @@
-// WorkingCopyVIP.mm
+// AliSecBypass_v4.mm
 // TrollStore 注入用，纯 Runtime Hook
-// 修复：使用轮询等待 PaymentStatus 类加载（类是懒加载的）
+// 功能：解锁 Working Copy 所有付费功能
 
 #import <objc/runtime.h>
 #import <Foundation/Foundation.h>
-#import <dlfcn.h>
 
 #pragma mark - 原始 IMP 备份
 
@@ -41,7 +40,7 @@ static BOOL new_latestTrialPurchased(id self, SEL _cmd) {
 static void doHook() {
     Class paymentStatus = objc_getClass("PaymentStatus");
     if (!paymentStatus) {
-        return; // 类还没加载，继续等待
+        return;
     }
 
     static BOOL hooked = NO;
@@ -86,7 +85,6 @@ static void doHook() {
 #pragma mark - 轮询等待类加载
 
 static void startPolling() {
-    // 使用 GCD 定时器每 2 秒检查一次，最多检查 30 次（60 秒）
     static int attempts = 0;
     const int maxAttempts = 30;
 
@@ -100,7 +98,7 @@ static void startPolling() {
         if (orig_allowedFeature || attempts >= maxAttempts) {
             dispatch_source_cancel(timer);
             if (!orig_allowedFeature) {
-                NSLog(@"[WC-VIP] ⚠️ 超时未找到 PaymentStatus，Hook 失败");
+                NSLog(@"[WC-VIP] ⚠️ 超时未找到 PaymentStatus");
             }
         }
     });
@@ -115,24 +113,9 @@ static void wc_vip_init() {
     @autoreleasepool {
         NSLog(@"[WC-VIP] Tweak 已加载，等待 PaymentStatus 类...");
 
-        // 方案 1：延迟 3 秒后开始轮询（等 App 启动完成）
+        // 延迟 3 秒后开始轮询（等 App 启动完成）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             startPolling();
         });
-
-        // 方案 2：同时监听 App 启动完成通知（双保险）
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetLocalCenter(),
-            NULL,
-            ^(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-                NSLog(@"[WC-VIP] 收到启动通知，开始 Hook...");
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    doHook();
-                });
-            },
-            (CFStringRef)UIApplicationDidFinishLaunchingNotification,
-            NULL,
-            CFNotificationSuspensionBehaviorDeliverImmediately
-        );
     }
 }
