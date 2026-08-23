@@ -110,7 +110,7 @@ static NSString *gh_formatDate(NSTimeInterval ts) {
 
 // ========== 历史记录 ==========
 @interface GHAHistory : NSObject
-+ (void)addRecord:(NSString *)name repo:(NSString *)repo;
++ (void)addRecord:(NSString *)name repo:(NSString *)repo filePath:(NSString *)filePath;
 + (NSArray *)records;
 + (void)clear;
 @end
