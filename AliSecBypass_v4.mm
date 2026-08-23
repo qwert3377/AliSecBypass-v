@@ -549,7 +549,7 @@ didCompleteWithError:(NSError *)error {
 
             NSError *copyErr = nil;
             [fm copyItemAtPath:location.path toPath:finalPath error:&copyErr];
-            NSString *destPath = finalPath;
+            destPath = finalPath;
             if (copyErr) { gh_alert(@"错误", @"保存文件失败"); return; }
 
             NSURL *fileURL = [NSURL fileURLWithPath:destPath];
