@@ -213,6 +213,8 @@ didCompleteWithError:(NSError *)error {
 
 @end
 
+@class GHAHistoryVC;
+
 // ========== Artifact 列表 VC ==========
 @interface GHAArtifactListVC : UITableViewController
 @property (nonatomic, strong) NSArray *artifacts;
