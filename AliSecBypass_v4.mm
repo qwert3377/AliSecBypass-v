@@ -1,6 +1,6 @@
 //
-// GitHub Actions Artifact Downloader v3.4
-// 修复：Hook dataTaskWithRequest:completionHandler: + HTTPBodyStream + URL净化 + 增强日志
+// GitHub Actions Artifact Downloader v3.4.1
+// 修复：NSURLSession 缓存导致"Artifacts 已生成但检测不到"
 //
 
 #import <UIKit/UIKit.h>
@@ -366,7 +366,7 @@ didCompleteWithError:(NSError *)error {
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
 
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.4";
+    versionLabel.text = @"GitHub Artifact Downloader v3.4.1";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -769,9 +769,15 @@ didCompleteWithError:(NSError *)error {
     [runReq setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
     [runReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [runReq setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [runReq setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *runTask = [[NSURLSession sharedSession] dataTaskWithRequest:runReq
+
+    NSURLSessionConfiguration *runCfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    runCfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *runSession = [NSURLSession sessionWithConfiguration:runCfg];
+
+    NSURLSessionDataTask *runTask = [runSession dataTaskWithRequest:runReq
                                                                     completionHandler:^(NSData *runData, NSURLResponse *runResponse, NSError *runError) {
         if (!runError && runData && runData.length > 0) {
             NSDictionary *runJson = [NSJSONSerialization JSONObjectWithData:runData options:0 error:nil];
@@ -800,8 +806,13 @@ didCompleteWithError:(NSError *)error {
     [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req
                                                                  completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
@@ -814,9 +825,15 @@ didCompleteWithError:(NSError *)error {
             if (!json || ![json isKindOfClass:[NSDictionary class]]) {
                 gh_alert(@"错误", @"解析响应失败"); return;
             }
+
+            NSNumber *totalCount = json[@"total_count"];
             NSArray *artifacts = json[@"artifacts"];
+
+            gh_log("API", [[NSString stringWithFormat:@"total_count=%@ artifacts.count=%lu", 
+                  totalCount, (unsigned long)artifacts.count] UTF8String]);
+
             if (!artifacts || artifacts.count == 0) {
-                NSString *debugInfo = [NSString stringWithFormat:@"Run ID: %@\nToken: %@\n如果确认有 Artifact，请尝试下拉刷新页面后再点击", 
+                NSString *debugInfo = [NSString stringWithFormat:@"Run ID: %@\nToken: %@\n\n如果确认 Artifact 已生成，请尝试：\n1. 下拉刷新 GitHub 页面\n2. 重新进入本页面再点击悬浮球", 
                                       g_currentRunId, g_currentToken ? @"已获取" : @"未获取"];
                 gh_alert(@"该 Workflow Run 没有 Artifacts", debugInfo); return;
             }
@@ -907,7 +924,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.4");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.4.1");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
