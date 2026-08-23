@@ -257,6 +257,68 @@ didCompleteWithError:(NSError *)error {
     return cell;
 }
 
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSArray *records = [GHAHistory records];
+    if (indexPath.row >= records.count) return;
+    NSDictionary *rec = records[indexPath.row];
+    NSString *name = rec[@"name"];
+
+    // 在临时目录查找该文件
+    NSString *tmpDir = NSTemporaryDirectory();
+    NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    NSString *fileName = [NSString stringWithFormat:@"%@.zip", safeName];
+    NSString *path = [tmpDir stringByAppendingPathComponent:fileName];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) {
+        // 尝试带序号的
+        for (NSInteger i = 1; i < 100; i++) {
+            NSString *base = [safeName stringByAppendingFormat:@"_%ld", (long)i];
+            fileName = [NSString stringWithFormat:@"%@.zip", base];
+            NSString *tryPath = [tmpDir stringByAppendingPathComponent:fileName];
+            if ([fm fileExistsAtPath:tryPath]) {
+                path = tryPath;
+                break;
+            }
+        }
+    }
+
+    if (![fm fileExistsAtPath:path]) {
+        gh_alert(@"错误", @"文件已被删除或已过期");
+        return;
+    }
+
+    NSURL *fileURL = [NSURL fileURLWithPath:path];
+    UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
+                                                                           applicationActivities:nil];
+    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        activity.popoverPresentationController.sourceView = cell;
+        activity.popoverPresentationController.sourceRect = cell.bounds;
+    }
+    [self presentViewController:activity animated:YES completion:nil];
+}
+
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
+    return YES;
+}
+
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return UITableViewCellEditingStyleDelete;
+}
+
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (editingStyle == UITableViewCellEditingStyleDelete) {
+        NSMutableArray *records = [GHAHistory loadRecords];
+        if (indexPath.row < records.count) {
+            [records removeObjectAtIndex:indexPath.row];
+            [GHAHistory saveRecords:records];
+            [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
+        }
+    }
+}
+
 @end
 
 // ========== 设置 VC ==========
@@ -474,10 +536,20 @@ didCompleteWithError:(NSError *)error {
             NSString *fileName = [NSString stringWithFormat:@"%@.zip", safeName];
             NSString *destPath = [tmpDir stringByAppendingPathComponent:fileName];
 
+            // 不覆盖：如果存在则加序号
             NSFileManager *fm = [NSFileManager defaultManager];
-            [fm removeItemAtPath:destPath error:nil];
+            NSInteger counter = 1;
+            NSString *finalPath = destPath;
+            while ([fm fileExistsAtPath:finalPath]) {
+                NSString *base = [safeName stringByAppendingFormat:@"_%ld", (long)counter];
+                fileName = [NSString stringWithFormat:@"%@.zip", base];
+                finalPath = [tmpDir stringByAppendingPathComponent:fileName];
+                counter++;
+            }
+
             NSError *copyErr = nil;
-            [fm copyItemAtPath:location.path toPath:destPath error:&copyErr];
+            [fm copyItemAtPath:location.path toPath:finalPath error:&copyErr];
+            NSString *destPath = finalPath;
             if (copyErr) { gh_alert(@"错误", @"保存文件失败"); return; }
 
             NSURL *fileURL = [NSURL fileURLWithPath:destPath];
