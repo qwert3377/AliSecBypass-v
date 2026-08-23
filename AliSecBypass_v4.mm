@@ -231,13 +231,9 @@ didCompleteWithError:(NSError *)error {
 
 - (void)clear {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清空历史"
-                                                                   message:@"请选择清空方式"
+                                                                   message:@"确定要清空所有下载记录吗？"
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
-    [alert addAction:[UIAlertAction actionWithTitle:@"仅清空记录" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [GHAHistory clear];
-        [self.tableView reloadData];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"清空并删除文件" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         NSArray *records = [GHAHistory records];
         NSFileManager *fm = [NSFileManager defaultManager];
         for (NSDictionary *rec in records) {
