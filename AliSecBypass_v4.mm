@@ -11,7 +11,7 @@ static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
-static NSString *g_currentBuildNumber = nil;  // Build 号如 #142
+// Build 号由 GHAArtifactListVC 持有
 static UIView *g_floatingView = nil;
 static const char kGHAssocKey = 0;
 
@@ -403,6 +403,7 @@ didCompleteWithError:(NSError *)error {
 // ========== Artifact 列表 VC ==========
 @interface GHAArtifactListVC : UITableViewController
 @property (nonatomic, strong) NSArray *artifacts;
+@property (nonatomic, copy) NSString *buildNumber;
 @property (nonatomic, strong) UIProgressView *progressView;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) NSURLSessionDownloadTask *currentTask;
@@ -413,7 +414,11 @@ didCompleteWithError:(NSError *)error {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Artifacts";
+    if (self.buildNumber && self.buildNumber.length > 0) {
+        self.title = [NSString stringWithFormat:@"Artifacts (#%@)", self.buildNumber];
+    } else {
+        self.title = @"Artifacts";
+    }
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
 
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
@@ -537,7 +542,17 @@ didCompleteWithError:(NSError *)error {
 
             NSString *tmpDir = NSTemporaryDirectory();
             NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
-            NSString *fileName = [NSString stringWithFormat:@"%@.zip", safeName];
+
+            // Build 号后缀
+            NSString *buildNum = self.buildNumber;
+            if (!buildNum || buildNum.length == 0) {
+                NSDateFormatter *df = [[NSDateFormatter alloc] init];
+                df.dateFormat = @"MMdd_HHmm";
+                buildNum = [df stringFromDate:[NSDate date]];
+            }
+            NSString *buildSuffix = [NSString stringWithFormat:@"_#%@", buildNum];
+
+            NSString *fileName = [NSString stringWithFormat:@"%@%@.zip", safeName, buildSuffix];
             NSString *destPath = [tmpDir stringByAppendingPathComponent:fileName];
 
             // 不覆盖：如果存在则加序号
@@ -545,7 +560,7 @@ didCompleteWithError:(NSError *)error {
             NSInteger counter = 1;
             NSString *finalPath = destPath;
             while ([fm fileExistsAtPath:finalPath]) {
-                NSString *base = [safeName stringByAppendingFormat:@"_%ld", (long)counter];
+                NSString *base = [safeName stringByAppendingFormat:@"%@_%ld", buildSuffix, (long)counter];
                 fileName = [NSString stringWithFormat:@"%@.zip", base];
                 finalPath = [tmpDir stringByAppendingPathComponent:fileName];
                 counter++;
@@ -686,6 +701,7 @@ didCompleteWithError:(NSError *)error {
     }
 
     // Step 1: 获取 Build 号 (run_number)
+    __block NSString *buildNumLocal = nil;
     NSString *runUrlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
                            g_currentOwner, g_currentRepo, g_currentRunId];
     NSMutableURLRequest *runReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:runUrlStr]];
@@ -693,6 +709,7 @@ didCompleteWithError:(NSError *)error {
     [runReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [runReq setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
 
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
     NSURLSessionDataTask *runTask = [[NSURLSession sharedSession] dataTaskWithRequest:runReq
                                                                     completionHandler:^(NSData *runData, NSURLResponse *runResponse, NSError *runError) {
         if (!runError && runData && runData.length > 0) {
@@ -700,13 +717,23 @@ didCompleteWithError:(NSError *)error {
             if (runJson && [runJson isKindOfClass:[NSDictionary class]]) {
                 NSNumber *runNumber = runJson[@"run_number"];
                 if (runNumber) {
-                    g_currentBuildNumber = [runNumber stringValue];
-                    gh_log("BUILD", [g_currentBuildNumber UTF8String]);
+                    buildNumLocal = [runNumber stringValue];
+                    gh_log("BUILD", [buildNumLocal UTF8String]);
+                } else {
+                    gh_log("BUILD", "run_number not found in response");
                 }
+            } else {
+                gh_log("BUILD", "Invalid JSON response");
             }
+        } else {
+            gh_log("BUILD", [[NSString stringWithFormat:@"API error: %@", runError.localizedDescription] UTF8String]);
         }
+        dispatch_semaphore_signal(semaphore);
+    }];
+    [runTask resume];
+    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
 
-        // Step 2: 获取 Artifact 列表
+    // Step 2: 获取 Artifact 列表
         NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
                             g_currentOwner, g_currentRepo, g_currentRunId];
         NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
