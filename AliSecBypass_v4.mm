@@ -24,8 +24,8 @@ static void downloadArtifact(id self, SEL _cmd);
 static void extractWorkflowRunInfo(id obj) {
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)obj;
-        NSString *typename = dict[@"__typename"];
-        if ([typename isEqualToString:@"WorkflowRun"]) {
+        NSString *typeName = dict[@"__typename"];
+        if ([typeName isEqualToString:@"WorkflowRun"]) {
             NSString *url = dict[@"url"];
             NSDictionary *repo = dict[@"repository"];
             if (url && [url isKindOfClass:[NSString class]] && repo && [repo isKindOfClass:[NSDictionary class]]) {
@@ -222,7 +222,6 @@ static void hook_vdl(id self, SEL _cmd) {
 
 __attribute__((constructor))
 static void gh_init() {
-    // Hook NSJSONSerialization +JSONObjectWithData:options:error:
     Class jsonCls = objc_getClass("NSJSONSerialization");
     if (jsonCls) {
         Method m = class_getClassMethod(jsonCls, @selector(JSONObjectWithData:options:error:));
@@ -232,7 +231,6 @@ static void gh_init() {
         }
     }
 
-    // Hook Actions.WorkflowRunViewController -viewDidLoad
     Class vcCls = objc_getClass("Actions.WorkflowRunViewController");
     if (!vcCls) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
