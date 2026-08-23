@@ -261,7 +261,7 @@ didCompleteWithError:(NSError *)error {
     UIViewController *top = gh_topViewController();
     if (top) [top presentViewController:progressAlert animated:YES completion:nil];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:url
+    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:url
                                                                  completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [progressAlert dismissViewControllerAnimated:YES completion:nil];
