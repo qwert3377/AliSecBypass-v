@@ -499,11 +499,43 @@ didCompleteWithError:(NSError *)error {
     });
 }
 
+- (NSString *)localFilePathForArtifactName:(NSString *)name {
+    NSString *tmpDir = NSTemporaryDirectory();
+    NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    NSString *buildNum = self.buildNumber;
+    if (!buildNum || buildNum.length == 0) {
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MMdd_HHmm";
+        buildNum = [df stringFromDate:[NSDate date]];
+    }
+    NSString *buildSuffix = [NSString stringWithFormat:@"_#%@", buildNum];
+    NSString *fileName = [NSString stringWithFormat:@"%@%@.zip", safeName, buildSuffix];
+    NSString *path = [tmpDir stringByAppendingPathComponent:fileName];
+    return path;
+}
+
 - (void)downloadArtifactAtIndex:(NSInteger)index {
     NSDictionary *art = self.artifacts[index];
     NSString *name = art[@"name"];
     NSString *downloadUrl = art[@"archive_download_url"];
     if (!downloadUrl) { gh_alert(@"错误", @"下载链接为空"); return; }
+
+    // 先检查本地是否已有该文件
+    NSString *localPath = [self localFilePathForArtifactName:name];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:localPath]) {
+        // 文件已存在，直接分享
+        NSURL *fileURL = [NSURL fileURLWithPath:localPath];
+        UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
+                                                                               applicationActivities:nil];
+        if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+            UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:index inSection:0]];
+            activity.popoverPresentationController.sourceView = cell;
+            activity.popoverPresentationController.sourceRect = cell.bounds;
+        }
+        [self presentViewController:activity animated:YES completion:nil];
+        return;
+    }
 
     [self showProgress:@"获取下载链接..."];
 
