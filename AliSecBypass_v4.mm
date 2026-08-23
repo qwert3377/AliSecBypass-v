@@ -11,6 +11,7 @@ static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
 static UIView *g_floatingView = nil;
+static const char kGHTimerKey = 0;
 
 static void gh_log(const char *tag, const char *msg) {
     NSLog(@"[GHAD][%s] %s", tag, msg);
@@ -304,7 +305,6 @@ didCompleteWithError:(NSError *)error {
     }];
 
     // 进度定时器
-    static const char kTimerKey;
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
         if (self.currentTask.countOfBytesExpectedToReceive > 0) {
             float p = (float)self.currentTask.countOfBytesReceived / (float)self.currentTask.countOfBytesExpectedToReceive;
@@ -317,7 +317,7 @@ didCompleteWithError:(NSError *)error {
             [t invalidate];
         }
     }];
-    objc_setAssociatedObject(self.currentTask, &kTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self.currentTask, &kGHTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     [self.currentTask resume];
 }
