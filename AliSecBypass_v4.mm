@@ -1,648 +1,258 @@
-// WorkingCopy_CN_VIP_v1.mm
-// TrollStore 注入用，纯 Runtime Hook
-// 功能：VIP 解锁 + 中文汉化
-// 日志写入 App Documents/wc_cn_log.txt
+//
+// GitHubArtifactDownloader.mm
+// 纯 ObjC Runtime，无 Logos，用于 TrollStore 注入
+// 功能：在 GitHub App 的 Actions Run 详情页注入 Artifact 下载按钮
+//
 
 #import <objc/runtime.h>
-#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <Foundation/Foundation.h>
 
-#pragma mark - 文件日志
+#pragma mark - Global Cache
 
-static NSString *logPath = nil;
+static NSString *g_runURL     = nil;
+static NSString *g_owner        = nil;
+static NSString *g_repo         = nil;
+static CFAbsoluteTime g_cacheTime = 0;
 
-static void wcLog(NSString *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
-    va_end(args);
-    NSLog(@"[WC-CN] %@", msg);
-    if (logPath) {
-        NSString *line = [NSString stringWithFormat:@"%@ [WC-CN] %@\n", [NSDate date], msg];
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        if (fh) {
-            [fh seekToEndOfFile];
-            [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-        } else {
-            [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+#pragma mark - Forward Declarations
+
+static void downloadArtifact(id self, SEL _cmd);
+
+#pragma mark - JSON Scanner (called by hook_JSON)
+
+static void extractWorkflowRunInfo(id obj) {
+    if ([obj isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)obj;
+        NSString *typename = dict[@"__typename"];
+        if ([typename isEqualToString:@"WorkflowRun"]) {
+            NSString *url = dict[@"url"];
+            NSDictionary *repo = dict[@"repository"];
+            if (url && [url isKindOfClass:[NSString class]] && repo && [repo isKindOfClass:[NSDictionary class]]) {
+                NSString *repoName = repo[@"name"];
+                NSDictionary *owner = repo[@"owner"];
+                NSString *ownerLogin = owner[@"login"];
+                if (repoName && ownerLogin) {
+                    g_runURL  = [url copy];
+                    g_repo    = [repoName copy];
+                    g_owner   = [ownerLogin copy];
+                    g_cacheTime = CFAbsoluteTimeGetCurrent();
+                    NSLog(@"[GHArtifact] Cached: %@/%@ run=%@", ownerLogin, repoName, url);
+                    return;
+                }
+            }
+        }
+        for (id key in dict) {
+            extractWorkflowRunInfo(dict[key]);
+        }
+    } else if ([obj isKindOfClass:[NSArray class]]) {
+        NSArray *arr = (NSArray *)obj;
+        for (id item in arr) {
+            extractWorkflowRunInfo(item);
         }
     }
 }
 
-static void initLog() {
-    NSString *home = NSHomeDirectory();
-    NSString *docs = [home stringByAppendingPathComponent:@"Documents"];
-    logPath = [docs stringByAppendingPathComponent:@"wc_cn_log.txt"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:docs
-        withIntermediateDirectories:YES attributes:nil error:nil];
-    [@"" writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    wcLog(@"日志初始化完成: %@", logPath);
+#pragma mark - UI Helpers
+
+static void showAlert(id self, NSString *title, NSString *message) {
+    UIViewController *vc = (UIViewController *)self;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [vc presentViewController:alert animated:YES completion:nil];
 }
 
-#pragma mark - 翻译字典
-
-static NSDictionary *cnDict = nil;
-
-static void initTranslations() {
-    cnDict = @{
-        // === 导航栏 & 标题 ===
-        @"Repositories": @"仓库",
-        @"Settings": @"设置",
-        @"Logs": @"日志",
-        @"Unlock": @"解锁",
-        @"Commit Log": @"提交日志",
-        @"List status": @"列出状态",
-        @"Repository status": @"仓库状态",
-        @"Detail": @"详情",
-        @"Configuration": @"配置",
-        @"Popup": @"弹出窗口",
-
-        // === 仓库页 ===
-        @"welcome to": @"欢迎使用",
-        @"tap to learn more": @"点击了解更多",
-        @"Add folder": @"添加文件夹",
-        @"Clone repository": @"克隆仓库",
-        @"Link external directory": @"链接外部目录",
-        @"Initialize new repository": @"初始化新仓库",
-        @"No repository selected": @"未选择仓库",
-        @"You can create new Git repositories by initializing new ones or by cloning from remote.":
-            @"你可以通过初始化新仓库或从远程克隆来创建 Git 仓库。",
-        @"Recent": @"最近",
-
-        // === 仓库详情 & 文件列表 ===
-        @"Repository": @"仓库",
-        @"Status and Configuration": @"状态与配置",
-        @"Show only:": @"仅显示：",
-        @"Modified": @"已修改",
-        @"filename, symbol or text": @"文件名、符号或文本",
-
-        // === Git 操作菜单 ===
-        @"Commit": @"提交",
-        @"Revert": @"撤销",
-        @"Merge": @"合并",
-        @"Fetch": @"获取",
-        @"Pull": @"拉取",
-        @"Push": @"推送",
-
-        // === + 号菜单 ===
-        @"Create Text File": @"创建文本文件",
-        @"Create Directory": @"创建目录",
-        @"File from clipboard": @"从剪贴板导入文件",
-        @"Import files": @"导入文件",
-        @"Import images": @"导入图片",
-
-        // === 仓库详情 ===
-        @"Branch": @"分支",
-        @"Tags": @"标签",
-        @"Submodules": @"子模块",
-        @"Remote": @"远程",
-        @"Remotes": @"远程",
-        @"Add Remote": @"添加远程",
-        @"Clone Submodule": @"克隆子模块",
-        @"Delete Repository": @"删除仓库",
-        @"Identity not configured": @"身份信息未配置",
-        @"Should not be used": @"不应使用",
-        @"merge in progress": @"合并进行中",
-        @"None": @"无",
-        @"Rename": @"重命名",
-        @"Current": @"当前",
-        @"HEAD": @"HEAD",
-        @"Create": @"创建",
-
-        // === 操作按钮 ===
-        @"  REVERT  ": @"  撤销  ",
-        @"  RESOLVE  ": @"  解决  ",
-        @"  COMMIT  ": @"  提交  ",
-        @"REVERT": @"撤销",
-        @"RESOLVE": @"解决",
-        @"COMMIT": @"提交",
-        @"Delete from iPhone": @"从 iPhone 删除",
-        @"Synchronize": @"同步",
-        @"GitHub Page": @"GitHub 页面",
-        @"Non-editing": @"非编辑模式",
-        @"Editing": @"编辑模式",
-        @" Commit": @" 提交",
-        @" Resolve Conflicts": @" 解决冲突",
-        @" Revert changes": @" 撤销更改",
-
-        // === 状态 & 提示 ===
-        @"No changes": @"无更改",
-        @"Status": @"状态",
-        @"Cancel": @"取消",
-        @"Clone": @"克隆",
-        @"Done": @"完成",
-
-        // === 克隆/初始化页面 ===
-        @"Initialize repository": @"初始化仓库",
-        @"Repository Name": @"仓库名称",
-        @"Describe your project in the README file.": @"在 README 文件中描述你的项目。",
-        @"This can be changed later.": @"以后可以修改。",
-        @"git, http, https and ssh supported": @"支持 git、http、https 和 ssh",
-        @"Protocol": @"协议",
-        @"User": @"用户",
-        @"tap to set": @"点击设置",
-        @"Host": @"主机",
-        @"Port": @"端口",
-        @"leave empty for default": @"留空使用默认值",
-        @"Path": @"路径",
-        @"SSH Key": @"SSH 密钥",
-        @"Automatic": @"自动",
-        @"Off": @"关闭",
-
-        // === 设置页 ===
-        @"Color Scheme": @"配色方案",
-        @"Auto": @"自动",
-        @"Dark": @"深色",
-        @"Light": @"浅色",
-        @"AI Completion": @"AI 补全",
-        @"GPT code & text completion": @"GPT 代码与文本补全",
-        @"App Integrations": @"应用集成",
-        @"x-callback-url disabled": @"x-callback-url 已禁用",
-        @"Authentication Cookies": @"认证 Cookie",
-        @"Alternative way to authorize http transfers": @"授权 HTTP 传输的替代方式",
-        @"Hosting Providers": @"托管服务商",
-        @"Integration with Git & Cloud providers": @"与 Git 和云服务商集成",
-        @"Identities": @"身份信息",
-        @"Name & Email addresses for commits": @"提交用的姓名和邮箱",
-        @"Screen Lock": @"屏幕锁定",
-        @"Protect your repositories": @"保护你的仓库",
-        @"SSH Keys": @"SSH 密钥",
-        @"Authorizes secure shell transfers": @"授权安全 Shell 传输",
-        @"Pro Capabilities Unlocked": @"专业功能已解锁",
-        @"All Pro features available": @"所有专业功能可用",
-        @"WebDAV Server": @"WebDAV 服务器",
-        @"Not currently running": @"当前未运行",
-        @"Newsletter": @"新闻通讯",
-        @"Occasional announcements": @"不定期公告",
-        @"Sign Up": @"订阅",
-        @"Rate Working Copy": @"评价 Working Copy",
-        @"Review": @"评价",
-        @"Source Files": @"源代码",
-        @"Git API client from same developer": @"同一开发者的 Git API 客户端",
-        @"App Store": @"App Store",
-        @"Users Guide": @"用户指南",
-        @"Show when updated": @"更新时显示",
-        @"Release notes on updates": @"更新时的发布说明",
-        @"License": @"许可证",
-
-        // === 解锁页面 ===
-        @"All Pro features in Working Copy are available.": @"Working Copy 的所有专业功能已可用。",
-        @"Features": @"功能",
-        @"One-time trial unlock for 10 days": @"一次性试用解锁 10 天",
-        @"Unlock for all your devices": @"为你的所有设备解锁",
-        @"unlocked features are permanent": @"解锁的功能是永久的",
-        @"Purchased": @"已购买",
-        @"Restore previous purchase": @"恢复之前的购买",
-        @"Free": @"免费",
-        @"Since 2014 Working Copy has pushed the limits of developer tools on iOS which is possible because the Pro Unlock pays my salary.":
-            @"自 2014 年以来，Working Copy 不断突破 iOS 开发者工具的极限，这得益于专业版解锁功能支付了我的薪水。",
-        @"Thank you for supporting this effort.": @"感谢你支持这项工作。",
-        @"Anders Borum": @"Anders Borum",
-
-        // === 库/依赖页面 ===
-        @"stunning lib used for Git manipulation": @"用于 Git 操作的优秀库",
-        @"SSH protocol support": @"SSH 协议支持",
-        @"incremental syntax highlighting": @"增量语法高亮",
-        @"syntax highlighting": @"语法高亮",
-        @"runs the internal WebDAV server": @"运行内部 WebDAV 服务器",
-        @"renders markdown": @"渲染 Markdown",
-        @"commit signing": @"提交签名",
-        @"used to work with zip files": @"用于处理 zip 文件",
-        @"renders AsciiDoc preview": @"渲染 AsciiDoc 预览",
-        @"monospace font with high Unicode coverage": @"高 Unicode 覆盖的等宽字体",
-        @"monospace font with programming ligatures": @"带编程连字的等宽字体",
-        @"beautiful monospace font by Raph Levien": @"Raph Levien 设计的优美等宽字体",
-        @"coding font by Paul D. Hunt": @"Paul D. Hunt 设计的编程字体",
-
-        // === 通用 ===
-        @"Folder": @"文件夹",
-        @"Open": @"打开",
-        @"Save": @"保存",
-        @"Delete": @"删除",
-        @"Edit": @"编辑",
-        @"Preview": @"预览",
-        @"History": @"历史",
-        @"Search": @"搜索",
-        @"Replace": @"替换",
-        @"Find": @"查找",
-        @"Select All": @"全选",
-        @"Undo": @"撤销",
-        @"Redo": @"重做",
-        @"Cut": @"剪切",
-        @"Paste": @"粘贴",
-        @"Copy": @"复制",
-        @"More": @"更多",
-        @"Info": @"信息",
-        @"Close": @"关闭",
-        @"Discard": @"放弃",
-        @"Apply": @"应用",
-        @"OK": @"确定",
-        @"Yes": @"是",
-        @"No": @"否",
-        @"Continue": @"继续",
-        @"Back": @"返回",
-        @"Next": @"下一步",
-        @"Previous": @"上一步",
-        @"Finish": @"完成",
-        @"Start": @"开始",
-        @"Stop": @"停止",
-        @"Refresh": @"刷新",
-        @"Reload": @"重新加载",
-        @"Clear": @"清除",
-        @"Reset": @"重置",
-        @"Restore": @"恢复",
-        @"Download": @"下载",
-        @"Upload": @"上传",
-        @"Export": @"导出",
-        @"Import": @"导入",
-        @"Print": @"打印",
-        @"Add": @"添加",
-        @"Remove": @"移除",
-        @"View": @"查看",
-        @"Sort by": @"排序方式",
-        @"Name": @"名称",
-        @"Date": @"日期",
-        @"Size": @"大小",
-        @"Type": @"类型",
-        @"All": @"全部",
-        @"Default": @"默认",
-        @"Custom": @"自定义",
-        @"General": @"通用",
-        @"Advanced": @"高级",
-        @"About": @"关于",
-        @"Help": @"帮助",
-        @"Feedback": @"反馈",
-        @"Version": @"版本",
-        @"Developer": @"开发者",
-        @"Credits": @"致谢",
-        @"Libraries": @"库",
-        @"Tools": @"工具",
-        @"Security": @"安全",
-        @"Privacy": @"隐私",
-        @"Notifications": @"通知",
-        @"Language": @"语言",
-        @"Keyboard": @"键盘",
-        @"Display": @"显示",
-        @"Brightness": @"亮度",
-    };
-}
-
-static NSString *translateText(NSString *text) {
-    if (!text || text.length == 0) return text;
-    NSString *cn = [cnDict objectForKey:text];
-    if (cn) return cn;
-    // 格式化字符串匹配
-    if ([text hasPrefix:@"Fetching most recent "] && [text hasSuffix:@" commits."]) {
-        NSRange r = [text rangeOfString:@"Fetching most recent "];
-        NSRange r2 = [text rangeOfString:@" commits."];
-        if (r.location != NSNotFound && r2.location != NSNotFound) {
-            NSString *num = [text substringWithRange:NSMakeRange(r.location + r.length, r2.location - (r.location + r.length))];
-            return [NSString stringWithFormat:@"正在获取最近的 %@ 条提交...", num];
+static void showPATInput(id self) {
+    UIViewController *vc = (UIViewController *)self;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GitHub Token"
+                                                                   message:@"请输入 Personal Access Token（需 repo 权限）"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"ghp_xxxxxxxxxxxx";
+        tf.secureTextEntry = YES;
+        tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"保存并下载"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        NSString *token = alert.textFields.firstObject.text;
+        if (token && token.length > 10) {
+            [[NSUserDefaults standardUserDefaults] setObject:token forKey:@"GHArtifactPAT"];
+            downloadArtifact(self, @selector(gh_downloadArtifact));
         }
+    }]];
+    [vc presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Network Download
+
+static void downloadZip(id self, NSString *pat, NSNumber *artId, NSString *artName) {
+    NSString *api = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/artifacts/%@/zip",
+                     g_owner, g_repo, artId];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:api]];
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", pat] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:req
+        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error || !location) {
+                showAlert(self, @"下载失败", error ? error.localizedDescription : @"未知错误");
+                return;
+            }
+            NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
+            NSString *runId = [g_runURL lastPathComponent];
+            NSString *filename = [NSString stringWithFormat:@"%@-%@-%@.zip", g_repo, runId, artName];
+            NSString *dest = [docs stringByAppendingPathComponent:filename];
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if ([fm fileExistsAtPath:dest]) {
+                [fm removeItemAtPath:dest error:nil];
+            }
+            NSError *moveErr = nil;
+            [fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:dest] error:&moveErr];
+            if (moveErr) {
+                showAlert(self, @"保存失败", moveErr.localizedDescription);
+                return;
+            }
+
+            UIViewController *vc = (UIViewController *)self;
+            UIActivityViewController *activity = [[UIActivityViewController alloc]
+                initWithActivityItems:@[[NSURL fileURLWithPath:dest]]
+                applicationActivities:nil];
+            if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+                activity.popoverPresentationController.sourceView = vc.view;
+                activity.popoverPresentationController.sourceRect =
+                    CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 0, 0);
+            }
+            [vc presentViewController:activity animated:YES completion:nil];
+        });
+    }];
+    [task resume];
+}
+
+static void downloadArtifact(id self, SEL _cmd) {
+    NSString *pat = [[NSUserDefaults standardUserDefaults] stringForKey:@"GHArtifactPAT"];
+    if (!pat || pat.length < 10) {
+        showPATInput(self);
+        return;
     }
-    if ([text hasPrefix:@"Fetching next "] && [text hasSuffix:@" commits."]) {
-        NSRange r = [text rangeOfString:@"Fetching next "];
-        NSRange r2 = [text rangeOfString:@" commits."];
-        if (r.location != NSNotFound && r2.location != NSNotFound) {
-            NSString *num = [text substringWithRange:NSMakeRange(r.location + r.length, r2.location - (r.location + r.length))];
-            return [NSString stringWithFormat:@"正在获取接下来的 %@ 条提交...", num];
+    if (!g_runURL || !g_owner || !g_repo) {
+        showAlert(self, @"未获取到 Run 信息", @"请等待页面加载完成，或重新进入 Actions 详情页");
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_cacheTime > 120) {
+        showAlert(self, @"缓存已过期", @"请重新进入 Actions 详情页以刷新数据");
+        return;
+    }
+
+    NSString *runId = [g_runURL lastPathComponent];
+    NSString *api = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
+                     g_owner, g_repo, runId];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:api]];
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", pat] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                showAlert(self, @"请求失败", error.localizedDescription);
+                return;
+            }
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSArray *artifacts = json[@"artifacts"];
+            if (!artifacts || artifacts.count == 0) {
+                showAlert(self, @"无 Artifacts", @"该 Run 没有生成 Artifact");
+                return;
+            }
+            NSDictionary *first = artifacts[0];
+            NSNumber *artId = first[@"id"];
+            NSString *artName = first[@"name"] ?: @"artifact";
+            if (!artId) {
+                showAlert(self, @"解析失败", @"无法获取 Artifact ID");
+                return;
+            }
+            downloadZip(self, pat, artId, artName);
+        });
+    }];
+    [task resume];
+}
+
+#pragma mark - Hooks
+
+static id (*orig_JSON)(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err);
+
+static id hook_JSON(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err) {
+    id result = orig_JSON(self, _cmd, data, opt, err);
+    if (result && data && [data length] > 50 && [data length] < 100000) {
+        NSString *preview = [[NSString alloc] initWithData:
+            [data subdataWithRange:NSMakeRange(0, MIN(1024, data.length))]
+                                                    encoding:NSUTF8StringEncoding];
+        if (preview && ([preview containsString:@"WorkflowRun"] || [preview containsString:@"workflowRun"])) {
+            extractWorkflowRunInfo(result);
         }
-    }
-    if ([text hasPrefix:@"Commits "]) {
-        NSString *datePart = [text substringFromIndex:8];
-        return [NSString stringWithFormat:@"提交记录 %@", datePart];
-    }
-    if ([text hasPrefix:@"Delete from "]) {
-        NSString *device = [text substringFromIndex:12];
-        return [NSString stringWithFormat:@"从 %@ 删除", device];
-    }
-    return text;
-}
-
-#pragma mark - VIP Hooks (原有)
-
-static IMP orig_allowedFeature = NULL;
-static IMP orig_runningTrial = NULL;
-static IMP orig_trialDaysLeft = NULL;
-static IMP orig_unlimitedReposAllowed = NULL;
-static IMP orig_latestTrialPurchased = NULL;
-
-static BOOL new_allowedFeature(id self, SEL _cmd, id feature, BOOL missingValue, BOOL allowTrial) { return YES; }
-static BOOL new_runningTrial(id self, SEL _cmd) { return YES; }
-static NSInteger new_trialDaysLeft(id self, SEL _cmd) { return 999; }
-static BOOL new_unlimitedReposAllowed(id self, SEL _cmd) { return YES; }
-static BOOL new_latestTrialPurchased(id self, SEL _cmd) { return YES; }
-
-static IMP orig_lockedFeatures = NULL;
-static IMP orig_quickAllowed = NULL;
-static IMP orig_proFeatureTip = NULL;
-static IMP orig_upgradeReason = NULL;
-
-static id new_lockedFeatures(id self, SEL _cmd) { return [NSArray array]; }
-static BOOL new_quickAllowed(id self, SEL _cmd, id year) { return YES; }
-static id new_proFeatureTip(id self, SEL _cmd) { return nil; }
-static id new_upgradeReason(id self, SEL _cmd) { return nil; }
-
-static IMP orig_trialCanBeStarted = NULL;
-static IMP orig_canPurchasePush = NULL;
-static IMP orig_receiptRead = NULL;
-static IMP orig_purchasesBeingMade = NULL;
-
-static BOOL new_trialCanBeStarted(id self, SEL _cmd) { return YES; }
-static BOOL new_canPurchasePush(id self, SEL _cmd) { return YES; }
-static BOOL new_receiptRead(id self, SEL _cmd) { return YES; }
-static BOOL new_purchasesBeingMade(id self, SEL _cmd) { return NO; }
-
-static void hookVIP() {
-    Class cls1 = objc_getClass("PaymentStatus");
-    if (cls1) {
-        Method m;
-        m = class_getInstanceMethod(cls1, @selector(allowedFeature:missingValue:allowTrial:));
-        if (m && !orig_allowedFeature) { orig_allowedFeature = method_setImplementation(m, (IMP)new_allowedFeature); wcLog(@"✅ PaymentStatus.allowedFeature"); }
-        m = class_getInstanceMethod(cls1, @selector(runningTrial));
-        if (m && !orig_runningTrial) { orig_runningTrial = method_setImplementation(m, (IMP)new_runningTrial); wcLog(@"✅ PaymentStatus.runningTrial"); }
-        m = class_getInstanceMethod(cls1, @selector(trialDaysLeft));
-        if (m && !orig_trialDaysLeft) { orig_trialDaysLeft = method_setImplementation(m, (IMP)new_trialDaysLeft); wcLog(@"✅ PaymentStatus.trialDaysLeft"); }
-        m = class_getInstanceMethod(cls1, @selector(unlimitedReposAllowedByDownloadDate));
-        if (m && !orig_unlimitedReposAllowed) { orig_unlimitedReposAllowed = method_setImplementation(m, (IMP)new_unlimitedReposAllowed); wcLog(@"✅ PaymentStatus.unlimitedReposAllowedByDownloadDate"); }
-        m = class_getInstanceMethod(cls1, @selector(latestTrialPurchased));
-        if (m && !orig_latestTrialPurchased) { orig_latestTrialPurchased = method_setImplementation(m, (IMP)new_latestTrialPurchased); wcLog(@"✅ PaymentStatus.latestTrialPurchased"); }
-    }
-    Class cls2 = objc_getClass("AppFeature");
-    if (cls2) {
-        Method m;
-        m = class_getInstanceMethod(cls2, @selector(lockedFeatures));
-        if (m && !orig_lockedFeatures) { orig_lockedFeatures = method_setImplementation(m, (IMP)new_lockedFeatures); wcLog(@"✅ AppFeature.lockedFeatures"); }
-        m = class_getInstanceMethod(cls2, @selector(quickAllowedForEnterpriseYear:));
-        if (m && !orig_quickAllowed) { orig_quickAllowed = method_setImplementation(m, (IMP)new_quickAllowed); wcLog(@"✅ AppFeature.quickAllowedForEnterpriseYear"); }
-        m = class_getInstanceMethod(cls2, @selector(proFeatureTip));
-        if (m && !orig_proFeatureTip) { orig_proFeatureTip = method_setImplementation(m, (IMP)new_proFeatureTip); wcLog(@"✅ AppFeature.proFeatureTip"); }
-        m = class_getInstanceMethod(cls2, @selector(upgradeReasonMessage));
-        if (m && !orig_upgradeReason) { orig_upgradeReason = method_setImplementation(m, (IMP)new_upgradeReason); wcLog(@"✅ AppFeature.upgradeReasonMessage"); }
-    }
-    Class cls3 = objc_getClass("Payment");
-    if (cls3) {
-        Method m;
-        m = class_getInstanceMethod(cls3, @selector(trialCanBeStarted));
-        if (m && !orig_trialCanBeStarted) { orig_trialCanBeStarted = method_setImplementation(m, (IMP)new_trialCanBeStarted); wcLog(@"✅ Payment.trialCanBeStarted"); }
-        m = class_getInstanceMethod(cls3, @selector(canPurchasePush));
-        if (m && !orig_canPurchasePush) { orig_canPurchasePush = method_setImplementation(m, (IMP)new_canPurchasePush); wcLog(@"✅ Payment.canPurchasePush"); }
-        m = class_getInstanceMethod(cls3, @selector(receiptRead));
-        if (m && !orig_receiptRead) { orig_receiptRead = method_setImplementation(m, (IMP)new_receiptRead); wcLog(@"✅ Payment.receiptRead"); }
-        m = class_getInstanceMethod(cls3, @selector(purchasesBeingMade));
-        if (m && !orig_purchasesBeingMade) { orig_purchasesBeingMade = method_setImplementation(m, (IMP)new_purchasesBeingMade); wcLog(@"✅ Payment.purchasesBeingMade"); }
-    }
-}
-
-#pragma mark - 中文汉化 Hooks
-
-static IMP orig_labelSetText = NULL;
-static IMP orig_buttonSetTitle = NULL;
-static IMP orig_navItemSetTitle = NULL;
-static IMP orig_vcSetTitle = NULL;
-static IMP orig_bundleLocalizedString = NULL;
-static IMP orig_tfSetPlaceholder = NULL;
-static IMP orig_searchBarSetPlaceholder = NULL;
-static IMP orig_alertActionTitle = NULL;
-static IMP orig_alertControllerTitle = NULL;
-
-static void new_labelSetText(id self, SEL _cmd, id text) {
-    if (text) {
-        NSString *t = translateText(text);
-        if (t != text) text = t;
-    }
-    if (orig_labelSetText) {
-        ((void (*)(id, SEL, id))orig_labelSetText)(self, _cmd, text);
-    }
-}
-
-static void new_buttonSetTitle(id self, SEL _cmd, id title, UIControlState state) {
-    if (title) {
-        NSString *t = translateText(title);
-        if (t != title) title = t;
-    }
-    if (orig_buttonSetTitle) {
-        ((void (*)(id, SEL, id, UIControlState))orig_buttonSetTitle)(self, _cmd, title, state);
-    }
-}
-
-static void new_navItemSetTitle(id self, SEL _cmd, id title) {
-    if (title) {
-        NSString *t = translateText(title);
-        if (t != title) title = t;
-    }
-    if (orig_navItemSetTitle) {
-        ((void (*)(id, SEL, id))orig_navItemSetTitle)(self, _cmd, title);
-    }
-}
-
-static void new_vcSetTitle(id self, SEL _cmd, id title) {
-    if (title) {
-        NSString *t = translateText(title);
-        if (t != title) title = t;
-    }
-    if (orig_vcSetTitle) {
-        ((void (*)(id, SEL, id))orig_vcSetTitle)(self, _cmd, title);
-    }
-}
-
-static id new_bundleLocalizedString(id self, SEL _cmd, id key, id value, id table) {
-    id result = nil;
-    if (orig_bundleLocalizedString) {
-        result = ((id (*)(id, SEL, id, id, id))orig_bundleLocalizedString)(self, _cmd, key, value, table);
-    }
-    if (result) {
-        NSString *t = translateText(result);
-        if (t != result) return t;
     }
     return result;
 }
 
-static void new_tfSetPlaceholder(id self, SEL _cmd, id text) {
-    if (text) {
-        NSString *t = translateText(text);
-        if (t != text) text = t;
-    }
-    if (orig_tfSetPlaceholder) {
-        ((void (*)(id, SEL, id))orig_tfSetPlaceholder)(self, _cmd, text);
-    }
+static void (*orig_vdl)(id self, SEL _cmd);
+
+static void hook_vdl(id self, SEL _cmd) {
+    orig_vdl(self, _cmd);
+    UIViewController *vc = (UIViewController *)self;
+    UIBarButtonItem *dl = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemAction
+                             target:self
+                             action:@selector(gh_downloadArtifact)];
+    NSMutableArray *items = [vc.navigationItem.rightBarButtonItems mutableCopy];
+    if (!items) items = [NSMutableArray array];
+    [items addObject:dl];
+    vc.navigationItem.rightBarButtonItems = items;
 }
 
-static void new_searchBarSetPlaceholder(id self, SEL _cmd, id text) {
-    if (text) {
-        NSString *t = translateText(text);
-        if (t != text) text = t;
-    }
-    if (orig_searchBarSetPlaceholder) {
-        ((void (*)(id, SEL, id))orig_searchBarSetPlaceholder)(self, _cmd, text);
-    }
-}
-
-// UIAlertAction +actionWithTitle:style:handler: 是类方法
-static id new_alertActionWithTitle(id self, SEL _cmd, id title, NSInteger style, id handler) {
-    if (title) {
-        NSString *t = translateText(title);
-        if (t != title) title = t;
-    }
-    if (orig_alertActionTitle) {
-        return ((id (*)(id, SEL, id, NSInteger, id))orig_alertActionTitle)(self, _cmd, title, style, handler);
-    }
-    return nil;
-}
-
-// UIAlertController +alertControllerWithTitle:message:preferredStyle:
-static id new_alertControllerWithTitle(id self, SEL _cmd, id title, id message, NSInteger style) {
-    if (title) {
-        NSString *t = translateText(title);
-        if (t != title) title = t;
-    }
-    if (message) {
-        NSString *t = translateText(message);
-        if (t != message) message = t;
-    }
-    if (orig_alertControllerTitle) {
-        return ((id (*)(id, SEL, id, id, NSInteger))orig_alertControllerTitle)(self, _cmd, title, message, style);
-    }
-    return nil;
-}
-
-static void hookCN() {
-    // UILabel setText:
-    Class UILabelCls = objc_getClass("UILabel");
-    if (UILabelCls) {
-        Method m = class_getInstanceMethod(UILabelCls, @selector(setText:));
-        if (m && !orig_labelSetText) {
-            orig_labelSetText = method_setImplementation(m, (IMP)new_labelSetText);
-            wcLog(@"✅ UILabel.setText:");
-        }
-    }
-
-    // UIButton setTitle:forState:
-    Class UIButtonCls = objc_getClass("UIButton");
-    if (UIButtonCls) {
-        Method m = class_getInstanceMethod(UIButtonCls, @selector(setTitle:forState:));
-        if (m && !orig_buttonSetTitle) {
-            orig_buttonSetTitle = method_setImplementation(m, (IMP)new_buttonSetTitle);
-            wcLog(@"✅ UIButton.setTitle:forState:");
-        }
-    }
-
-    // UINavigationItem setTitle:
-    Class UINavigationItemCls = objc_getClass("UINavigationItem");
-    if (UINavigationItemCls) {
-        Method m = class_getInstanceMethod(UINavigationItemCls, @selector(setTitle:));
-        if (m && !orig_navItemSetTitle) {
-            orig_navItemSetTitle = method_setImplementation(m, (IMP)new_navItemSetTitle);
-            wcLog(@"✅ UINavigationItem.setTitle:");
-        }
-    }
-
-    // UIViewController setTitle:
-    Class UIViewControllerCls = objc_getClass("UIViewController");
-    if (UIViewControllerCls) {
-        Method m = class_getInstanceMethod(UIViewControllerCls, @selector(setTitle:));
-        if (m && !orig_vcSetTitle) {
-            orig_vcSetTitle = method_setImplementation(m, (IMP)new_vcSetTitle);
-            wcLog(@"✅ UIViewController.setTitle:");
-        }
-    }
-
-    // NSBundle localizedStringForKey:value:table:
-    Class NSBundleCls = objc_getClass("NSBundle");
-    if (NSBundleCls) {
-        Method m = class_getInstanceMethod(NSBundleCls, @selector(localizedStringForKey:value:table:));
-        if (m && !orig_bundleLocalizedString) {
-            orig_bundleLocalizedString = method_setImplementation(m, (IMP)new_bundleLocalizedString);
-            wcLog(@"✅ NSBundle.localizedStringForKey:value:table:");
-        }
-    }
-
-    // UITextField setPlaceholder:
-    Class UITextFieldCls = objc_getClass("UITextField");
-    if (UITextFieldCls) {
-        Method m = class_getInstanceMethod(UITextFieldCls, @selector(setPlaceholder:));
-        if (m && !orig_tfSetPlaceholder) {
-            orig_tfSetPlaceholder = method_setImplementation(m, (IMP)new_tfSetPlaceholder);
-            wcLog(@"✅ UITextField.setPlaceholder:");
-        }
-    }
-
-    // UISearchBar setPlaceholder:
-    Class UISearchBarCls = objc_getClass("UISearchBar");
-    if (UISearchBarCls) {
-        Method m = class_getInstanceMethod(UISearchBarCls, @selector(setPlaceholder:));
-        if (m && !orig_searchBarSetPlaceholder) {
-            orig_searchBarSetPlaceholder = method_setImplementation(m, (IMP)new_searchBarSetPlaceholder);
-            wcLog(@"✅ UISearchBar.setPlaceholder:");
-        }
-    }
-
-    // UIAlertAction +actionWithTitle:style:handler: (类方法)
-    Class UIAlertActionCls = objc_getClass("UIAlertAction");
-    if (UIAlertActionCls) {
-        Method m = class_getClassMethod(UIAlertActionCls, @selector(actionWithTitle:style:handler:));
-        if (m && !orig_alertActionTitle) {
-            orig_alertActionTitle = method_setImplementation(m, (IMP)new_alertActionWithTitle);
-            wcLog(@"✅ UIAlertAction.actionWithTitle:style:handler:");
-        }
-    }
-
-    // UIAlertController +alertControllerWithTitle:message:preferredStyle: (类方法)
-    Class UIAlertControllerCls = objc_getClass("UIAlertController");
-    if (UIAlertControllerCls) {
-        Method m = class_getClassMethod(UIAlertControllerCls, @selector(alertControllerWithTitle:message:preferredStyle:));
-        if (m && !orig_alertControllerTitle) {
-            orig_alertControllerTitle = method_setImplementation(m, (IMP)new_alertControllerWithTitle);
-            wcLog(@"✅ UIAlertController.alertControllerWithTitle:message:preferredStyle:");
-        }
-    }
-}
-
-#pragma mark - 轮询
-
-static void startPolling() {
-    static int attempts = 0;
-    const int maxAttempts = 600;
-
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), 0.5 * NSEC_PER_SEC, 0);
-
-    dispatch_source_set_event_handler(timer, ^{
-        attempts++;
-        hookVIP();
-        hookCN();
-
-        BOOL vipDone = orig_allowedFeature != NULL && orig_lockedFeatures != NULL && orig_trialCanBeStarted != NULL;
-        BOOL cnDone = orig_labelSetText != NULL && orig_bundleLocalizedString != NULL;
-
-        if ((vipDone && cnDone) || attempts >= maxAttempts) {
-            dispatch_source_cancel(timer);
-            if (vipDone && cnDone) {
-                wcLog(@"🎉 VIP + 汉化 Hook 全部完成");
-            } else {
-                wcLog(@"⚠️ 轮询结束，VIP=%@ 汉化=%@", vipDone?@"OK":@"FAIL", cnDone?@"OK":@"FAIL");
-            }
-        }
-    });
-
-    dispatch_resume(timer);
-}
-
-#pragma mark - 初始化
+#pragma mark - Constructor
 
 __attribute__((constructor))
-static void wc_cn_vip_init() {
-    @autoreleasepool {
-        initLog();
-        initTranslations();
-        wcLog(@"Tweak 已加载 (VIP + 汉化)，开始 Hook...");
+static void gh_init() {
+    // Hook NSJSONSerialization +JSONObjectWithData:options:error:
+    Class jsonCls = objc_getClass("NSJSONSerialization");
+    if (jsonCls) {
+        Method m = class_getClassMethod(jsonCls, @selector(JSONObjectWithData:options:error:));
+        if (m) {
+            orig_JSON = (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_JSON);
+        }
+    }
 
-        hookVIP();
-        hookCN();
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            startPolling();
+    // Hook Actions.WorkflowRunViewController -viewDidLoad
+    Class vcCls = objc_getClass("Actions.WorkflowRunViewController");
+    if (!vcCls) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            Class retryCls = objc_getClass("Actions.WorkflowRunViewController");
+            if (retryCls) {
+                Method m = class_getInstanceMethod(retryCls, @selector(viewDidLoad));
+                if (m) {
+                    orig_vdl = (void (*)(id, SEL))method_getImplementation(m);
+                    method_setImplementation(m, (IMP)hook_vdl);
+                    class_addMethod(retryCls, @selector(gh_downloadArtifact), (IMP)downloadArtifact, "v@:");
+                }
+            }
         });
+        return;
+    }
+    Method m = class_getInstanceMethod(vcCls, @selector(viewDidLoad));
+    if (m) {
+        orig_vdl = (void (*)(id, SEL))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hook_vdl);
+        class_addMethod(vcCls, @selector(gh_downloadArtifact), (IMP)downloadArtifact, "v@:");
     }
 }
