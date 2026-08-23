@@ -111,7 +111,7 @@ static NSString *gh_formatDate(NSTimeInterval ts) {
 
 // ========== 历史记录 ==========
 @interface GHAHistory : NSObject
-+ (void)addRecord:(NSString *)name repo:(NSString *)repo filePath:(NSString *)filePath;
++ (void)addRecord:(NSString *)name repo:(NSString *)repo filePath:(NSString *)filePath buildNumber:(NSString *)buildNumber;
 + (NSArray *)records;
 + (void)clear;
 @end
@@ -124,10 +124,14 @@ static NSString *gh_formatDate(NSTimeInterval ts) {
 + (void)saveRecords:(NSArray *)arr {
     [[NSUserDefaults standardUserDefaults] setObject:arr forKey:@"GHAD_History"];
 }
-+ (void)addRecord:(NSString *)name repo:(NSString *)repo filePath:(NSString *)filePath {
++ (void)addRecord:(NSString *)name repo:(NSString *)repo filePath:(NSString *)filePath buildNumber:(NSString *)buildNumber {
     NSMutableArray *arr = [self loadRecords];
+    NSString *displayName = name ?: @"";
+    if (buildNumber && buildNumber.length > 0) {
+        displayName = [NSString stringWithFormat:@"%@ (#%@)", name, buildNumber];
+    }
     NSDictionary *rec = @{
-        @"name": name ?: @"",
+        @"name": displayName,
         @"repo": repo ?: @"",
         @"filePath": filePath ?: @"",
         @"date": @([[NSDate date] timeIntervalSince1970])
@@ -573,7 +577,7 @@ didCompleteWithError:(NSError *)error {
 
             NSURL *fileURL = [NSURL fileURLWithPath:destPath];
             NSString *repo = [NSString stringWithFormat:@"%@/%@", g_currentOwner ?: @"?", g_currentRepo ?: @"?"];
-            [GHAHistory addRecord:name repo:repo filePath:destPath];
+            [GHAHistory addRecord:name repo:repo filePath:destPath buildNumber:self.buildNumber];
 
             UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
                                                                                    applicationActivities:nil];
