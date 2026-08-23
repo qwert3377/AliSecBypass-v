@@ -1,12 +1,7 @@
 //
-// GitHub Actions Artifact Downloader v1.0
+// GitHub Actions Artifact Downloader v1.1
 // TrollStore / Theos 兼容，纯 ObjC Runtime，无 Logos 语法
-//
-// 功能：
-// 1. Hook NSURLSession 拦截 GraphQL 请求，自动提取 Bearer Token 和 Workflow Run ID
-// 2. 在 App 窗口添加可拖拽悬浮球
-// 3. 点击悬浮球调用 GitHub REST API 获取 Artifact 列表
-// 4. 选择 Artifact 后获取 S3 直链，用 Safari 打开下载
+// 修复：iOS 26 SDK 废弃 API 兼容
 //
 
 #import <UIKit/UIKit.h>
@@ -20,15 +15,35 @@ static NSString *g_currentRunId = nil;
 static UIButton *g_floatingButton = nil;
 static id g_appActiveObserver = nil;
 
-// ========== 辅助函数：获取顶层 ViewController ==========
-static UIViewController *gh_topViewController(void) {
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
-    if (!window) {
-        NSArray *windows = [UIApplication sharedApplication].windows;
-        if (windows.count > 0) {
-            window = windows[0];
+// ========== 辅助：通过 UIWindowScene 获取窗口（兼容 iOS 13+） ==========
+static UIWindow *gh_getKeyWindow(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (!app) return nil;
+
+    if (@available(iOS 13.0, *)) {
+        NSSet *scenes = app.connectedScenes;
+        for (UIScene *scene in scenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                if (ws.activationState == UISceneActivationStateForegroundActive) {
+                    for (UIWindow *w in ws.windows) {
+                        if (w.isKeyWindow) return w;
+                    }
+                    if (ws.windows.count > 0) {
+                        return ws.windows[0];
+                    }
+                }
+            }
         }
     }
+    return nil;
+}
+
+// ========== 辅助：获取顶层 ViewController ==========
+static UIViewController *gh_topViewController(void) {
+    UIWindow *window = gh_getKeyWindow();
+    if (!window) return nil;
+
     UIViewController *vc = window.rootViewController;
     while (vc.presentedViewController) {
         vc = vc.presentedViewController;
@@ -36,7 +51,7 @@ static UIViewController *gh_topViewController(void) {
     return vc;
 }
 
-// ========== 辅助函数：显示 Alert ==========
+// ========== 辅助：显示 Alert ==========
 static void gh_showAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
@@ -52,17 +67,13 @@ static void gh_showAlert(NSString *title, NSString *message) {
     });
 }
 
-// ========== 辅助函数：解析 Workflow Run URL ==========
+// ========== 辅助：解析 Workflow Run URL ==========
 static void gh_parseWorkflowRunUrl(NSString *urlStr) {
-    if (!urlStr || urlStr.length == 0) {
-        return;
-    }
+    if (!urlStr || urlStr.length == 0) return;
     NSArray *parts = [urlStr componentsSeparatedByString:@"/"];
-    // https://github.com/owner/repo/actions/runs/123
     if (parts.count >= 8) {
         g_currentOwner = parts[3];
         g_currentRepo = parts[4];
-        // 安全查找 runs 后面的 ID
         for (NSUInteger i = 5; i < parts.count; i++) {
             if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
                 g_currentRunId = parts[i + 1];
@@ -109,7 +120,7 @@ willPerformHTTPRedirection:(NSHTTPURLResponse *)response
         }
     }
     [self callCompletion:location error:nil];
-    completionHandler(nil); // 不跟随重定向
+    completionHandler(nil);
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -251,7 +262,7 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)downloadArtifact:(NSString *)downloadUrl name:(NSString *)name {
-    (void)name; // 标记已使用，避免编译警告
+    (void)name;
     if (!downloadUrl || downloadUrl.length == 0) {
         gh_showAlert(@"错误", @"下载链接为空");
         return;
@@ -304,13 +315,11 @@ static NSURLSessionDataTask *hooked_dataTaskWithRequest(id self, SEL _cmd, NSURL
     if (url) {
         NSString *urlString = url.absoluteString;
         if (urlString && [urlString containsString:@"api.github.com"]) {
-            // 提取 Authorization Token
             NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
             if (auth && auth.length > 0) {
                 g_currentToken = auth;
             }
 
-            // 解析 GraphQL 请求体，提取 Workflow Run URL
             NSData *body = request.HTTPBody;
             if (body && body.length > 0) {
                 NSDictionary *json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
@@ -335,17 +344,9 @@ static NSURLSessionDataTask *hooked_dataTaskWithRequest(id self, SEL _cmd, NSURL
 // ========== 添加悬浮球到窗口 ==========
 static void gh_addFloatingButton(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_floatingButton) {
-            return;
-        }
+        if (g_floatingButton) return;
         g_floatingButton = (UIButton *)[[GHAFloatingButton alloc] init];
-        UIWindow *window = [UIApplication sharedApplication].keyWindow;
-        if (!window) {
-            NSArray *windows = [UIApplication sharedApplication].windows;
-            if (windows.count > 0) {
-                window = windows[0];
-            }
-        }
+        UIWindow *window = gh_getKeyWindow();
         if (window) {
             [window addSubview:g_floatingButton];
         }
@@ -355,7 +356,6 @@ static void gh_addFloatingButton(void) {
 // ========== 构造函数 ==========
 __attribute__((constructor))
 static void gh_init(void) {
-    // Hook NSURLSession -dataTaskWithRequest:
     Class sessionClass = NSClassFromString(@"NSURLSession");
     if (sessionClass) {
         Method m = class_getInstanceMethod(sessionClass, @selector(dataTaskWithRequest:));
@@ -365,7 +365,6 @@ static void gh_init(void) {
         }
     }
 
-    // 监听应用 Active 状态，确保悬浮球始终存在
     g_appActiveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                                             object:nil
                                                                              queue:[NSOperationQueue mainQueue]
@@ -373,6 +372,5 @@ static void gh_init(void) {
         gh_addFloatingButton();
     }];
 
-    // 立即尝试添加（如果 App 已启动）
     gh_addFloatingButton();
 }
