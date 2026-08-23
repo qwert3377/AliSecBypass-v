@@ -557,7 +557,7 @@ didCompleteWithError:(NSError *)error {
 
             NSURL *fileURL = [NSURL fileURLWithPath:destPath];
             NSString *repo = [NSString stringWithFormat:@"%@/%@", g_currentOwner ?: @"?", g_currentRepo ?: @"?"];
-            [GHAHistory addRecord:name repo:repo];
+            [GHAHistory addRecord:name repo:repo filePath:destPath];
 
             UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
                                                                                    applicationActivities:nil];
