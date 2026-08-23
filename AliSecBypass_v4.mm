@@ -1,350 +1,378 @@
 //
-// GitHubArtifactDownloader.mm v3
-// 修复：Theos -Werror 编译问题
+// GitHub Actions Artifact Downloader v1.0
+// TrollStore / Theos 兼容，纯 ObjC Runtime，无 Logos 语法
+//
+// 功能：
+// 1. Hook NSURLSession 拦截 GraphQL 请求，自动提取 Bearer Token 和 Workflow Run ID
+// 2. 在 App 窗口添加可拖拽悬浮球
+// 3. 点击悬浮球调用 GitHub REST API 获取 Artifact 列表
+// 4. 选择 Artifact 后获取 S3 直链，用 Safari 打开下载
 //
 
-#import <objc/runtime.h>
 #import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
-#pragma mark - File Logger
+// ========== 全局状态 ==========
+static NSString *g_currentToken = nil;
+static NSString *g_currentOwner = nil;
+static NSString *g_currentRepo = nil;
+static NSString *g_currentRunId = nil;
+static UIButton *g_floatingButton = nil;
+static id g_appActiveObserver = nil;
 
-static NSString *logPath(void) {
-    static NSString *path = nil;
-    if (!path) {
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
-        path = [docs stringByAppendingPathComponent:@"gh_artifact.log"];
-    }
-    return path;
-}
-
-static void ghLog(NSString *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
-    va_end(args);
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [[NSDate date] description], msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath()];
-    if (fh) {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    } else {
-        [line writeToFile:logPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    }
-}
-
-#pragma mark - Global Cache
-
-static NSString *g_runURL   = nil;
-static NSString *g_owner    = nil;
-static NSString *g_repo     = nil;
-static CFAbsoluteTime g_cacheTime = 0;
-static BOOL g_hookedVC = NO;
-
-#pragma mark - Forward Declarations
-
-static void downloadArtifact(id self, SEL _cmd);
-static void ensureButton(id self);
-
-#pragma mark - JSON Scanner
-
-static void extractWorkflowRunInfo(id obj, int depth) {
-    if (depth > 20) return;
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dict = (NSDictionary *)obj;
-        NSString *typeName = dict[@"__typename"];
-        if ([typeName isEqualToString:@"WorkflowRun"]) {
-            ghLog(@"[Scan] found WorkflowRun at depth %d", depth);
-            NSString *url = dict[@"url"];
-            id repoObj = dict[@"repository"];
-            if (url && [url isKindOfClass:[NSString class]] && [url containsString:@"/actions/runs/"]) {
-                NSString *runId = [url lastPathComponent];
-                NSString *repoName = nil;
-                NSString *ownerLogin = nil;
-                if (repoObj && [repoObj isKindOfClass:[NSDictionary class]]) {
-                    NSDictionary *repo = (NSDictionary *)repoObj;
-                    repoName = repo[@"name"];
-                    id ownerObj = repo[@"owner"];
-                    if (ownerObj && [ownerObj isKindOfClass:[NSDictionary class]]) {
-                        ownerLogin = ((NSDictionary *)ownerObj)[@"login"];
-                    }
-                }
-                if (!repoName || !ownerLogin) {
-                    NSArray *parts = [url pathComponents];
-                    if (parts.count >= 4) {
-                        ownerLogin = parts[1];
-                        repoName = parts[2];
-                    }
-                }
-                if (repoName && ownerLogin && runId) {
-                    g_runURL  = [url copy];
-                    g_repo    = [repoName copy];
-                    g_owner   = [ownerLogin copy];
-                    g_cacheTime = CFAbsoluteTimeGetCurrent();
-                    ghLog(@"[Cache] SUCCESS: %@/%@ run=%@", ownerLogin, repoName, runId);
-                    return;
-                }
-            }
-        }
-        for (id key in dict) {
-            extractWorkflowRunInfo(dict[key], depth + 1);
-        }
-    } else if ([obj isKindOfClass:[NSArray class]]) {
-        NSArray *arr = (NSArray *)obj;
-        for (id item in arr) {
-            extractWorkflowRunInfo(item, depth + 1);
+// ========== 辅助函数：获取顶层 ViewController ==========
+static UIViewController *gh_topViewController(void) {
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    if (!window) {
+        NSArray *windows = [UIApplication sharedApplication].windows;
+        if (windows.count > 0) {
+            window = windows[0];
         }
     }
+    UIViewController *vc = window.rootViewController;
+    while (vc.presentedViewController) {
+        vc = vc.presentedViewController;
+    }
+    return vc;
 }
 
-#pragma mark - UI Helpers
-
-static void showAlert(id self, NSString *title, NSString *message) {
-    UIViewController *vc = (UIViewController *)self;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-    [vc presentViewController:alert animated:YES completion:nil];
-}
-
-static void showPATInput(id self) {
-    UIViewController *vc = (UIViewController *)self;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"GitHub Token" message:@"请输入 Personal Access Token（需 repo 权限）" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"ghp_xxxxxxxxxxxx";
-        tf.secureTextEntry = YES;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"保存并下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *token = alert.textFields.firstObject.text;
-        if (token && token.length > 10) {
-            [[NSUserDefaults standardUserDefaults] setObject:token forKey:@"GHArtifactPAT"];
-            ghLog(@"[Token] saved");
-            downloadArtifact(self, @selector(gh_downloadArtifact));
+// ========== 辅助函数：显示 Alert ==========
+static void gh_showAlert(NSString *title, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                       message:message
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        UIViewController *topVC = gh_topViewController();
+        if (topVC) {
+            [topVC presentViewController:alert animated:YES completion:nil];
         }
-    }]];
-    [vc presentViewController:alert animated:YES completion:nil];
-}
-
-#pragma mark - Network Download
-
-static void downloadZip(id self, NSString *pat, NSNumber *artId, NSString *artName) {
-    NSString *api = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/artifacts/%@/zip", g_owner, g_repo, artId];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:api]];
-    [req setValue:[NSString stringWithFormat:@"Bearer %@", pat] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-
-    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithRequest:req completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error || !location) {
-                ghLog(@"[DL] error: %@", error ? error.localizedDescription : @"nil");
-                showAlert(self, @"下载失败", error ? error.localizedDescription : @"未知错误");
-                return;
-            }
-            NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
-            NSString *runId = [g_runURL lastPathComponent];
-            NSString *filename = [NSString stringWithFormat:@"%@-%@-%@.zip", g_repo, runId, artName];
-            NSString *dest = [docs stringByAppendingPathComponent:filename];
-            NSFileManager *fm = [NSFileManager defaultManager];
-            if ([fm fileExistsAtPath:dest]) [fm removeItemAtPath:dest error:nil];
-            NSError *moveErr = nil;
-            [fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:dest] error:&moveErr];
-            if (moveErr) {
-                showAlert(self, @"保存失败", moveErr.localizedDescription);
-                return;
-            }
-            ghLog(@"[DL] saved: %@", dest);
-            UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:dest]] applicationActivities:nil];
-            if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-                activity.popoverPresentationController.sourceView = ((UIViewController *)self).view;
-                activity.popoverPresentationController.sourceRect = CGRectMake(((UIViewController *)self).view.bounds.size.width/2, 100, 0, 0);
-            }
-            [((UIViewController *)self) presentViewController:activity animated:YES completion:nil];
-        });
-    }];
-    [task resume];
-}
-
-static void downloadArtifact(id self, SEL _cmd) {
-    ghLog(@"[DL] button tapped");
-    NSString *pat = [[NSUserDefaults standardUserDefaults] stringForKey:@"GHArtifactPAT"];
-    if (!pat || pat.length < 10) { showPATInput(self); return; }
-    if (!g_runURL || !g_owner || !g_repo) {
-        ghLog(@"[DL] no cache: url=%@ owner=%@ repo=%@", g_runURL, g_owner, g_repo);
-        showAlert(self, @"未获取到 Run 信息", @"请等待页面加载完成");
-        return;
-    }
-    if (CFAbsoluteTimeGetCurrent() - g_cacheTime > 120) {
-        showAlert(self, @"缓存已过期", @"请重新进入 Actions 详情页");
-        return;
-    }
-    NSString *runId = [g_runURL lastPathComponent];
-    NSString *api = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts", g_owner, g_repo, runId];
-    ghLog(@"[DL] API: %@", api);
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:api]];
-    [req setValue:[NSString stringWithFormat:@"Bearer %@", pat] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) { showAlert(self, @"请求失败", error.localizedDescription); return; }
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            NSArray *artifacts = json[@"artifacts"];
-            ghLog(@"[DL] artifacts: %lu", (unsigned long)artifacts.count);
-            if (!artifacts || artifacts.count == 0) { showAlert(self, @"无 Artifacts", @"该 Run 没有 Artifact"); return; }
-            NSDictionary *first = artifacts[0];
-            NSNumber *artId = first[@"id"];
-            NSString *artName = first[@"name"] ?: @"artifact";
-            if (!artId) { showAlert(self, @"解析失败", @"无法获取 Artifact ID"); return; }
-            downloadZip(self, pat, artId, artName);
-        });
-    }];
-    [task resume];
-}
-
-#pragma mark - Button Management
-
-static void ensureButton(id self) {
-    UIViewController *vc = (UIViewController *)self;
-    UINavigationItem *navItem = vc.navigationItem;
-    if (!navItem) { ghLog(@"[Btn] no navigationItem"); return; }
-    for (UIBarButtonItem *item in navItem.rightBarButtonItems) {
-        if (item.action == @selector(gh_downloadArtifact)) { ghLog(@"[Btn] already exists"); return; }
-    }
-    UIBarButtonItem *dl = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(gh_downloadArtifact)];
-    NSMutableArray *items = [navItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
-    [items addObject:dl];
-    navItem.rightBarButtonItems = items;
-    ghLog(@"[Btn] added");
-}
-
-#pragma mark - Hooks
-
-static id (*orig_JSON)(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err);
-
-static id hook_JSON(id self, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err) {
-    id result = orig_JSON(self, _cmd, data, opt, err);
-    if (result && data && [data length] > 50 && [data length] < 200000) {
-        NSString *preview = [[NSString alloc] initWithData:[data subdataWithRange:NSMakeRange(0, MIN(512, data.length))] encoding:NSUTF8StringEncoding];
-        if (preview && ([preview containsString:@"WorkflowRun"] || [preview containsString:@"workflowRun"])) {
-            ghLog(@"[JSON] WorkflowRun detected, scanning...");
-            extractWorkflowRunInfo(result, 0);
-        }
-    }
-    return result;
-}
-
-static void (*orig_vdl)(id self, SEL _cmd);
-
-static void hook_vdl(id self, SEL _cmd) {
-    orig_vdl(self, _cmd);
-    ghLog(@"[Hook] viewDidLoad");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        ensureButton(self);
     });
 }
 
-static void (*orig_vda)(id self, SEL _cmd, BOOL animated);
-
-static void hook_vda(id self, SEL _cmd, BOOL animated) {
-    orig_vda(self, _cmd, animated);
-    ghLog(@"[Hook] viewDidAppear");
-    ensureButton(self);
-}
-
-static void (*orig_setRightItems)(id self, SEL _cmd, NSArray *items, BOOL animated);
-
-static void hook_setRightItems(id self, SEL _cmd, NSArray *items, BOOL animated) {
-    NSMutableArray *newItems = [items mutableCopy] ?: [NSMutableArray array];
-    BOOL hasOurs = NO;
-    for (UIBarButtonItem *item in newItems) {
-        if (item.action == @selector(gh_downloadArtifact)) { hasOurs = YES; break; }
+// ========== 辅助函数：解析 Workflow Run URL ==========
+static void gh_parseWorkflowRunUrl(NSString *urlStr) {
+    if (!urlStr || urlStr.length == 0) {
+        return;
     }
-    if (!hasOurs && g_runURL) {
-        UIViewController *vc = nil;
-        if ([self respondsToSelector:@selector(topViewController)]) {
-            vc = ((UINavigationController *)self).topViewController;
-        }
-        if (vc) {
-            UIBarButtonItem *dl = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:vc action:@selector(gh_downloadArtifact)];
-            [newItems addObject:dl];
-            ghLog(@"[Hook] injected button via setRightBarButtonItems");
-        }
-    }
-    orig_setRightItems(self, _cmd, newItems, animated);
-}
-
-static void (*orig_push)(id self, SEL _cmd, id vc, BOOL animated);
-
-static void hook_push(id self, SEL _cmd, id vc, BOOL animated) {
-    orig_push(self, _cmd, vc, animated);
-    if (!vc) return;
-    NSString *clsName = NSStringFromClass([vc class]);
-    if ([clsName isEqualToString:@"Actions.WorkflowRunViewController"]) {
-        ghLog(@"[Push] WorkflowRunViewController");
-        if (!g_hookedVC) {
-            Class targetCls = [vc class];
-            Method m1 = class_getInstanceMethod(targetCls, @selector(viewDidLoad));
-            if (m1) {
-                orig_vdl = (void (*)(id, SEL))method_getImplementation(m1);
-                method_setImplementation(m1, (IMP)hook_vdl);
+    NSArray *parts = [urlStr componentsSeparatedByString:@"/"];
+    // https://github.com/owner/repo/actions/runs/123
+    if (parts.count >= 8) {
+        g_currentOwner = parts[3];
+        g_currentRepo = parts[4];
+        // 安全查找 runs 后面的 ID
+        for (NSUInteger i = 5; i < parts.count; i++) {
+            if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
+                g_currentRunId = parts[i + 1];
+                break;
             }
-            Method m2 = class_getInstanceMethod(targetCls, @selector(viewDidAppear:));
-            if (m2) {
-                orig_vda = (void (*)(id, SEL, BOOL))method_getImplementation(m2);
-                method_setImplementation(m2, (IMP)hook_vda);
-            }
-            class_addMethod(targetCls, @selector(gh_downloadArtifact), (IMP)downloadArtifact, "v@:");
-            g_hookedVC = YES;
-            ghLog(@"[Push] hooked");
         }
     }
 }
 
-#pragma mark - Constructor
+// ========== 下载代理：拦截 302 重定向获取 S3 直链 ==========
+@interface GHADownloadDelegate : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate>
+@property (nonatomic, copy) void (^completionBlock)(NSString *finalUrl, NSError *error);
+@property (nonatomic, assign) BOOL completed;
+@end
 
+@implementation GHADownloadDelegate
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _completed = NO;
+    }
+    return self;
+}
+
+- (void)callCompletion:(NSString *)url error:(NSError *)error {
+    if (!self.completed && self.completionBlock) {
+        self.completed = YES;
+        self.completionBlock(url, error);
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest *))completionHandler {
+    NSString *location = nil;
+    NSDictionary *headers = response.allHeaderFields;
+    for (NSString *key in headers) {
+        if ([key caseInsensitiveCompare:@"Location"] == NSOrderedSame) {
+            location = headers[key];
+            break;
+        }
+    }
+    [self callCompletion:location error:nil];
+    completionHandler(nil); // 不跟随重定向
+}
+
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+didCompleteWithError:(NSError *)error {
+    if (error) {
+        [self callCompletion:nil error:error];
+    } else if (!self.completed) {
+        [self callCompletion:nil error:nil];
+    }
+}
+
+@end
+
+// ========== 悬浮球按钮 ==========
+@interface GHAFloatingButton : UIButton
+- (void)handleTap;
+- (void)handlePan:(UIPanGestureRecognizer *)pan;
+- (void)fetchArtifacts;
+- (void)downloadArtifact:(NSString *)downloadUrl name:(NSString *)name;
+@end
+
+@implementation GHAFloatingButton
+
+- (instancetype)init {
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+    self = [super initWithFrame:CGRectMake(screenW - 70, screenH / 2.0 - 30, 60, 60)];
+    if (self) {
+        self.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.92];
+        self.layer.cornerRadius = 30;
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOffset = CGSizeMake(0, 2);
+        self.layer.shadowRadius = 4;
+        self.layer.shadowOpacity = 0.3;
+        [self setTitle:@"📦" forState:UIControlStateNormal];
+        self.titleLabel.font = [UIFont systemFontOfSize:26];
+        self.titleLabel.adjustsFontSizeToFitWidth = YES;
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                                action:@selector(handlePan:)];
+        [self addGestureRecognizer:pan];
+
+        [self addTarget:self
+                 action:@selector(handleTap)
+       forControlEvents:UIControlEventTouchUpInside];
+    }
+    return self;
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    CGPoint translation = [pan translationInView:self.superview];
+    self.center = CGPointMake(self.center.x + translation.x,
+                              self.center.y + translation.y);
+    [pan setTranslation:CGPointZero inView:self.superview];
+}
+
+- (void)handleTap {
+    [self fetchArtifacts];
+}
+
+- (void)fetchArtifacts {
+    if (!g_currentToken || g_currentToken.length == 0) {
+        gh_showAlert(@"错误", @"未获取到 GitHub Token，请先进入某个 Workflow Run 详情页");
+        return;
+    }
+    if (!g_currentOwner || !g_currentRepo || !g_currentRunId) {
+        gh_showAlert(@"错误", @"未检测到 Workflow Run，请先进入 Actions 页面的某个 Run");
+        return;
+    }
+
+    NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
+                        g_currentOwner, g_currentRepo, g_currentRunId];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req
+                                            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                gh_showAlert(@"请求失败", error.localizedDescription);
+                return;
+            }
+
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            if (httpResp.statusCode != 200) {
+                NSString *errMsg = [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode];
+                gh_showAlert(@"请求失败", errMsg);
+                return;
+            }
+
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+                gh_showAlert(@"错误", @"解析响应失败");
+                return;
+            }
+
+            NSArray *artifacts = json[@"artifacts"];
+            if (!artifacts || artifacts.count == 0) {
+                gh_showAlert(@"提示", @"该 Workflow Run 没有 Artifacts");
+                return;
+            }
+
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Artifacts"
+                                                                           message:@"选择要下载的 Artifact"
+                                                                    preferredStyle:UIAlertControllerStyleActionSheet];
+
+            for (NSDictionary *art in artifacts) {
+                NSString *name = art[@"name"];
+                NSString *downloadUrl = art[@"archive_download_url"];
+                if (name && downloadUrl) {
+                    UIAlertAction *action = [UIAlertAction actionWithTitle:name
+                                                                     style:UIAlertActionStyleDefault
+                                                                   handler:^(UIAlertAction *action) {
+                        [self downloadArtifact:downloadUrl name:name];
+                    }];
+                    [alert addAction:action];
+                }
+            }
+
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消"
+                                                        style:UIAlertActionStyleCancel
+                                                      handler:nil]];
+
+            UIViewController *topVC = gh_topViewController();
+            if (topVC) {
+                if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+                    alert.popoverPresentationController.sourceView = self;
+                    alert.popoverPresentationController.sourceRect = self.bounds;
+                }
+                [topVC presentViewController:alert animated:YES completion:nil];
+            }
+        });
+    }];
+    [task resume];
+}
+
+- (void)downloadArtifact:(NSString *)downloadUrl name:(NSString *)name {
+    (void)name; // 标记已使用，避免编译警告
+    if (!downloadUrl || downloadUrl.length == 0) {
+        gh_showAlert(@"错误", @"下载链接为空");
+        return;
+    }
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:downloadUrl]];
+    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    req.HTTPMethod = @"GET";
+
+    GHADownloadDelegate *delegate = [[GHADownloadDelegate alloc] init];
+    delegate.completionBlock = ^(NSString *finalUrl, NSError *error) {
+        if (error) {
+            gh_showAlert(@"下载失败", error.localizedDescription);
+            return;
+        }
+        if (finalUrl && finalUrl.length > 0) {
+            NSURL *url = [NSURL URLWithString:finalUrl];
+            if (url) {
+                [[UIApplication sharedApplication] openURL:url
+                                                   options:@{}
+                                         completionHandler:^(BOOL success) {
+                    if (!success) {
+                        gh_showAlert(@"错误", @"无法打开下载链接");
+                    }
+                }];
+            } else {
+                gh_showAlert(@"错误", @"下载链接格式错误");
+            }
+        } else {
+            gh_showAlert(@"错误", @"无法获取下载链接，可能 Artifact 已过期或没有权限");
+        }
+    };
+
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config
+                                                          delegate:delegate
+                                                     delegateQueue:[NSOperationQueue mainQueue]];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req];
+    [task resume];
+}
+
+@end
+
+// ========== Hook NSURLSession 提取 Token 和 Run 信息 ==========
+static NSURLSessionDataTask *(*orig_dataTaskWithRequest)(id self, SEL _cmd, NSURLRequest *request);
+
+static NSURLSessionDataTask *hooked_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    NSURL *url = request.URL;
+    if (url) {
+        NSString *urlString = url.absoluteString;
+        if (urlString && [urlString containsString:@"api.github.com"]) {
+            // 提取 Authorization Token
+            NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
+            if (auth && auth.length > 0) {
+                g_currentToken = auth;
+            }
+
+            // 解析 GraphQL 请求体，提取 Workflow Run URL
+            NSData *body = request.HTTPBody;
+            if (body && body.length > 0) {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+                if (json && [json isKindOfClass:[NSDictionary class]]) {
+                    NSString *opName = json[@"operationName"];
+                    if ([opName isEqualToString:@"WorkflowRun"]) {
+                        NSDictionary *vars = json[@"variables"];
+                        if (vars) {
+                            NSString *runUrl = vars[@"url"];
+                            if (runUrl) {
+                                gh_parseWorkflowRunUrl(runUrl);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return orig_dataTaskWithRequest(self, _cmd, request);
+}
+
+// ========== 添加悬浮球到窗口 ==========
+static void gh_addFloatingButton(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_floatingButton) {
+            return;
+        }
+        g_floatingButton = (UIButton *)[[GHAFloatingButton alloc] init];
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        if (!window) {
+            NSArray *windows = [UIApplication sharedApplication].windows;
+            if (windows.count > 0) {
+                window = windows[0];
+            }
+        }
+        if (window) {
+            [window addSubview:g_floatingButton];
+        }
+    });
+}
+
+// ========== 构造函数 ==========
 __attribute__((constructor))
-static void gh_init() {
-    ghLog(@"[Init] loading...");
-    Class jsonCls = objc_getClass("NSJSONSerialization");
-    if (jsonCls) {
-        Method m = class_getClassMethod(jsonCls, @selector(JSONObjectWithData:options:error:));
+static void gh_init(void) {
+    // Hook NSURLSession -dataTaskWithRequest:
+    Class sessionClass = NSClassFromString(@"NSURLSession");
+    if (sessionClass) {
+        Method m = class_getInstanceMethod(sessionClass, @selector(dataTaskWithRequest:));
         if (m) {
-            orig_JSON = (id (*)(id, SEL, NSData *, NSJSONReadingOptions, NSError **))method_getImplementation(m);
-            method_setImplementation(m, (IMP)hook_JSON);
-            ghLog(@"[Init] NSJSONSerialization hooked");
+            orig_dataTaskWithRequest = (NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hooked_dataTaskWithRequest);
         }
     }
-    Class navCls = objc_getClass("UINavigationController");
-    if (navCls) {
-        Method m = class_getInstanceMethod(navCls, @selector(pushViewController:animated:));
-        if (m) {
-            orig_push = (void (*)(id, SEL, id, BOOL))method_getImplementation(m);
-            method_setImplementation(m, (IMP)hook_push);
-            ghLog(@"[Init] UINavigationController hooked");
-        }
-        Method m2 = class_getInstanceMethod(navCls, @selector(setRightBarButtonItems:animated:));
-        if (m2) {
-            orig_setRightItems = (void (*)(id, SEL, NSArray *, BOOL))method_getImplementation(m2);
-            method_setImplementation(m2, (IMP)hook_setRightItems);
-            ghLog(@"[Init] setRightBarButtonItems hooked");
-        }
-    }
-    Class vcCls = objc_getClass("Actions.WorkflowRunViewController");
-    if (vcCls && !g_hookedVC) {
-        Method m1 = class_getInstanceMethod(vcCls, @selector(viewDidLoad));
-        if (m1) {
-            orig_vdl = (void (*)(id, SEL))method_getImplementation(m1);
-            method_setImplementation(m1, (IMP)hook_vdl);
-        }
-        Method m2 = class_getInstanceMethod(vcCls, @selector(viewDidAppear:));
-        if (m2) {
-            orig_vda = (void (*)(id, SEL, BOOL))method_getImplementation(m2);
-            method_setImplementation(m2, (IMP)hook_vda);
-        }
-        class_addMethod(vcCls, @selector(gh_downloadArtifact), (IMP)downloadArtifact, "v@:");
-        g_hookedVC = YES;
-        ghLog(@"[Init] WorkflowRunViewController hooked directly");
-    }
-    ghLog(@"[Init] done");
+
+    // 监听应用 Active 状态，确保悬浮球始终存在
+    g_appActiveObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                                            object:nil
+                                                                             queue:[NSOperationQueue mainQueue]
+                                                                        usingBlock:^(NSNotification *note) {
+        gh_addFloatingButton();
+    }];
+
+    // 立即尝试添加（如果 App 已启动）
+    gh_addFloatingButton();
 }
