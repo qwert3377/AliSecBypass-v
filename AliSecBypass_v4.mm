@@ -1,6 +1,6 @@
 //
-// GitHub Actions Artifact Downloader v2.0
-// 完整版：自定义悬浮球 + 进度条 + 历史记录 + 设置面板
+// GitHub Actions Artifact Downloader v2.1
+// 修复编译错误
 //
 
 #import <UIKit/UIKit.h>
@@ -99,15 +99,15 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
 @end
 
 @implementation GHAHistory
-+ (NSMutableArray *)load {
++ (NSMutableArray *)loadRecords {
     NSArray *arr = [[NSUserDefaults standardUserDefaults] objectForKey:@"GHAD_History"];
     return arr ? [arr mutableCopy] : [NSMutableArray array];
 }
-+ (void)save:(NSArray *)arr {
++ (void)saveRecords:(NSArray *)arr {
     [[NSUserDefaults standardUserDefaults] setObject:arr forKey:@"GHAD_History"];
 }
 + (void)addRecord:(NSString *)name repo:(NSString *)repo {
-    NSMutableArray *arr = [self load];
+    NSMutableArray *arr = [self loadRecords];
     NSDictionary *rec = @{
         @"name": name ?: @"",
         @"repo": repo ?: @"",
@@ -115,9 +115,9 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     };
     [arr insertObject:rec atIndex:0];
     if (arr.count > 30) [arr removeObjectsInRange:NSMakeRange(30, arr.count - 30)];
-    [self save:arr];
+    [self saveRecords:arr];
 }
-+ (NSArray *)records { return [self load]; }
++ (NSArray *)records { return [self loadRecords]; }
 + (void)clear { [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"GHAD_History"]; }
 @end
 
@@ -268,9 +268,9 @@ didCompleteWithError:(NSError *)error {
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
-    __weak typeof(self) weakSelf = self;
+    GHAArtifactListVC * __weak weakSelf = self;
     self.currentTask = [session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
+        GHAArtifactListVC *strongSelf = weakSelf;
         if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             [strongSelf hideProgress];
@@ -292,7 +292,6 @@ didCompleteWithError:(NSError *)error {
             NSString *repo = [NSString stringWithFormat:@"%@/%@", g_currentOwner ?: @"?", g_currentRepo ?: @"?"];
             [GHAHistory addRecord:name repo:repo];
 
-            // 分享
             UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
                                                                                    applicationActivities:nil];
             if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
@@ -305,6 +304,7 @@ didCompleteWithError:(NSError *)error {
     }];
 
     // 进度定时器
+    static const char kTimerKey;
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
         if (self.currentTask.countOfBytesExpectedToReceive > 0) {
             float p = (float)self.currentTask.countOfBytesReceived / (float)self.currentTask.countOfBytesExpectedToReceive;
@@ -317,7 +317,7 @@ didCompleteWithError:(NSError *)error {
             [t invalidate];
         }
     }];
-    objc_setAssociatedObject(self.currentTask, @"timer", timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self.currentTask, &kTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     [self.currentTask resume];
 }
@@ -436,7 +436,6 @@ didCompleteWithError:(NSError *)error {
         self.iconLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:self.iconLabel];
 
-        // 脉冲动画层
         self.pulseLayer = [CAShapeLayer layer];
         self.pulseLayer.frame = self.bounds;
         self.pulseLayer.path = [UIBezierPath bezierPathWithOvalInRect:self.bounds].CGPath;
@@ -487,7 +486,6 @@ didCompleteWithError:(NSError *)error {
 
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        // 设置面板
         GHASettingsVC *settingsVC = [[GHASettingsVC alloc] init];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:settingsVC];
         nav.modalPresentationStyle = UIModalPresentationFormSheet;
@@ -501,7 +499,6 @@ didCompleteWithError:(NSError *)error {
     self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
     [pan setTranslation:CGPointMake(0, 0) inView:self.superview];
 
-    // 边界限制
     CGFloat minX = 32, maxX = self.superview.bounds.size.width - 32;
     CGFloat minY = 64, maxY = self.superview.bounds.size.height - 64;
     CGPoint center = self.center;
@@ -608,7 +605,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v2.0");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v2.1");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
