@@ -450,24 +450,16 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)startPulse {
-    UIView *ring = [[UIView alloc] initWithFrame:self.bounds];
-    ring.backgroundColor = [UIColor clearColor];
-    ring.layer.cornerRadius = 32;
-    ring.layer.borderWidth = 2;
-    ring.layer.borderColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.6].CGColor;
-    ring.alpha = 0.6;
-    [self insertSubview:ring belowSubview:self.iconLabel];
-
-    [UIView animateWithDuration:1.2 delay:0 options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse animations:^{
-        ring.transform = CGAffineTransformMakeScale(1.4, 1.4);
-        ring.alpha = 0;
+    self.alpha = 1.0;
+    [UIView animateWithDuration:1.0 delay:0 options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse | UIViewAnimationOptionAllowUserInteraction animations:^{
+        self.alpha = 0.6;
     } completion:nil];
-    objc_setAssociatedObject(self, &kGHTimerKey, ring, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 - (void)stopPulse {
-    UIView *ring = objc_getAssociatedObject(self, &kGHTimerKey);
-    [ring removeFromSuperview];
+    [UIView animateWithDuration:0.2 animations:^{
+        self.alpha = 1.0;
+    }];
 }
 
 - (void)handleTap {
