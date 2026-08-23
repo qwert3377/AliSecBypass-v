@@ -1,6 +1,6 @@
 //
-// GitHub Actions Artifact Downloader v2.1
-// 修复编译错误
+// GitHub Actions Artifact Downloader v3.0
+// 精致版：自定义Cell + 图标 + 空状态 + 美化历史
 //
 
 #import <UIKit/UIKit.h>
@@ -11,7 +11,7 @@ static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
 static UIView *g_floatingView = nil;
-static const char kGHTimerKey = 0;
+static const char kGHAssocKey = 0;
 
 static void gh_log(const char *tag, const char *msg) {
     NSLog(@"[GHAD][%s] %s", tag, msg);
@@ -122,6 +122,22 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
 + (void)clear { [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"GHAD_History"]; }
 @end
 
+// ========== 格式化大小 ==========
+static NSString *gh_formatSize(NSNumber *bytes) {
+    if (!bytes) return @"Unknown";
+    double b = bytes.doubleValue;
+    if (b < 1024) return [NSString stringWithFormat:@"%.0f B", b];
+    if (b < 1024 * 1024) return [NSString stringWithFormat:@"%.1f KB", b / 1024.0];
+    return [NSString stringWithFormat:@"%.2f MB", b / 1024.0 / 1024.0];
+}
+
+static NSString *gh_formatDate(NSTimeInterval ts) {
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:ts];
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm";
+    return [df stringFromDate:date];
+}
+
 // ========== S3 重定向 Delegate ==========
 @interface GHARedirectDelegate : NSObject <NSURLSessionDelegate, NSURLSessionTaskDelegate>
 @property (nonatomic, copy) void (^completion)(NSString *s3Url, NSError *err);
@@ -155,6 +171,48 @@ didCompleteWithError:(NSError *)error {
 }
 @end
 
+// ========== 自定义 Artifact Cell ==========
+@interface GHAArtifactCell : UITableViewCell
+@property (nonatomic, strong) UILabel *iconLabel;
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UILabel *sizeLabel;
+@end
+
+@implementation GHAArtifactCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleDefault;
+        self.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+
+        self.iconLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, 36, 36)];
+        self.iconLabel.text = @"📦";
+        self.iconLabel.font = [UIFont systemFontOfSize:24];
+        self.iconLabel.textAlignment = NSTextAlignmentCenter;
+        [self.contentView addSubview:self.iconLabel];
+
+        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(60, 10, self.contentView.bounds.size.width - 100, 22)];
+        self.nameLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+        self.nameLabel.textColor = [UIColor blackColor];
+        self.nameLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [self.contentView addSubview:self.nameLabel];
+
+        self.sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(60, 34, 200, 18)];
+        self.sizeLabel.font = [UIFont systemFontOfSize:13];
+        self.sizeLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1];
+        [self.contentView addSubview:self.sizeLabel];
+    }
+    return self;
+}
+
+- (void)configureWithName:(NSString *)name size:(NSString *)size {
+    self.nameLabel.text = name;
+    self.sizeLabel.text = size;
+}
+
+@end
+
 // ========== Artifact 列表 VC ==========
 @interface GHAArtifactListVC : UITableViewController
 @property (nonatomic, strong) NSArray *artifacts;
@@ -168,28 +226,36 @@ didCompleteWithError:(NSError *)error {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Artifacts";
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
+    self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
+
+    // 导航栏按钮
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
                                                                               style:UIBarButtonItemStylePlain
                                                                              target:self
                                                                              action:@selector(close)];
-    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"cell"];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"历史"
+                                                                               style:UIBarButtonItemStylePlain
+                                                                              target:self
+                                                                              action:@selector(showHistory)];
 
+    [self.tableView registerClass:[GHAArtifactCell class] forCellReuseIdentifier:@"cell"];
+    self.tableView.rowHeight = 64;
+    self.tableView.separatorInset = UIEdgeInsetsMake(0, 60, 0, 0);
+
+    // 进度条
     self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-    self.progressView.frame = CGRectMake(20, 8, self.view.bounds.size.width - 40, 4);
+    self.progressView.frame = CGRectMake(0, 0, self.view.bounds.size.width, 3);
     self.progressView.hidden = YES;
     self.progressView.trackTintColor = [UIColor colorWithWhite:0.9 alpha:1];
     self.progressView.progressTintColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:1];
+    self.tableView.tableHeaderView = self.progressView;
 
-    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 16, self.view.bounds.size.width, 18)];
+    // 状态标签（放在导航栏下方）
+    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 30)];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.font = [UIFont systemFontOfSize:12];
+    self.statusLabel.font = [UIFont systemFontOfSize:13];
     self.statusLabel.textColor = [UIColor grayColor];
     self.statusLabel.hidden = YES;
-
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    [header addSubview:self.progressView];
-    [header addSubview:self.statusLabel];
-    self.tableView.tableHeaderView = header;
 }
 
 - (void)close {
@@ -197,18 +263,21 @@ didCompleteWithError:(NSError *)error {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
+- (void)showHistory {
+    GHAHistoryVC *vc = [[GHAHistoryVC alloc] init];
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.artifacts.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell" forIndexPath:indexPath];
+    GHAArtifactCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell" forIndexPath:indexPath];
     NSDictionary *art = self.artifacts[indexPath.row];
-    cell.textLabel.text = art[@"name"];
+    NSString *name = art[@"name"];
     NSNumber *size = art[@"size_in_bytes"];
-    NSString *sizeStr = size ? [NSString stringWithFormat:@"%.2f MB", size.doubleValue / 1024.0 / 1024.0] : @"Unknown";
-    cell.detailTextLabel.text = sizeStr;
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    [cell configureWithName:name size:gh_formatSize(size)];
     return cell;
 }
 
@@ -220,9 +289,11 @@ didCompleteWithError:(NSError *)error {
 - (void)showProgress:(NSString *)text {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.progressView.hidden = NO;
-        self.statusLabel.hidden = NO;
-        self.statusLabel.text = text ?: @"下载中...";
         self.progressView.progress = 0;
+        self.statusLabel.text = text;
+        self.statusLabel.hidden = NO;
+        [self.view addSubview:self.statusLabel];
+        self.statusLabel.frame = CGRectMake(0, 4, self.view.bounds.size.width, 20);
     });
 }
 
@@ -230,6 +301,7 @@ didCompleteWithError:(NSError *)error {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.progressView.hidden = YES;
         self.statusLabel.hidden = YES;
+        [self.statusLabel removeFromSuperview];
     });
 }
 
@@ -304,8 +376,8 @@ didCompleteWithError:(NSError *)error {
         });
     }];
 
-    // 进度定时器
-    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
+    // 进度更新
+    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
         if (self.currentTask.countOfBytesExpectedToReceive > 0) {
             float p = (float)self.currentTask.countOfBytesReceived / (float)self.currentTask.countOfBytesExpectedToReceive;
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -317,9 +389,59 @@ didCompleteWithError:(NSError *)error {
             [t invalidate];
         }
     }];
-    objc_setAssociatedObject(self.currentTask, &kGHTimerKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self.currentTask, &kGHAssocKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     [self.currentTask resume];
+}
+
+@end
+
+// ========== 自定义历史 Cell ==========
+@interface GHAHistoryCell : UITableViewCell
+@property (nonatomic, strong) UILabel *iconLabel;
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UILabel *repoLabel;
+@property (nonatomic, strong) UILabel *dateLabel;
+@end
+
+@implementation GHAHistoryCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.iconLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, 32, 32)];
+        self.iconLabel.text = @"📥";
+        self.iconLabel.font = [UIFont systemFontOfSize:20];
+        self.iconLabel.textAlignment = NSTextAlignmentCenter;
+        [self.contentView addSubview:self.iconLabel];
+
+        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(56, 8, self.contentView.bounds.size.width - 140, 20)];
+        self.nameLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        self.nameLabel.textColor = [UIColor blackColor];
+        self.nameLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [self.contentView addSubview:self.nameLabel];
+
+        self.repoLabel = [[UILabel alloc] initWithFrame:CGRectMake(56, 30, self.contentView.bounds.size.width - 140, 16)];
+        self.repoLabel.font = [UIFont systemFontOfSize:12];
+        self.repoLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1];
+        self.repoLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [self.contentView addSubview:self.repoLabel];
+
+        self.dateLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.contentView.bounds.size.width - 100, 18, 84, 16)];
+        self.dateLabel.font = [UIFont systemFontOfSize:11];
+        self.dateLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
+        self.dateLabel.textAlignment = NSTextAlignmentRight;
+        self.dateLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        [self.contentView addSubview:self.dateLabel];
+    }
+    return self;
+}
+
+- (void)configureWithRecord:(NSDictionary *)rec {
+    self.nameLabel.text = rec[@"name"];
+    self.repoLabel.text = rec[@"repo"];
+    NSNumber *dateNum = rec[@"date"];
+    self.dateLabel.text = dateNum ? gh_formatDate(dateNum.doubleValue) : @"";
 }
 
 @end
@@ -333,27 +455,53 @@ didCompleteWithError:(NSError *)error {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"下载历史";
+    self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"清空"
                                                                               style:UIBarButtonItemStylePlain
                                                                              target:self
                                                                              action:@selector(clear)];
-    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"hcell"];
+    [self.tableView registerClass:[GHAHistoryCell class] forCellReuseIdentifier:@"hcell"];
+    self.tableView.rowHeight = 56;
+    self.tableView.separatorInset = UIEdgeInsetsMake(0, 56, 0, 0);
 }
 
-- (void)clear {
-    [GHAHistory clear];
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
     [self.tableView reloadData];
 }
 
+- (void)clear {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"确认清空"
+                                                                   message:@"确定要清空所有下载历史吗？"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [GHAHistory clear];
+        [self.tableView reloadData];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return [GHAHistory records].count;
+    NSInteger count = [GHAHistory records].count;
+    if (count == 0) {
+        // 空状态
+        UILabel *emptyLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 100, tableView.bounds.size.width, 40)];
+        emptyLabel.text = @"暂无下载记录";
+        emptyLabel.textAlignment = NSTextAlignmentCenter;
+        emptyLabel.font = [UIFont systemFontOfSize:15];
+        emptyLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
+        tableView.backgroundView = emptyLabel;
+    } else {
+        tableView.backgroundView = nil;
+    }
+    return count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"hcell" forIndexPath:indexPath];
+    GHAHistoryCell *cell = [tableView dequeueReusableCellWithIdentifier:@"hcell" forIndexPath:indexPath];
     NSDictionary *rec = [GHAHistory records][indexPath.row];
-    cell.textLabel.text = rec[@"name"];
-    cell.detailTextLabel.text = rec[@"repo"];
+    [cell configureWithRecord:rec];
     return cell;
 }
 
@@ -368,6 +516,7 @@ didCompleteWithError:(NSError *)error {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"设置";
+    self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
 }
 
@@ -379,12 +528,14 @@ didCompleteWithError:(NSError *)error {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"scell" forIndexPath:indexPath];
     if (indexPath.row == 0) {
         cell.textLabel.text = @"自动解压";
+        cell.detailTextLabel.text = @"下载完成后自动解压 zip";
         UISwitch *sw = [[UISwitch alloc] init];
         sw.on = [GHASettings autoUnzip];
         [sw addTarget:self action:@selector(toggleUnzip:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = sw;
     } else {
         cell.textLabel.text = @"下载历史";
+        cell.detailTextLabel.text = @"查看已下载的 Artifacts";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     }
     return cell;
@@ -587,7 +738,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v2.1");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.0");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
