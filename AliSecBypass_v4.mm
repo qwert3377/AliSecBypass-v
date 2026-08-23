@@ -1,6 +1,6 @@
 //
-// GitHub Actions Artifact Downloader v3.5.2
-// 修复：总是查询最新Run + HUD代替Alert Loading + 安全类型转换 + 详细日志
+// GitHub Actions Artifact Downloader v3.5.3
+// 修复：函数定义顺序 + iOS 13 deprecated API
 //
 
 #import <UIKit/UIKit.h>
@@ -32,41 +32,7 @@ static void gh_log(const char *tag, const char *msg) {
     }
 }
 
-// ========== HUD ==========
-static void gh_showHUD(NSString *text) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_hudView) [g_hudView removeFromSuperview];
-        UIWindow *window = gh_getKeyWindow();
-        if (!window) return;
-        UIView *hud = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 160, 100)];
-        hud.center = CGPointMake(window.bounds.size.width / 2, window.bounds.size.height / 2);
-        hud.backgroundColor = [UIColor colorWithWhite:0 alpha:0.82];
-        hud.layer.cornerRadius = 14;
-        UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
-        spinner.center = CGPointMake(80, 40);
-        [hud addSubview:spinner];
-        [spinner startAnimating];
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(10, 65, 140, 25)];
-        label.text = text;
-        label.textColor = [UIColor whiteColor];
-        label.textAlignment = NSTextAlignmentCenter;
-        label.font = [UIFont systemFontOfSize:14];
-        [hud addSubview:label];
-        [window addSubview:hud];
-        g_hudView = hud;
-    });
-}
-
-static void gh_hideHUD(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (g_hudView) {
-            [g_hudView removeFromSuperview];
-            g_hudView = nil;
-        }
-    });
-}
-
-// ========== 辅助 ==========
+// ========== 辅助（先声明） ==========
 static UIWindow *gh_getKeyWindow(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return nil;
@@ -99,6 +65,41 @@ static void gh_alert(NSString *title, NSString *msg) {
         [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *top = gh_topViewController();
         if (top) [top presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+// ========== HUD（在 gh_getKeyWindow 之后定义） ==========
+static void gh_showHUD(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_hudView) [g_hudView removeFromSuperview];
+        UIWindow *window = gh_getKeyWindow();
+        if (!window) return;
+        UIView *hud = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 160, 100)];
+        hud.center = CGPointMake(window.bounds.size.width / 2, window.bounds.size.height / 2);
+        hud.backgroundColor = [UIColor colorWithWhite:0 alpha:0.82];
+        hud.layer.cornerRadius = 14;
+        UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+        spinner.color = [UIColor whiteColor];
+        spinner.center = CGPointMake(80, 40);
+        [hud addSubview:spinner];
+        [spinner startAnimating];
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(10, 65, 140, 25)];
+        label.text = text;
+        label.textColor = [UIColor whiteColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = [UIFont systemFontOfSize:14];
+        [hud addSubview:label];
+        [window addSubview:hud];
+        g_hudView = hud;
+    });
+}
+
+static void gh_hideHUD(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_hudView) {
+            [g_hudView removeFromSuperview];
+            g_hudView = nil;
+        }
     });
 }
 
@@ -167,7 +168,6 @@ static void gh_parseGraphQLBody(NSData *body) {
     NSString *owner = nil;
     NSString *name = nil;
 
-    // 方式1: 直接 owner + name
     owner = vars[@"owner"];
     name = vars[@"name"];
     if (owner && name && owner.length > 0 && name.length > 0) {
@@ -176,7 +176,6 @@ static void gh_parseGraphQLBody(NSData *body) {
         gh_log("REPO", [[NSString stringWithFormat:@"direct: %@/%@", owner, name] UTF8String]);
     }
 
-    // 方式2: repo 对象
     NSDictionary *repo = vars[@"repo"];
     if (repo && [repo isKindOfClass:[NSDictionary class]]) {
         owner = repo[@"owner"];
@@ -188,7 +187,6 @@ static void gh_parseGraphQLBody(NSData *body) {
         }
     }
 
-    // 方式3: WorkflowRun URL
     if ([opName isEqualToString:@"WorkflowRun"] || [opName isEqualToString:@"WorkflowRunDetails"]) {
         NSString *runUrl = vars[@"url"];
         if (runUrl) gh_parseWorkflowRunUrl(runUrl);
@@ -424,7 +422,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.5.2";
+    versionLabel.text = @"GitHub Artifact Downloader v3.5.3";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -753,7 +751,6 @@ didCompleteWithError:(NSError *)error {
         return;
     }
     gh_log("FETCH", [[NSString stringWithFormat:@"%@/%@ (runId=%@ ignored)", g_currentOwner, g_currentRepo, g_currentRunId ?: @"nil"] UTF8String]);
-    // 总是查询最新 Run，避免 g_currentRunId 残留导致下载旧版本
     [self fetchLatestRun];
 }
 
@@ -799,7 +796,6 @@ didCompleteWithError:(NSError *)error {
             }
 
             NSDictionary *latestRun = runs[0];
-            // 安全类型转换
             NSString *runId = [NSString stringWithFormat:@"%@", latestRun[@"id"] ?: @""];
             NSString *status = latestRun[@"status"] ?: @"";
             NSString *conclusion = latestRun[@"conclusion"] ?: @"";
@@ -822,7 +818,6 @@ didCompleteWithError:(NSError *)error {
                 return;
             }
 
-            // 成功，继续获取 Artifacts（HUD 保持显示直到列表弹出）
             [self fetchArtifactsForRunId:runId runNumber:runNumberStr];
         });
     }];
@@ -936,7 +931,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.2");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.3");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
