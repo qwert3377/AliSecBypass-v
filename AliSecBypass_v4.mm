@@ -407,7 +407,6 @@ didCompleteWithError:(NSError *)error {
 // ========== 自定义悬浮球 ==========
 @interface GHAFloatingView : UIView
 @property (nonatomic, strong) UILabel *iconLabel;
-@property (nonatomic, strong) CAShapeLayer *pulseLayer;
 - (void)startPulse;
 - (void)stopPulse;
 - (void)handleTap;
@@ -436,15 +435,6 @@ didCompleteWithError:(NSError *)error {
         self.iconLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:self.iconLabel];
 
-        self.pulseLayer = [CAShapeLayer layer];
-        self.pulseLayer.frame = self.bounds;
-        self.pulseLayer.path = [UIBezierPath bezierPathWithOvalInRect:self.bounds].CGPath;
-        self.pulseLayer.fillColor = [UIColor clearColor].CGColor;
-        self.pulseLayer.strokeColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.6].CGColor;
-        self.pulseLayer.lineWidth = 2;
-        self.pulseLayer.opacity = 0;
-        [self.layer insertSublayer:self.pulseLayer below:self.iconLabel.layer];
-
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap)];
         [self addGestureRecognizer:tap];
 
@@ -460,24 +450,24 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)startPulse {
-    CABasicAnimation *scale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-    scale.fromValue = @1.0;
-    scale.toValue = @1.4;
-    scale.duration = 1.2;
-    scale.repeatCount = HUGE_VALF;
+    UIView *ring = [[UIView alloc] initWithFrame:self.bounds];
+    ring.backgroundColor = [UIColor clearColor];
+    ring.layer.cornerRadius = 32;
+    ring.layer.borderWidth = 2;
+    ring.layer.borderColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.6].CGColor;
+    ring.alpha = 0.6;
+    [self insertSubview:ring belowSubview:self.iconLabel];
 
-    CABasicAnimation *opacity = [CABasicAnimation animationWithKeyPath:@"opacity"];
-    opacity.fromValue = @0.6;
-    opacity.toValue = @0.0;
-    opacity.duration = 1.2;
-    opacity.repeatCount = HUGE_VALF;
-
-    [self.pulseLayer addAnimation:scale forKey:@"pulseScale"];
-    [self.pulseLayer addAnimation:opacity forKey:@"pulseOpacity"];
+    [UIView animateWithDuration:1.2 delay:0 options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse animations:^{
+        ring.transform = CGAffineTransformMakeScale(1.4, 1.4);
+        ring.alpha = 0;
+    } completion:nil];
+    objc_setAssociatedObject(self, &kGHTimerKey, ring, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 - (void)stopPulse {
-    [self.pulseLayer removeAllAnimations];
+    UIView *ring = objc_getAssociatedObject(self, &kGHTimerKey);
+    [ring removeFromSuperview];
 }
 
 - (void)handleTap {
