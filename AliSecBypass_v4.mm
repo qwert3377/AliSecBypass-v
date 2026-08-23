@@ -123,11 +123,12 @@ static NSString *gh_formatDate(NSTimeInterval ts) {
 + (void)saveRecords:(NSArray *)arr {
     [[NSUserDefaults standardUserDefaults] setObject:arr forKey:@"GHAD_History"];
 }
-+ (void)addRecord:(NSString *)name repo:(NSString *)repo {
++ (void)addRecord:(NSString *)name repo:(NSString *)repo filePath:(NSString *)filePath {
     NSMutableArray *arr = [self loadRecords];
     NSDictionary *rec = @{
         @"name": name ?: @"",
         @"repo": repo ?: @"",
+        @"filePath": filePath ?: @"",
         @"date": @([[NSDate date] timeIntervalSince1970])
     };
     [arr insertObject:rec atIndex:0];
@@ -224,14 +225,30 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)clear {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"确认清空"
-                                                                   message:@"确定要清空所有下载历史吗？"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"清空" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清空历史"
+                                                                   message:@"请选择清空方式"
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    [alert addAction:[UIAlertAction actionWithTitle:@"仅清空记录" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         [GHAHistory clear];
         [self.tableView reloadData];
     }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"清空并删除文件" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        NSArray *records = [GHAHistory records];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSDictionary *rec in records) {
+            NSString *path = rec[@"filePath"];
+            if (path && path.length > 0) {
+                [fm removeItemAtPath:path error:nil];
+            }
+        }
+        [GHAHistory clear];
+        [self.tableView reloadData];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        alert.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
+    }
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -262,29 +279,10 @@ didCompleteWithError:(NSError *)error {
     NSArray *records = [GHAHistory records];
     if (indexPath.row >= records.count) return;
     NSDictionary *rec = records[indexPath.row];
-    NSString *name = rec[@"name"];
-
-    // 在临时目录查找该文件
-    NSString *tmpDir = NSTemporaryDirectory();
-    NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
-    NSString *fileName = [NSString stringWithFormat:@"%@.zip", safeName];
-    NSString *path = [tmpDir stringByAppendingPathComponent:fileName];
+    NSString *path = rec[@"filePath"];
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:path]) {
-        // 尝试带序号的
-        for (NSInteger i = 1; i < 100; i++) {
-            NSString *base = [safeName stringByAppendingFormat:@"_%ld", (long)i];
-            fileName = [NSString stringWithFormat:@"%@.zip", base];
-            NSString *tryPath = [tmpDir stringByAppendingPathComponent:fileName];
-            if ([fm fileExistsAtPath:tryPath]) {
-                path = tryPath;
-                break;
-            }
-        }
-    }
-
-    if (![fm fileExistsAtPath:path]) {
+    if (!path || path.length == 0 || ![fm fileExistsAtPath:path]) {
         gh_alert(@"错误", @"文件已被删除或已过期");
         return;
     }
@@ -312,6 +310,11 @@ didCompleteWithError:(NSError *)error {
     if (editingStyle == UITableViewCellEditingStyleDelete) {
         NSMutableArray *records = [GHAHistory loadRecords];
         if (indexPath.row < records.count) {
+            NSDictionary *rec = records[indexPath.row];
+            NSString *path = rec[@"filePath"];
+            if (path && path.length > 0) {
+                [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+            }
             [records removeObjectAtIndex:indexPath.row];
             [GHAHistory saveRecords:records];
             [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
