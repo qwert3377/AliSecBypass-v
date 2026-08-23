@@ -1,9 +1,9 @@
 //
-// GitHub Actions Artifact Downloader v3.5.3
-// 修复：函数定义顺序 + iOS 13 deprecated API
-//t
+// GitHub Actions Artifact Downloader v3.5.4
+// 修复：Run页面下载当前Run，其他页面下载最新Run
+//
 
-#import <UIKit/UIKit.h>ppp
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
@@ -32,7 +32,7 @@ static void gh_log(const char *tag, const char *msg) {
     }
 }
 
-// ========== 辅助（先声明） ==========
+// ========== 辅助 ==========
 static UIWindow *gh_getKeyWindow(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return nil;
@@ -68,7 +68,7 @@ static void gh_alert(NSString *title, NSString *msg) {
     });
 }
 
-// ========== HUD（在 gh_getKeyWindow 之后定义） ==========
+// ========== HUD ==========
 static void gh_showHUD(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (g_hudView) [g_hudView removeFromSuperview];
@@ -164,10 +164,11 @@ static void gh_parseGraphQLBody(NSData *body) {
     NSDictionary *vars = json[@"variables"];
     if (!vars) return;
 
-    NSString *opName = json[@"operationName"];
+    NSString *opName = json[@"operationName"] ?: @"";
     NSString *owner = nil;
     NSString *name = nil;
 
+    // 提取仓库信息（所有页面通用）
     owner = vars[@"owner"];
     name = vars[@"name"];
     if (owner && name && owner.length > 0 && name.length > 0) {
@@ -187,9 +188,29 @@ static void gh_parseGraphQLBody(NSData *body) {
         }
     }
 
-    if ([opName isEqualToString:@"WorkflowRun"] || [opName isEqualToString:@"WorkflowRunDetails"]) {
+    // 关键：如果不是 Run 页面，清空残留的 runId
+    BOOL isRunPage = [opName isEqualToString:@"WorkflowRun"] || 
+                     [opName isEqualToString:@"WorkflowRunDetails"] ||
+                     [opName isEqualToString:@"WorkflowRunJobs"];
+
+    if (!isRunPage && g_currentRunId) {
+        g_currentRunId = nil;
+        gh_log("RUN", "Cleared (not Run page)");
+    }
+
+    // Run 页面：解析 URL 获取 runId
+    if (isRunPage) {
         NSString *runUrl = vars[@"url"];
-        if (runUrl) gh_parseWorkflowRunUrl(runUrl);
+        if (runUrl) {
+            gh_parseWorkflowRunUrl(runUrl);
+        } else {
+            // 有些 Run 页面请求没有 url 变量，但有 id
+            NSString *runId = vars[@"id"];
+            if (runId && runId.length > 0) {
+                g_currentRunId = runId;
+                gh_log("RUN", [[NSString stringWithFormat:@"from id=%@", runId] UTF8String]);
+            }
+        }
     }
 }
 
@@ -422,7 +443,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.5.3";
+    versionLabel.text = @"GitHub Artifact Downloader v3.5.4";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -740,7 +761,7 @@ didCompleteWithError:(NSError *)error {
     self.center = center;
 }
 
-// ========== 核心：总是查询最新 Run ==========
+// ========== 核心：Run页面下载当前Run，其他页面下载最新Run ==========
 - (void)fetchArtifacts {
     if (!g_currentToken || g_currentToken.length == 0) {
         gh_alert(@"错误", @"未获取到 GitHub Token，请先登录 GitHub");
@@ -750,7 +771,16 @@ didCompleteWithError:(NSError *)error {
         gh_alert(@"错误", @"未检测到仓库信息，请先进入某个仓库页面（代码/提交/Actions 等）");
         return;
     }
-    gh_log("FETCH", [[NSString stringWithFormat:@"%@/%@ (runId=%@ ignored)", g_currentOwner, g_currentRepo, g_currentRunId ?: @"nil"] UTF8String]);
+
+    // Run 页面：下载当前查看的 Run
+    if (g_currentRunId && g_currentRunId.length > 0) {
+        gh_log("FETCH", [[NSString stringWithFormat:@"Run page: %@/%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+        [self fetchArtifactsForRunId:g_currentRunId runNumber:nil];
+        return;
+    }
+
+    // 其他页面：查询最新 Run
+    gh_log("FETCH", [[NSString stringWithFormat:@"Other page: %@/%@, query latest", g_currentOwner, g_currentRepo] UTF8String]);
     [self fetchLatestRun];
 }
 
@@ -801,7 +831,7 @@ didCompleteWithError:(NSError *)error {
             NSString *conclusion = latestRun[@"conclusion"] ?: @"";
             NSString *runNumberStr = [NSString stringWithFormat:@"%@", latestRun[@"run_number"] ?: @""];
 
-            gh_log("RUN", [[NSString stringWithFormat:@"id=%@ status=%@ conclusion=%@ number=%@", runId, status, conclusion, runNumberStr] UTF8String]);
+            gh_log("RUN", [[NSString stringWithFormat:@"latest id=%@ status=%@ conclusion=%@ number=%@", runId, status, conclusion, runNumberStr] UTF8String]);
 
             if (![status isEqualToString:@"completed"]) {
                 gh_hideHUD();
@@ -858,7 +888,7 @@ didCompleteWithError:(NSError *)error {
             NSArray *artifacts = json[@"artifacts"];
             gh_log("API", [[NSString stringWithFormat:@"total_count=%@ artifacts=%lu", totalCount, (unsigned long)artifacts.count] UTF8String]);
             if (!artifacts || artifacts.count == 0) {
-                gh_alert(@"提示", @"最新 Run 成功但未生成 Artifact");
+                gh_alert(@"提示", @"该 Run 成功但未生成 Artifact");
                 return;
             }
             GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
@@ -931,7 +961,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.3");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.4");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
