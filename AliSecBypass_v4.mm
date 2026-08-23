@@ -761,6 +761,7 @@ didCompleteWithError:(NSError *)error {
 
                 GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
                 listVC.artifacts = artifacts;
+                listVC.buildNumber = buildNumLocal;
                 UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:listVC];
                 nav.modalPresentationStyle = UIModalPresentationFormSheet;
                 UIViewController *top = gh_topViewController();
@@ -768,8 +769,6 @@ didCompleteWithError:(NSError *)error {
             });
         }];
         [task resume];
-    }];
-    [runTask resume];
 }
 
 @end
