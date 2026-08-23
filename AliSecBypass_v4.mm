@@ -1,19 +1,20 @@
 //
-// GitHub Actions Artifact Downloader v3.5.1
-// 修复：gh_log 参数类型 + 任意仓库页面下载 + 运行状态检测 + 文件日志
+// GitHub Actions Artifact Downloader v3.5.2
+// 修复：总是查询最新Run + HUD代替Alert Loading + 安全类型转换 + 详细日志
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h
+#import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
 static UIView *g_floatingView = nil;
+static UIView *g_hudView = nil;
 static const char kGHAssocKey = 0;
 
-// ========== 文件日志（写入 Documents/GHAD_log.txt） ==========
+// ========== 文件日志 ==========
 static void gh_log(const char *tag, const char *msg) {
     NSString *docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
     NSString *logPath = [docs stringByAppendingPathComponent:@"GHAD_log.txt"];
@@ -29,6 +30,40 @@ static void gh_log(const char *tag, const char *msg) {
         [[NSFileManager defaultManager] createDirectoryAtPath:docs withIntermediateDirectories:YES attributes:nil error:nil];
         [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
+}
+
+// ========== HUD ==========
+static void gh_showHUD(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_hudView) [g_hudView removeFromSuperview];
+        UIWindow *window = gh_getKeyWindow();
+        if (!window) return;
+        UIView *hud = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 160, 100)];
+        hud.center = CGPointMake(window.bounds.size.width / 2, window.bounds.size.height / 2);
+        hud.backgroundColor = [UIColor colorWithWhite:0 alpha:0.82];
+        hud.layer.cornerRadius = 14;
+        UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhiteLarge];
+        spinner.center = CGPointMake(80, 40);
+        [hud addSubview:spinner];
+        [spinner startAnimating];
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(10, 65, 140, 25)];
+        label.text = text;
+        label.textColor = [UIColor whiteColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = [UIFont systemFontOfSize:14];
+        [hud addSubview:label];
+        [window addSubview:hud];
+        g_hudView = hud;
+    });
+}
+
+static void gh_hideHUD(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_hudView) {
+            [g_hudView removeFromSuperview];
+            g_hudView = nil;
+        }
+    });
 }
 
 // ========== 辅助 ==========
@@ -114,7 +149,7 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
         for (NSUInteger i = 5; i < parts.count; i++) {
             if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
                 g_currentRunId = parts[i + 1];
-                gh_log("PARSE", [[NSString stringWithFormat:@"from URL: owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+                gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
                 break;
             }
         }
@@ -127,13 +162,21 @@ static void gh_parseGraphQLBody(NSData *body) {
     if (!json || ![json isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *vars = json[@"variables"];
     if (!vars) return;
-    NSString *owner = vars[@"owner"];
-    NSString *name = vars[@"name"];
+
+    NSString *opName = json[@"operationName"];
+    NSString *owner = nil;
+    NSString *name = nil;
+
+    // 方式1: 直接 owner + name
+    owner = vars[@"owner"];
+    name = vars[@"name"];
     if (owner && name && owner.length > 0 && name.length > 0) {
         g_currentOwner = owner;
         g_currentRepo = name;
-        gh_log("REPO", [[NSString stringWithFormat:@"owner=%@ repo=%@ (direct)", owner, name] UTF8String]);
+        gh_log("REPO", [[NSString stringWithFormat:@"direct: %@/%@", owner, name] UTF8String]);
     }
+
+    // 方式2: repo 对象
     NSDictionary *repo = vars[@"repo"];
     if (repo && [repo isKindOfClass:[NSDictionary class]]) {
         owner = repo[@"owner"];
@@ -141,10 +184,11 @@ static void gh_parseGraphQLBody(NSData *body) {
         if (owner && name && owner.length > 0 && name.length > 0) {
             g_currentOwner = owner;
             g_currentRepo = name;
-            gh_log("REPO", [[NSString stringWithFormat:@"owner=%@ repo=%@ (repo obj)", owner, name] UTF8String]);
+            gh_log("REPO", [[NSString stringWithFormat:@"repoObj: %@/%@", owner, name] UTF8String]);
         }
     }
-    NSString *opName = json[@"operationName"];
+
+    // 方式3: WorkflowRun URL
     if ([opName isEqualToString:@"WorkflowRun"] || [opName isEqualToString:@"WorkflowRunDetails"]) {
         NSString *runUrl = vars[@"url"];
         if (runUrl) gh_parseWorkflowRunUrl(runUrl);
@@ -380,7 +424,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.5.1";
+    versionLabel.text = @"GitHub Artifact Downloader v3.5.2";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -698,7 +742,7 @@ didCompleteWithError:(NSError *)error {
     self.center = center;
 }
 
-// ========== 核心：任意页面获取最新 Artifact ==========
+// ========== 核心：总是查询最新 Run ==========
 - (void)fetchArtifacts {
     if (!g_currentToken || g_currentToken.length == 0) {
         gh_alert(@"错误", @"未获取到 GitHub Token，请先登录 GitHub");
@@ -708,20 +752,14 @@ didCompleteWithError:(NSError *)error {
         gh_alert(@"错误", @"未检测到仓库信息，请先进入某个仓库页面（代码/提交/Actions 等）");
         return;
     }
-    gh_log("FETCH", [[NSString stringWithFormat:@"owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId ?: @"nil"] UTF8String]);
-    if (g_currentRunId && g_currentRunId.length > 0) {
-        [self fetchArtifactsForRunId:g_currentRunId runNumber:nil];
-        return;
-    }
+    gh_log("FETCH", [[NSString stringWithFormat:@"%@/%@ (runId=%@ ignored)", g_currentOwner, g_currentRepo, g_currentRunId ?: @"nil"] UTF8String]);
+    // 总是查询最新 Run，避免 g_currentRunId 残留导致下载旧版本
     [self fetchLatestRun];
 }
 
 - (void)fetchLatestRun {
-    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"获取中..."
-                                                                     message:@"正在查询最新 Workflow Run"
-                                                              preferredStyle:UIAlertControllerStyleAlert];
-    UIViewController *top = gh_topViewController();
-    if (top) [top presentViewController:loading animated:YES completion:nil];
+    gh_showHUD(@"查询最新Run...");
+
     NSString *runsUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs?per_page=1",
                          g_currentOwner, g_currentRepo];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:runsUrl]];
@@ -729,44 +767,63 @@ didCompleteWithError:(NSError *)error {
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
     [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
     NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [loading dismissViewControllerAnimated:YES completion:nil];
-            if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
+            if (error) {
+                gh_hideHUD();
+                gh_alert(@"请求失败", error.localizedDescription);
+                return;
+            }
             NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
             if (httpResp.statusCode != 200) {
+                gh_hideHUD();
                 gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
                 return;
             }
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if (!json || ![json isKindOfClass:[NSDictionary class]]) {
-                gh_alert(@"错误", @"解析响应失败"); return;
+                gh_hideHUD();
+                gh_alert(@"错误", @"解析响应失败");
+                return;
             }
             NSArray *runs = json[@"workflow_runs"];
             if (!runs || runs.count == 0) {
-                gh_alert(@"提示", @"该仓库没有 Workflow Run"); return;
+                gh_hideHUD();
+                gh_alert(@"提示", @"该仓库没有 Workflow Run");
+                return;
             }
+
             NSDictionary *latestRun = runs[0];
-            NSString *runId = [latestRun[@"id"] stringValue];
-            NSString *status = latestRun[@"status"];
-            NSString *conclusion = latestRun[@"conclusion"];
-            NSNumber *runNumber = latestRun[@"run_number"];
-            gh_log("RUN", [[NSString stringWithFormat:@"runId=%@ status=%@ conclusion=%@ number=%@", runId, status, conclusion, runNumber] UTF8String]);
+            // 安全类型转换
+            NSString *runId = [NSString stringWithFormat:@"%@", latestRun[@"id"] ?: @""];
+            NSString *status = latestRun[@"status"] ?: @"";
+            NSString *conclusion = latestRun[@"conclusion"] ?: @"";
+            NSString *runNumberStr = [NSString stringWithFormat:@"%@", latestRun[@"run_number"] ?: @""];
+
+            gh_log("RUN", [[NSString stringWithFormat:@"id=%@ status=%@ conclusion=%@ number=%@", runId, status, conclusion, runNumberStr] UTF8String]);
+
             if (![status isEqualToString:@"completed"]) {
+                gh_hideHUD();
                 NSString *statusText = [status isEqualToString:@"in_progress"] ? @"运行中" : status;
-                NSString *msg = [NSString stringWithFormat:@"最新 Run #%@ 状态: %@\n\nArtifact 尚未生成，请等待运行完成后再试", runNumber, statusText];
+                NSString *msg = [NSString stringWithFormat:@"最新 Run #%@ 状态: %@\n\nArtifact 尚未生成，请等待运行完成后再试", runNumberStr, statusText];
                 gh_alert(@"运行中", msg);
                 return;
             }
+
             if (![conclusion isEqualToString:@"success"]) {
-                NSString *msg = [NSString stringWithFormat:@"最新 Run #%@ 结果: %@\n\n运行未成功，没有 Artifact 可下载", runNumber, conclusion ?: @"unknown"];
+                gh_hideHUD();
+                NSString *msg = [NSString stringWithFormat:@"最新 Run #%@ 结果: %@\n\n运行未成功，没有 Artifact 可下载", runNumberStr, conclusion];
                 gh_alert(@"运行失败", msg);
                 return;
             }
-            [self fetchArtifactsForRunId:runId runNumber:[runNumber stringValue]];
+
+            // 成功，继续获取 Artifacts（HUD 保持显示直到列表弹出）
+            [self fetchArtifactsForRunId:runId runNumber:runNumberStr];
         });
     }];
     [task resume];
@@ -780,12 +837,18 @@ didCompleteWithError:(NSError *)error {
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
     [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
     NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
+            gh_hideHUD();
+            if (error) {
+                gh_alert(@"请求失败", error.localizedDescription);
+                return;
+            }
             NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
             if (httpResp.statusCode != 200) {
                 gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
@@ -793,13 +856,15 @@ didCompleteWithError:(NSError *)error {
             }
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             if (!json || ![json isKindOfClass:[NSDictionary class]]) {
-                gh_alert(@"错误", @"解析响应失败"); return;
+                gh_alert(@"错误", @"解析响应失败");
+                return;
             }
             NSNumber *totalCount = json[@"total_count"];
             NSArray *artifacts = json[@"artifacts"];
-            gh_log("API", [[NSString stringWithFormat:@"total_count=%@ artifacts.count=%lu", totalCount, (unsigned long)artifacts.count] UTF8String]);
+            gh_log("API", [[NSString stringWithFormat:@"total_count=%@ artifacts=%lu", totalCount, (unsigned long)artifacts.count] UTF8String]);
             if (!artifacts || artifacts.count == 0) {
-                gh_alert(@"提示", @"最新 Run 成功但未生成 Artifact"); return;
+                gh_alert(@"提示", @"最新 Run 成功但未生成 Artifact");
+                return;
             }
             GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
             listVC.artifacts = artifacts;
@@ -871,7 +936,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.1");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.2");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
