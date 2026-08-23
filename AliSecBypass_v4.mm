@@ -11,6 +11,7 @@ static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
+static NSString *g_currentBuildNumber = nil;  // Build 号如 #142
 static UIView *g_floatingView = nil;
 static const char kGHAssocKey = 0;
 
@@ -684,40 +685,64 @@ didCompleteWithError:(NSError *)error {
         return;
     }
 
-    NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
-                        g_currentOwner, g_currentRepo, g_currentRunId];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    // Step 1: 获取 Build 号 (run_number)
+    NSString *runUrlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
+                           g_currentOwner, g_currentRepo, g_currentRunId];
+    NSMutableURLRequest *runReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:runUrlStr]];
+    [runReq setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [runReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [runReq setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
-                                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-            if (httpResp.statusCode != 200) {
-                gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
-                return;
+    NSURLSessionDataTask *runTask = [[NSURLSession sharedSession] dataTaskWithRequest:runReq
+                                                                    completionHandler:^(NSData *runData, NSURLResponse *runResponse, NSError *runError) {
+        if (!runError && runData && runData.length > 0) {
+            NSDictionary *runJson = [NSJSONSerialization JSONObjectWithData:runData options:0 error:nil];
+            if (runJson && [runJson isKindOfClass:[NSDictionary class]]) {
+                NSNumber *runNumber = runJson[@"run_number"];
+                if (runNumber) {
+                    g_currentBuildNumber = [runNumber stringValue];
+                    gh_log("BUILD", [g_currentBuildNumber UTF8String]);
+                }
             }
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
-                gh_alert(@"错误", @"解析响应失败"); return;
-            }
-            NSArray *artifacts = json[@"artifacts"];
-            if (!artifacts || artifacts.count == 0) {
-                gh_alert(@"提示", @"该 Workflow Run 没有 Artifacts"); return;
-            }
+        }
 
-            GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
-            listVC.artifacts = artifacts;
-            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:listVC];
-            nav.modalPresentationStyle = UIModalPresentationFormSheet;
-            UIViewController *top = gh_topViewController();
-            if (top) [top presentViewController:nav animated:YES completion:nil];
-        });
+        // Step 2: 获取 Artifact 列表
+        NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
+                            g_currentOwner, g_currentRepo, g_currentRunId];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+        [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+        [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+                                                                     completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
+                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                if (httpResp.statusCode != 200) {
+                    gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
+                    return;
+                }
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+                    gh_alert(@"错误", @"解析响应失败"); return;
+                }
+                NSArray *artifacts = json[@"artifacts"];
+                if (!artifacts || artifacts.count == 0) {
+                    gh_alert(@"提示", @"该 Workflow Run 没有 Artifacts"); return;
+                }
+
+                GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
+                listVC.artifacts = artifacts;
+                UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:listVC];
+                nav.modalPresentationStyle = UIModalPresentationFormSheet;
+                UIViewController *top = gh_topViewController();
+                if (top) [top presentViewController:nav animated:YES completion:nil];
+            });
+        }];
+        [task resume];
     }];
-    [task resume];
+    [runTask resume];
 }
 
 @end
