@@ -1,6 +1,6 @@
 //
-// GitHubArtifactDownloader.mm v2
-// 修复：JSON 提取逻辑 + 按钮被覆盖问题
+// GitHubArtifactDownloader.mm v3
+// 修复：Theos -Werror 编译问题
 //
 
 #import <objc/runtime.h>
@@ -47,66 +47,46 @@ static BOOL g_hookedVC = NO;
 static void downloadArtifact(id self, SEL _cmd);
 static void ensureButton(id self);
 
-#pragma mark - JSON Scanner (Fixed: no early return)
+#pragma mark - JSON Scanner
 
 static void extractWorkflowRunInfo(id obj, int depth) {
     if (depth > 20) return;
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)obj;
-
-        // 检查是否是 WorkflowRun 节点
         NSString *typeName = dict[@"__typename"];
         if ([typeName isEqualToString:@"WorkflowRun"]) {
             ghLog(@"[Scan] found WorkflowRun at depth %d", depth);
             NSString *url = dict[@"url"];
             id repoObj = dict[@"repository"];
-            ghLog(@"[Scan] url class=%@ repo class=%@", NSStringFromClass([url class]), NSStringFromClass([repoObj class]));
-
-            if (url && [url isKindOfClass:[NSString class]]) {
-                ghLog(@"[Scan] url=%@", url);
-                if ([url containsString:@"/actions/runs/"]) {
-                    NSString *runId = [url lastPathComponent];
-                    ghLog(@"[Scan] runId=%@", runId);
-
-                    NSString *repoName = nil;
-                    NSString *ownerLogin = nil;
-
-                    if (repoObj && [repoObj isKindOfClass:[NSDictionary class]]) {
-                        NSDictionary *repo = (NSDictionary *)repoObj;
-                        repoName = repo[@"name"];
-                        id ownerObj = repo[@"owner"];
-                        ghLog(@"[Scan] repoName=%@ owner class=%@", repoName, NSStringFromClass([ownerObj class]));
-                        if (ownerObj && [ownerObj isKindOfClass:[NSDictionary class]]) {
-                            ownerLogin = ((NSDictionary *)ownerObj)[@"login"];
-                        }
+            if (url && [url isKindOfClass:[NSString class]] && [url containsString:@"/actions/runs/"]) {
+                NSString *runId = [url lastPathComponent];
+                NSString *repoName = nil;
+                NSString *ownerLogin = nil;
+                if (repoObj && [repoObj isKindOfClass:[NSDictionary class]]) {
+                    NSDictionary *repo = (NSDictionary *)repoObj;
+                    repoName = repo[@"name"];
+                    id ownerObj = repo[@"owner"];
+                    if (ownerObj && [ownerObj isKindOfClass:[NSDictionary class]]) {
+                        ownerLogin = ((NSDictionary *)ownerObj)[@"login"];
                     }
-
-                    // 也尝试从 url 解析 owner/repo
-                    if (!repoName || !ownerLogin) {
-                        NSArray *parts = [url pathComponents];
-                        ghLog(@"[Scan] url parts=%@", parts);
-                        if (parts.count >= 3) {
-                            ownerLogin = parts[1];
-                            repoName = parts[2];
-                            ghLog(@"[Scan] parsed from url: %@/%@", ownerLogin, repoName);
-                        }
+                }
+                if (!repoName || !ownerLogin) {
+                    NSArray *parts = [url pathComponents];
+                    if (parts.count >= 4) {
+                        ownerLogin = parts[1];
+                        repoName = parts[2];
                     }
-
-                    if (repoName && ownerLogin && runId) {
-                        g_runURL  = [url copy];
-                        g_repo    = [repoName copy];
-                        g_owner   = [ownerLogin copy];
-                        g_cacheTime = CFAbsoluteTimeGetCurrent();
-                        ghLog(@"[Cache] SUCCESS: %@/%@ run=%@", ownerLogin, repoName, runId);
-                        return;
-                    } else {
-                        ghLog(@"[Scan] missing fields: repoName=%@ owner=%@", repoName, ownerLogin);
-                    }
+                }
+                if (repoName && ownerLogin && runId) {
+                    g_runURL  = [url copy];
+                    g_repo    = [repoName copy];
+                    g_owner   = [ownerLogin copy];
+                    g_cacheTime = CFAbsoluteTimeGetCurrent();
+                    ghLog(@"[Cache] SUCCESS: %@/%@ run=%@", ownerLogin, repoName, runId);
+                    return;
                 }
             }
         }
-
-        // 继续扫描所有子节点（不提前 return）
         for (id key in dict) {
             extractWorkflowRunInfo(dict[key], depth + 1);
         }
@@ -204,7 +184,8 @@ static void downloadArtifact(id self, SEL _cmd) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:api]];
     [req setValue:[NSString stringWithFormat:@"Bearer %@", pat] forHTTPHeaderField:@"Authorization"];
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) { showAlert(self, @"请求失败", error.localizedDescription); return; }
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -217,7 +198,8 @@ static void downloadArtifact(id self, SEL _cmd) {
             if (!artId) { showAlert(self, @"解析失败", @"无法获取 Artifact ID"); return; }
             downloadZip(self, pat, artId, artName);
         });
-    }].resume;
+    }];
+    [task resume];
 }
 
 #pragma mark - Button Management
@@ -226,20 +208,14 @@ static void ensureButton(id self) {
     UIViewController *vc = (UIViewController *)self;
     UINavigationItem *navItem = vc.navigationItem;
     if (!navItem) { ghLog(@"[Btn] no navigationItem"); return; }
-
-    // 检查是否已有我们的按钮
     for (UIBarButtonItem *item in navItem.rightBarButtonItems) {
-        if (item.action == @selector(gh_downloadArtifact)) {
-            ghLog(@"[Btn] already exists");
-            return;
-        }
+        if (item.action == @selector(gh_downloadArtifact)) { ghLog(@"[Btn] already exists"); return; }
     }
-
     UIBarButtonItem *dl = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction target:self action:@selector(gh_downloadArtifact)];
     NSMutableArray *items = [navItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
     [items addObject:dl];
     navItem.rightBarButtonItems = items;
-    ghLog(@"[Btn] added to navigationItem");
+    ghLog(@"[Btn] added");
 }
 
 #pragma mark - Hooks
@@ -263,7 +239,6 @@ static void (*orig_vdl)(id self, SEL _cmd);
 static void hook_vdl(id self, SEL _cmd) {
     orig_vdl(self, _cmd);
     ghLog(@"[Hook] viewDidLoad");
-    // 延迟添加按钮，避免被后续代码覆盖
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         ensureButton(self);
     });
@@ -280,14 +255,12 @@ static void hook_vda(id self, SEL _cmd, BOOL animated) {
 static void (*orig_setRightItems)(id self, SEL _cmd, NSArray *items, BOOL animated);
 
 static void hook_setRightItems(id self, SEL _cmd, NSArray *items, BOOL animated) {
-    // 如果设置 rightBarButtonItems，确保我们的按钮也在里面
     NSMutableArray *newItems = [items mutableCopy] ?: [NSMutableArray array];
     BOOL hasOurs = NO;
     for (UIBarButtonItem *item in newItems) {
         if (item.action == @selector(gh_downloadArtifact)) { hasOurs = YES; break; }
     }
     if (!hasOurs && g_runURL) {
-        // 找到关联的 VC
         UIViewController *vc = nil;
         if ([self respondsToSelector:@selector(topViewController)]) {
             vc = ((UINavigationController *)self).topViewController;
@@ -333,7 +306,6 @@ static void hook_push(id self, SEL _cmd, id vc, BOOL animated) {
 __attribute__((constructor))
 static void gh_init() {
     ghLog(@"[Init] loading...");
-
     Class jsonCls = objc_getClass("NSJSONSerialization");
     if (jsonCls) {
         Method m = class_getClassMethod(jsonCls, @selector(JSONObjectWithData:options:error:));
@@ -343,7 +315,6 @@ static void gh_init() {
             ghLog(@"[Init] NSJSONSerialization hooked");
         }
     }
-
     Class navCls = objc_getClass("UINavigationController");
     if (navCls) {
         Method m = class_getInstanceMethod(navCls, @selector(pushViewController:animated:));
@@ -352,7 +323,6 @@ static void gh_init() {
             method_setImplementation(m, (IMP)hook_push);
             ghLog(@"[Init] UINavigationController hooked");
         }
-        // Hook setRightBarButtonItems:animated: 防止按钮被覆盖
         Method m2 = class_getInstanceMethod(navCls, @selector(setRightBarButtonItems:animated:));
         if (m2) {
             orig_setRightItems = (void (*)(id, SEL, NSArray *, BOOL))method_getImplementation(m2);
@@ -360,7 +330,6 @@ static void gh_init() {
             ghLog(@"[Init] setRightBarButtonItems hooked");
         }
     }
-
     Class vcCls = objc_getClass("Actions.WorkflowRunViewController");
     if (vcCls && !g_hookedVC) {
         Method m1 = class_getInstanceMethod(vcCls, @selector(viewDidLoad));
@@ -377,6 +346,5 @@ static void gh_init() {
         g_hookedVC = YES;
         ghLog(@"[Init] WorkflowRunViewController hooked directly");
     }
-
     ghLog(@"[Init] done");
 }
