@@ -657,10 +657,10 @@ didCompleteWithError:(NSError *)error {
 - (instancetype)init {
     CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
     CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-    self = [super initWithFrame:CGRectMake(screenW - 72, screenH / 2.0 - 32, 64, 64)];
+    self = [super initWithFrame:CGRectMake(screenW - 60, screenH / 2.0 - 24, 48, 48)];
     if (self) {
         self.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.95];
-        self.layer.cornerRadius = 32;
+        self.layer.cornerRadius = 24;
         self.layer.shadowColor = [UIColor blackColor].CGColor;
         self.layer.shadowOffset = CGSizeMake(0, 3);
         self.layer.shadowRadius = 6;
@@ -668,7 +668,7 @@ didCompleteWithError:(NSError *)error {
 
         self.iconLabel = [[UILabel alloc] initWithFrame:self.bounds];
         self.iconLabel.text = @"📦";
-        self.iconLabel.font = [UIFont systemFontOfSize:28];
+        self.iconLabel.font = [UIFont systemFontOfSize:22];
         self.iconLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:self.iconLabel];
 
@@ -736,6 +736,10 @@ didCompleteWithError:(NSError *)error {
         return;
     }
 
+    // 调试日志
+    gh_log("DEBUG", [[NSString stringWithFormat:@"owner=%@ repo=%@ runId=%@", 
+          g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+
     // Step 1: 获取 Build 号 (run_number)
     __block NSString *buildNumLocal = nil;
     NSString *runUrlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
@@ -792,7 +796,8 @@ didCompleteWithError:(NSError *)error {
                 }
                 NSArray *artifacts = json[@"artifacts"];
                 if (!artifacts || artifacts.count == 0) {
-                    gh_alert(@"提示", @"该 Workflow Run 没有 Artifacts"); return;
+                    NSString *debugInfo = [NSString stringWithFormat:@"Run ID: %@\n如果确认有 Artifact，请尝试下拉刷新页面后再点击", g_currentRunId];
+                gh_alert(@"该 Workflow Run 没有 Artifacts", debugInfo); return;
                 }
 
                 GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
