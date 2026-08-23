@@ -175,7 +175,7 @@ didCompleteWithError:(NSError *)error {
     CGPoint translation = [pan translationInView:self.superview];
     self.center = CGPointMake(self.center.x + translation.x,
                               self.center.y + translation.y);
-    [pan setTranslation:CGPointZero inView:self.superview];
+    [pan setTranslation:CGPointMake(0, 0) inView:self.superview];
 }
 
 - (void)handleTap {
