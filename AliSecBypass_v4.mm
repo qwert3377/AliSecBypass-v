@@ -821,27 +821,6 @@ didCompleteWithError:(NSError *)error {
 // ========== Hook NSURLSession ==========
 static NSURLSessionDataTask *(*orig_dataTaskWithRequest)(id self, SEL _cmd, NSURLRequest *request);
 
-static void gh_parseApiUrl(NSString *urlString) {
-    // 从 REST API URL 提取 owner/repo，如:
-    // https://api.github.com/repos/qwert3377/AliSecBypass-v/...
-    if (!urlString || urlString.length == 0) return;
-    NSRange reposRange = [urlString rangeOfString:@"/repos/"];
-    if (reposRange.location == NSNotFound) return;
-
-    NSString *afterRepos = [urlString substringFromIndex:reposRange.location + reposRange.length];
-    NSArray *parts = [afterRepos componentsSeparatedByString:@"/"];
-    if (parts.count >= 2) {
-        NSString *owner = parts[0];
-        NSString *repo = parts[1];
-        // 去掉可能的后缀 (如 .git)
-        repo = [repo stringByReplacingOccurrencesOfString:@".git" withString:@""];
-        if (owner.length > 0 && repo.length > 0) {
-            g_currentOwner = owner;
-            g_currentRepo = repo;
-        }
-    }
-}
-
 static NSURLSessionDataTask *hooked_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
     NSURL *url = request.URL;
     if (url) {
@@ -849,9 +828,6 @@ static NSURLSessionDataTask *hooked_dataTaskWithRequest(id self, SEL _cmd, NSURL
         if (urlString && [urlString containsString:@"api.github.com"]) {
             NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
             if (auth && auth.length > 0) g_currentToken = auth;
-
-            // 从 REST API URL 提取 owner/repo
-            gh_parseApiUrl(urlString);
 
             // 从 GraphQL 请求体提取 Workflow Run URL
             NSData *body = request.HTTPBody;
