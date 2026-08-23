@@ -1,6 +1,6 @@
 //
-// GitHub Actions Artifact Downloader v3.4
-// 修复：Hook dataTaskWithRequest:completionHandler: + HTTPBodyStream + URL净化 + 增强日志
+// GitHub Actions Artifact Downloader v3.5
+// 功能：任意仓库页面下载最新 Artifact + 运行状态检测 + 文件日志
 //
 
 #import <UIKit/UIKit.h>
@@ -13,11 +13,29 @@ static NSString *g_currentRunId = nil;
 static UIView *g_floatingView = nil;
 static const char kGHAssocKey = 0;
 
+// ========== 文件日志（写入 Documents/GHAD_log.txt） ==========
 static void gh_log(const char *tag, const char *msg) {
-    NSLog(@"[GHAD][%s] %s", tag, msg);
-    printf("[GHAD][%s] %s\n", tag, msg);
+    NSString *docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    NSString *logPath = [docs stringByAppendingPathComponent:@"GHAD_log.txt"];
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm:ss";
+    NSString *line = [NSString stringWithFormat:@"[%@][%s] %s\n", [df stringFromDate:[NSDate date]], tag, msg];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } else {
+        [[NSFileManager defaultManager] createDirectoryAtPath:docs withIntermediateDirectories:YES attributes:nil error:nil];
+        [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
 }
 
+static void gh_log_ns(NSString *tag, NSString *msg) {
+    gh_log(tag.UTF8String, msg.UTF8String);
+}
+
+// ========== 辅助 ==========
 static UIWindow *gh_getKeyWindow(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return nil;
@@ -72,7 +90,6 @@ static NSString *gh_formatDate(NSTimeInterval ts) {
 static NSData *gh_readBody(NSURLRequest *request) {
     NSData *body = request.HTTPBody;
     if (body && body.length > 0) return body;
-
     NSInputStream *stream = request.HTTPBodyStream;
     if (stream) {
         [stream open];
@@ -80,11 +97,8 @@ static NSData *gh_readBody(NSURLRequest *request) {
         uint8_t buffer[4096];
         while ([stream hasBytesAvailable]) {
             NSInteger read = [stream read:buffer maxLength:sizeof(buffer)];
-            if (read > 0) {
-                [data appendBytes:buffer length:read];
-            } else if (read < 0) {
-                break;
-            }
+            if (read > 0) [data appendBytes:buffer length:read];
+            else if (read < 0) break;
         }
         [stream close];
         return data.length > 0 ? data : nil;
@@ -92,12 +106,11 @@ static NSData *gh_readBody(NSURLRequest *request) {
     return nil;
 }
 
-// ========== 解析 Workflow Run URL（净化查询参数） ==========
+// ========== 解析 Workflow Run URL ==========
 static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     if (!urlStr || urlStr.length == 0) return;
     NSString *cleanUrl = [urlStr componentsSeparatedByString:@"?"][0];
     cleanUrl = [cleanUrl componentsSeparatedByString:@"#"][0];
-
     NSArray *parts = [cleanUrl componentsSeparatedByString:@"/"];
     if (parts.count >= 8) {
         g_currentOwner = parts[3];
@@ -105,11 +118,48 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
         for (NSUInteger i = 5; i < parts.count; i++) {
             if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
                 g_currentRunId = parts[i + 1];
-                gh_log("PARSE", [[NSString stringWithFormat:@"owner=%@ repo=%@ runId=%@", 
-                      g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+                gh_log_ns(@"PARSE", [NSString stringWithFormat:@"from URL: owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId]);
                 break;
             }
         }
+    }
+}
+
+// ========== 解析 GraphQL 请求体（提取仓库信息） ==========
+static void gh_parseGraphQLBody(NSData *body) {
+    if (!body || body.length == 0) return;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
+    if (!json || ![json isKindOfClass:[NSDictionary class]]) return;
+
+    NSDictionary *vars = json[@"variables"];
+    if (!vars) return;
+
+    // 方式1: 直接 owner + name
+    NSString *owner = vars[@"owner"];
+    NSString *name = vars[@"name"];
+    if (owner && name && owner.length > 0 && name.length > 0) {
+        g_currentOwner = owner;
+        g_currentRepo = name;
+        gh_log_ns(@"REPO", [NSString stringWithFormat:@"owner=%@ repo=%@ (direct)", owner, name]);
+    }
+
+    // 方式2: repo 对象
+    NSDictionary *repo = vars[@"repo"];
+    if (repo && [repo isKindOfClass:[NSDictionary class]]) {
+        owner = repo[@"owner"];
+        name = repo[@"name"];
+        if (owner && name && owner.length > 0 && name.length > 0) {
+            g_currentOwner = owner;
+            g_currentRepo = name;
+            gh_log_ns(@"REPO", [NSString stringWithFormat:@"owner=%@ repo=%@ (repo obj)", owner, name]);
+        }
+    }
+
+    // 方式3: WorkflowRun URL
+    NSString *opName = json[@"operationName"];
+    if ([opName isEqualToString:@"WorkflowRun"] || [opName isEqualToString:@"WorkflowRunDetails"]) {
+        NSString *runUrl = vars[@"url"];
+        if (runUrl) gh_parseWorkflowRunUrl(runUrl);
     }
 }
 
@@ -210,7 +260,6 @@ didCompleteWithError:(NSError *)error {
 @end
 
 @implementation GHAHistoryCell
-
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier];
     if (self) {
@@ -222,7 +271,6 @@ didCompleteWithError:(NSError *)error {
     }
     return self;
 }
-
 - (void)configureWithRecord:(NSDictionary *)rec {
     self.textLabel.text = rec[@"name"];
     NSString *repo = rec[@"repo"];
@@ -230,7 +278,6 @@ didCompleteWithError:(NSError *)error {
     NSString *dateStr = dateNum ? gh_formatDate(dateNum.doubleValue) : @"";
     self.detailTextLabel.text = [NSString stringWithFormat:@"%@  |  %@", repo, dateStr];
 }
-
 @end
 
 // ========== 历史记录 VC ==========
@@ -238,7 +285,6 @@ didCompleteWithError:(NSError *)error {
 @end
 
 @implementation GHAHistoryVC
-
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"下载历史";
@@ -251,12 +297,10 @@ didCompleteWithError:(NSError *)error {
     self.tableView.rowHeight = 56;
     self.tableView.separatorInset = UIEdgeInsetsMake(0, 56, 0, 0);
 }
-
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.tableView reloadData];
 }
-
 - (void)clear {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"清空历史"
                                                                    message:@"确定要清空所有下载记录吗？"
@@ -266,21 +310,17 @@ didCompleteWithError:(NSError *)error {
         NSFileManager *fm = [NSFileManager defaultManager];
         for (NSDictionary *rec in records) {
             NSString *path = rec[@"filePath"];
-            if (path && path.length > 0) {
-                [fm removeItemAtPath:path error:nil];
-            }
+            if (path && path.length > 0) [fm removeItemAtPath:path error:nil];
         }
         [GHAHistory clear];
         [self.tableView reloadData];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-
     if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
         alert.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
     }
     [self presentViewController:alert animated:YES completion:nil];
 }
-
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSInteger count = [GHAHistory records].count;
     if (count == 0) {
@@ -295,27 +335,23 @@ didCompleteWithError:(NSError *)error {
     }
     return count;
 }
-
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     GHAHistoryCell *cell = [tableView dequeueReusableCellWithIdentifier:@"hcell" forIndexPath:indexPath];
     NSDictionary *rec = [GHAHistory records][indexPath.row];
     [cell configureWithRecord:rec];
     return cell;
 }
-
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     NSArray *records = [GHAHistory records];
     if (indexPath.row >= records.count) return;
     NSDictionary *rec = records[indexPath.row];
     NSString *path = rec[@"filePath"];
-
     NSFileManager *fm = [NSFileManager defaultManager];
     if (!path || path.length == 0 || ![fm fileExistsAtPath:path]) {
         gh_alert(@"错误", @"文件已被删除或已过期");
         return;
     }
-
     NSURL *fileURL = [NSURL fileURLWithPath:path];
     UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
                                                                            applicationActivities:nil];
@@ -326,31 +362,23 @@ didCompleteWithError:(NSError *)error {
     }
     [self presentViewController:activity animated:YES completion:nil];
 }
-
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return YES;
-}
-
+- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath { return YES; }
 - (UITableViewCellEditingStyle)tableView:(UITableView *)tableView editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath {
     return UITableViewCellEditingStyleDelete;
 }
-
 - (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
     if (editingStyle == UITableViewCellEditingStyleDelete) {
         NSMutableArray *records = [GHAHistory loadRecords];
         if (indexPath.row < records.count) {
             NSDictionary *rec = records[indexPath.row];
             NSString *path = rec[@"filePath"];
-            if (path && path.length > 0) {
-                [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
-            }
+            if (path && path.length > 0) [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
             [records removeObjectAtIndex:indexPath.row];
             [GHAHistory saveRecords:records];
             [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
         }
     }
 }
-
 @end
 
 // ========== 设置 VC ==========
@@ -358,25 +386,19 @@ didCompleteWithError:(NSError *)error {
 @end
 
 @implementation GHASettingsVC
-
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"设置";
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
-
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.4";
+    versionLabel.text = @"GitHub Artifact Downloader v3.5";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
     self.tableView.tableFooterView = versionLabel;
 }
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return 2;
-}
-
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return 2; }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"scell" forIndexPath:indexPath];
     if (indexPath.row == 0) {
@@ -393,7 +415,6 @@ didCompleteWithError:(NSError *)error {
     }
     return cell;
 }
-
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.row == 1) {
@@ -401,11 +422,7 @@ didCompleteWithError:(NSError *)error {
         [self.navigationController pushViewController:vc animated:YES];
     }
 }
-
-- (void)toggleUnzip:(UISwitch *)sender {
-    [GHASettings setAutoUnzip:sender.isOn];
-}
-
+- (void)toggleUnzip:(UISwitch *)sender { [GHASettings setAutoUnzip:sender.isOn]; }
 @end
 
 // ========== 自定义 Artifact Cell ==========
@@ -413,7 +430,6 @@ didCompleteWithError:(NSError *)error {
 @end
 
 @implementation GHAArtifactCell
-
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier];
     if (self) {
@@ -427,12 +443,10 @@ didCompleteWithError:(NSError *)error {
     }
     return self;
 }
-
 - (void)configureWithName:(NSString *)name size:(NSString *)size {
     self.textLabel.text = name;
     self.detailTextLabel.text = size;
 }
-
 @end
 
 // ========== Artifact 列表 VC ==========
@@ -446,7 +460,6 @@ didCompleteWithError:(NSError *)error {
 @end
 
 @implementation GHAArtifactListVC
-
 - (void)viewDidLoad {
     [super viewDidLoad];
     if (self.buildNumber && self.buildNumber.length > 0) {
@@ -455,7 +468,6 @@ didCompleteWithError:(NSError *)error {
         self.title = @"Artifacts";
     }
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
-
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"关闭"
                                                                               style:UIBarButtonItemStylePlain
                                                                              target:self
@@ -464,39 +476,32 @@ didCompleteWithError:(NSError *)error {
                                                                                style:UIBarButtonItemStylePlain
                                                                               target:self
                                                                               action:@selector(showHistory)];
-
     [self.tableView registerClass:[GHAArtifactCell class] forCellReuseIdentifier:@"cell"];
     self.tableView.rowHeight = 64;
     self.tableView.separatorInset = UIEdgeInsetsMake(0, 56, 0, 0);
-
     self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
     self.progressView.frame = CGRectMake(0, 0, self.view.bounds.size.width, 3);
     self.progressView.hidden = YES;
     self.progressView.trackTintColor = [UIColor colorWithWhite:0.9 alpha:1];
     self.progressView.progressTintColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:1];
     self.tableView.tableHeaderView = self.progressView;
-
     self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 30)];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
     self.statusLabel.font = [UIFont systemFontOfSize:13];
     self.statusLabel.textColor = [UIColor grayColor];
     self.statusLabel.hidden = YES;
 }
-
 - (void)close {
     if (self.currentTask) [self.currentTask cancel];
     [self dismissViewControllerAnimated:YES completion:nil];
 }
-
 - (void)showHistory {
     GHAHistoryVC *vc = [[GHAHistoryVC alloc] init];
     [self.navigationController pushViewController:vc animated:YES];
 }
-
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return self.artifacts.count;
 }
-
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     GHAArtifactCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell" forIndexPath:indexPath];
     NSDictionary *art = self.artifacts[indexPath.row];
@@ -505,12 +510,10 @@ didCompleteWithError:(NSError *)error {
     [cell configureWithName:name size:gh_formatSize(size)];
     return cell;
 }
-
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     [self downloadArtifactAtIndex:indexPath.row];
 }
-
 - (void)showProgress:(NSString *)text {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.progressView.hidden = NO;
@@ -521,7 +524,6 @@ didCompleteWithError:(NSError *)error {
         self.statusLabel.frame = CGRectMake(0, 4, self.view.bounds.size.width, 20);
     });
 }
-
 - (void)hideProgress {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.progressView.hidden = YES;
@@ -529,26 +531,20 @@ didCompleteWithError:(NSError *)error {
         [self.statusLabel removeFromSuperview];
     });
 }
-
 - (NSString *)localFilePathForArtifactName:(NSString *)name {
     NSString *tmpDir = NSTemporaryDirectory();
     NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
     NSString *buildNum = self.buildNumber;
-    if (!buildNum || buildNum.length == 0) {
-        buildNum = @"unknown";
-    }
+    if (!buildNum || buildNum.length == 0) buildNum = @"unknown";
     NSString *buildSuffix = [NSString stringWithFormat:@"_#%@", buildNum];
     NSString *fileName = [NSString stringWithFormat:@"%@%@.zip", safeName, buildSuffix];
-    NSString *path = [tmpDir stringByAppendingPathComponent:fileName];
-    return path;
+    return [tmpDir stringByAppendingPathComponent:fileName];
 }
-
 - (void)downloadArtifactAtIndex:(NSInteger)index {
     NSDictionary *art = self.artifacts[index];
     NSString *name = art[@"name"];
     NSString *downloadUrl = art[@"archive_download_url"];
     if (!downloadUrl) { gh_alert(@"错误", @"下载链接为空"); return; }
-
     NSString *localPath = [self localFilePathForArtifactName:name];
     NSFileManager *fm = [NSFileManager defaultManager];
     if ([fm fileExistsAtPath:localPath]) {
@@ -563,13 +559,10 @@ didCompleteWithError:(NSError *)error {
         [self presentViewController:activity animated:YES completion:nil];
         return;
     }
-
     [self showProgress:@"获取下载链接..."];
-
     NSMutableURLRequest *headReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:downloadUrl]];
     [headReq setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
     headReq.HTTPMethod = @"HEAD";
-
     GHARedirectDelegate *delegate = [[GHARedirectDelegate alloc] init];
     delegate.completion = ^(NSString *s3Url, NSError *err) {
         if (err || !s3Url || s3Url.length == 0) {
@@ -579,21 +572,16 @@ didCompleteWithError:(NSError *)error {
         }
         [self downloadFromS3:s3Url name:name];
     };
-
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg delegate:delegate delegateQueue:[NSOperationQueue mainQueue]];
     [[session dataTaskWithRequest:headReq] resume];
 }
-
 - (void)downloadFromS3:(NSString *)s3Url name:(NSString *)name {
     NSURL *url = [NSURL URLWithString:s3Url];
     if (!url) { [self hideProgress]; gh_alert(@"错误", @"链接格式错误"); return; }
-
     [self showProgress:@"下载中 0%"];
-
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-
     GHAArtifactListVC * __weak weakSelf = self;
     self.currentTask = [session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
         GHAArtifactListVC *strongSelf = weakSelf;
@@ -602,19 +590,13 @@ didCompleteWithError:(NSError *)error {
             [strongSelf hideProgress];
             if (error) { gh_alert(@"下载失败", error.localizedDescription); return; }
             if (!location) { gh_alert(@"错误", @"下载文件为空"); return; }
-
             NSString *tmpDir = NSTemporaryDirectory();
             NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
-
             NSString *buildNum = self.buildNumber;
-            if (!buildNum || buildNum.length == 0) {
-                buildNum = @"unknown";
-            }
+            if (!buildNum || buildNum.length == 0) buildNum = @"unknown";
             NSString *buildSuffix = [NSString stringWithFormat:@"_#%@", buildNum];
-
             NSString *fileName = [NSString stringWithFormat:@"%@%@.zip", safeName, buildSuffix];
             NSString *destPath = [tmpDir stringByAppendingPathComponent:fileName];
-
             NSFileManager *fm = [NSFileManager defaultManager];
             NSInteger counter = 1;
             NSString *finalPath = destPath;
@@ -624,16 +606,13 @@ didCompleteWithError:(NSError *)error {
                 finalPath = [tmpDir stringByAppendingPathComponent:fileName];
                 counter++;
             }
-
             NSError *copyErr = nil;
             [fm copyItemAtPath:location.path toPath:finalPath error:&copyErr];
             destPath = finalPath;
             if (copyErr) { gh_alert(@"错误", @"保存文件失败"); return; }
-
             NSURL *fileURL = [NSURL fileURLWithPath:destPath];
             NSString *repo = [NSString stringWithFormat:@"%@/%@", g_currentOwner ?: @"?", g_currentRepo ?: @"?"];
             [GHAHistory addRecord:name repo:repo filePath:destPath buildNumber:self.buildNumber];
-
             UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
                                                                                    applicationActivities:nil];
             if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
@@ -644,7 +623,6 @@ didCompleteWithError:(NSError *)error {
             [strongSelf presentViewController:activity animated:YES completion:nil];
         });
     }];
-
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *t) {
         if (self.currentTask.countOfBytesExpectedToReceive > 0) {
             float p = (float)self.currentTask.countOfBytesReceived / (float)self.currentTask.countOfBytesExpectedToReceive;
@@ -653,15 +631,11 @@ didCompleteWithError:(NSError *)error {
                 self.statusLabel.text = [NSString stringWithFormat:@"下载中 %.0f%%", p * 100];
             });
         }
-        if (self.currentTask.state == NSURLSessionTaskStateCompleted) {
-            [t invalidate];
-        }
+        if (self.currentTask.state == NSURLSessionTaskStateCompleted) [t invalidate];
     }];
     objc_setAssociatedObject(self.currentTask, &kGHAssocKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
     [self.currentTask resume];
 }
-
 @end
 
 // ========== 自定义悬浮球 ==========
@@ -673,6 +647,8 @@ didCompleteWithError:(NSError *)error {
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)handlePan:(UIPanGestureRecognizer *)pan;
 - (void)fetchArtifacts;
+- (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber;
+- (void)fetchLatestRun;
 @end
 
 @implementation GHAFloatingView
@@ -688,44 +664,31 @@ didCompleteWithError:(NSError *)error {
         self.layer.shadowOffset = CGSizeMake(0, 3);
         self.layer.shadowRadius = 6;
         self.layer.shadowOpacity = 0.25;
-
         self.iconLabel = [[UILabel alloc] initWithFrame:self.bounds];
         self.iconLabel.text = @"📦";
         self.iconLabel.font = [UIFont systemFontOfSize:22];
         self.iconLabel.textAlignment = NSTextAlignmentCenter;
         [self addSubview:self.iconLabel];
-
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap)];
         [self addGestureRecognizer:tap];
-
         UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
         [self addGestureRecognizer:longPress];
-
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
-
         [self startPulse];
     }
     return self;
 }
-
 - (void)startPulse {
     self.alpha = 1.0;
     [UIView animateWithDuration:1.0 delay:0 options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse | UIViewAnimationOptionAllowUserInteraction animations:^{
         self.alpha = 0.6;
     } completion:nil];
 }
-
 - (void)stopPulse {
-    [UIView animateWithDuration:0.2 animations:^{
-        self.alpha = 1.0;
-    }];
+    [UIView animateWithDuration:0.2 animations:^{ self.alpha = 1.0; }];
 }
-
-- (void)handleTap {
-    [self fetchArtifacts];
-}
-
+- (void)handleTap { [self fetchArtifacts]; }
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         GHASettingsVC *settingsVC = [[GHASettingsVC alloc] init];
@@ -735,12 +698,10 @@ didCompleteWithError:(NSError *)error {
         if (top) [top presentViewController:nav animated:YES completion:nil];
     }
 }
-
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     CGPoint t = [pan translationInView:self.superview];
     self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
     [pan setTranslation:CGPointMake(0, 0) inView:self.superview];
-
     CGFloat minX = 32, maxX = self.superview.bounds.size.width - 32;
     CGFloat minY = 64, maxY = self.superview.bounds.size.height - 64;
     CGPoint center = self.center;
@@ -749,60 +710,108 @@ didCompleteWithError:(NSError *)error {
     self.center = center;
 }
 
+// ========== 核心：任意页面获取最新 Artifact ==========
 - (void)fetchArtifacts {
     if (!g_currentToken || g_currentToken.length == 0) {
-        gh_alert(@"错误", @"未获取到 GitHub Token，请先进入某个 Workflow Run 详情页");
+        gh_alert(@"错误", @"未获取到 GitHub Token，请先登录 GitHub");
         return;
     }
-    if (!g_currentOwner || !g_currentRepo || !g_currentRunId) {
-        gh_alert(@"错误", @"未检测到 Workflow Run，请先进入 Actions 页面的某个 Run");
+    if (!g_currentOwner || !g_currentRepo) {
+        gh_alert(@"错误", @"未检测到仓库信息，请先进入某个仓库页面（代码/提交/Actions 等）");
         return;
     }
 
-    gh_log("DEBUG", [[NSString stringWithFormat:@"owner=%@ repo=%@ runId=%@", 
-          g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+    gh_log_ns(@"FETCH", [NSString stringWithFormat:@"owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId ?: @"nil"]);
 
-    __block NSString *buildNumLocal = nil;
-    NSString *runUrlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
-                           g_currentOwner, g_currentRepo, g_currentRunId];
-    NSMutableURLRequest *runReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:runUrlStr]];
-    [runReq setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
-    [runReq setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [runReq setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    // 如果在 Actions Run 页面，直接获取该 Run 的 Artifacts
+    if (g_currentRunId && g_currentRunId.length > 0) {
+        [self fetchArtifactsForRunId:g_currentRunId runNumber:nil];
+        return;
+    }
 
-    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *runTask = [[NSURLSession sharedSession] dataTaskWithRequest:runReq
-                                                                    completionHandler:^(NSData *runData, NSURLResponse *runResponse, NSError *runError) {
-        if (!runError && runData && runData.length > 0) {
-            NSDictionary *runJson = [NSJSONSerialization JSONObjectWithData:runData options:0 error:nil];
-            if (runJson && [runJson isKindOfClass:[NSDictionary class]]) {
-                NSNumber *runNumber = runJson[@"run_number"];
-                if (runNumber) {
-                    buildNumLocal = [runNumber stringValue];
-                    gh_log("BUILD", [buildNumLocal UTF8String]);
-                } else {
-                    gh_log("BUILD", "run_number not found in response");
-                }
-            } else {
-                gh_log("BUILD", "Invalid JSON response");
+    // 否则获取最新 Run
+    [self fetchLatestRun];
+}
+
+- (void)fetchLatestRun {
+    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"获取中..."
+                                                                     message:@"正在查询最新 Workflow Run"
+                                                              preferredStyle:UIAlertControllerStyleAlert];
+    UIViewController *top = gh_topViewController();
+    if (top) [top presentViewController:loading animated:YES completion:nil];
+
+    NSString *runsUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs?per_page=1",
+                         g_currentOwner, g_currentRepo];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:runsUrl]];
+    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [loading dismissViewControllerAnimated:YES completion:nil];
+            if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            if (httpResp.statusCode != 200) {
+                gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
+                return;
             }
-        } else {
-            gh_log("BUILD", [[NSString stringWithFormat:@"API error: %@", runError.localizedDescription] UTF8String]);
-        }
-        dispatch_semaphore_signal(semaphore);
-    }];
-    [runTask resume];
-    dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+                gh_alert(@"错误", @"解析响应失败"); return;
+            }
+            NSArray *runs = json[@"workflow_runs"];
+            if (!runs || runs.count == 0) {
+                gh_alert(@"提示", @"该仓库没有 Workflow Run"); return;
+            }
+            NSDictionary *latestRun = runs[0];
+            NSString *runId = [latestRun[@"id"] stringValue];
+            NSString *status = latestRun[@"status"];
+            NSString *conclusion = latestRun[@"conclusion"];
+            NSNumber *runNumber = latestRun[@"run_number"];
 
+            gh_log_ns(@"RUN", [NSString stringWithFormat:@"runId=%@ status=%@ conclusion=%@ number=%@", runId, status, conclusion, runNumber]);
+
+            // 状态判断
+            if (![status isEqualToString:@"completed"]) {
+                NSString *statusText = [status isEqualToString:@"in_progress"] ? @"运行中" : status;
+                NSString *msg = [NSString stringWithFormat:@"最新 Run #%@ 状态: %@\n\nArtifact 尚未生成，请等待运行完成后再试", runNumber, statusText];
+                gh_alert(@"运行中", msg);
+                return;
+            }
+
+            if (![conclusion isEqualToString:@"success"]) {
+                NSString *msg = [NSString stringWithFormat:@"最新 Run #%@ 结果: %@\n\n运行未成功，没有 Artifact 可下载", runNumber, conclusion ?: @"unknown"];
+                gh_alert(@"运行失败", msg);
+                return;
+            }
+
+            // 成功，获取 Artifacts
+            [self fetchArtifactsForRunId:runId runNumber:[runNumber stringValue]];
+        });
+    }];
+    [task resume];
+}
+
+- (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber {
     NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
-                        g_currentOwner, g_currentRepo, g_currentRunId];
+                        g_currentOwner, g_currentRepo, runId];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
     [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
-                                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) { gh_alert(@"请求失败", error.localizedDescription); return; }
             NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
@@ -814,16 +823,15 @@ didCompleteWithError:(NSError *)error {
             if (!json || ![json isKindOfClass:[NSDictionary class]]) {
                 gh_alert(@"错误", @"解析响应失败"); return;
             }
+            NSNumber *totalCount = json[@"total_count"];
             NSArray *artifacts = json[@"artifacts"];
+            gh_log_ns(@"API", [NSString stringWithFormat:@"total_count=%@ artifacts.count=%lu", totalCount, (unsigned long)artifacts.count]);
             if (!artifacts || artifacts.count == 0) {
-                NSString *debugInfo = [NSString stringWithFormat:@"Run ID: %@\nToken: %@\n如果确认有 Artifact，请尝试下拉刷新页面后再点击", 
-                                      g_currentRunId, g_currentToken ? @"已获取" : @"未获取"];
-                gh_alert(@"该 Workflow Run 没有 Artifacts", debugInfo); return;
+                gh_alert(@"提示", @"最新 Run 成功但未生成 Artifact"); return;
             }
-
             GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
             listVC.artifacts = artifacts;
-            listVC.buildNumber = buildNumLocal;
+            listVC.buildNumber = runNumber;
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:listVC];
             nav.modalPresentationStyle = UIModalPresentationFormSheet;
             UIViewController *top = gh_topViewController();
@@ -832,7 +840,6 @@ didCompleteWithError:(NSError *)error {
     }];
     [task resume];
 }
-
 @end
 
 // ========== Hook NSURLSession ==========
@@ -848,23 +855,12 @@ static void gh_processRequest(NSURLRequest *request) {
     NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
     if (auth && auth.length > 0) {
         g_currentToken = auth;
-        gh_log("TOKEN", "Captured token");
+        gh_log(@"TOKEN", "Captured");
     }
 
     NSData *body = gh_readBody(request);
     if (body && body.length > 0) {
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
-        if (json && [json isKindOfClass:[NSDictionary class]]) {
-            NSString *opName = json[@"operationName"];
-            NSDictionary *vars = json[@"variables"];
-            if (vars) {
-                NSString *runUrl = vars[@"url"];
-                if (runUrl) {
-                    gh_log("GRAPHQL", [[NSString stringWithFormat:@"op=%@ url=%@", opName ?: @"unknown", runUrl] UTF8String]);
-                    gh_parseWorkflowRunUrl(runUrl);
-                }
-            }
-        }
+        gh_parseGraphQLBody(body);
     }
 }
 
@@ -880,19 +876,17 @@ static NSURLSessionDataTask *hooked_dataTaskWithRequestCompletion(id self, SEL _
 
 static void gh_hookSessionClass(Class cls) {
     if (!cls) return;
-
     Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:));
     if (m1) {
         orig_dataTaskWithRequest = (NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))method_getImplementation(m1);
         method_setImplementation(m1, (IMP)hooked_dataTaskWithRequest);
-        gh_log("HOOK", "dataTaskWithRequest: hooked");
+        gh_log(@"HOOK", "dataTaskWithRequest:");
     }
-
     Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
     if (m2) {
         orig_dataTaskWithRequestCompletion = (NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))method_getImplementation(m2);
         method_setImplementation(m2, (IMP)hooked_dataTaskWithRequestCompletion);
-        gh_log("HOOK", "dataTaskWithRequest:completionHandler: hooked");
+        gh_log(@"HOOK", "dataTaskWithRequest:completionHandler:");
     }
 }
 
@@ -907,7 +901,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.4");
+    gh_log(@"INIT", "GitHub Actions Artifact Downloader v3.5");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
