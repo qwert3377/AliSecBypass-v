@@ -340,6 +340,14 @@ didCompleteWithError:(NSError *)error {
     self.title = @"设置";
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
+
+    // 版本号页脚
+    UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
+    versionLabel.text = @"GitHub Artifact Downloader v5.1";
+    versionLabel.textAlignment = NSTextAlignmentCenter;
+    versionLabel.font = [UIFont systemFontOfSize:12];
+    versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
+    self.tableView.tableFooterView = versionLabel;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
