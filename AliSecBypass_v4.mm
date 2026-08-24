@@ -1,5 +1,5 @@
 //
-// GitHub Actions Artifact Downloader v3.6.8
+// GitHub Actions Artifact Downloader v3.6.9
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
@@ -471,7 +471,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.8";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.9";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -791,9 +791,13 @@ didCompleteWithError:(NSError *)error {
     }]];
 
     // 选项2：下载当前（如果有 runId）
-    NSString *currentTitle = (g_currentRunId && g_currentRunId.length > 0)
-        ? @"下载当前 Run"
-        : @"下载当前 Run (未检测到)";
+    NSString *currentTitle;
+    NSString *displayNum = g_currentRunNumber ?: g_currentRunId;
+    if (displayNum && displayNum.length > 0) {
+        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", displayNum];
+    } else {
+        currentTitle = @"下载当前 Run (未检测到)";
+    }
     UIAlertAction *currentAction = [UIAlertAction actionWithTitle:currentTitle
                                                             style:UIAlertActionStyleDefault
                                                           handler:^(UIAlertAction *action) {
@@ -908,12 +912,10 @@ didCompleteWithError:(NSError *)error {
     [task resume];
 }
 
-- (void)fetchRunDetailsThenArtifacts:(NSString *)runIdOrNumber {
+- (void)fetchRunDetailsThenArtifacts:(NSString *)runId {
     gh_showHUD(@"查询Run信息...");
-    // runIdOrNumber 可能是内部 ID 或 run_number（从页面 URL 获取）
-    // 先尝试直接查询 run 详情
     NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
-                        g_currentOwner, g_currentRepo, runIdOrNumber];
+                        g_currentOwner, g_currentRepo, runId];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
     [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
@@ -922,52 +924,7 @@ didCompleteWithError:(NSError *)error {
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-    GHAFloatingView * __weak weakSelf = self;
     NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        GHAFloatingView *strongSelf = weakSelf;
-        if (!strongSelf) return;
-        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-        if (httpResp.statusCode == 200) {
-            // 是内部 ID，解析 run_number
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            NSString *runNumberStr = [NSString stringWithFormat:@"%@", json[@"run_number"] ?: @""];
-            gh_log("DETAIL", [[NSString stringWithFormat:@"internalId=%@ run_number=%@", runIdOrNumber, runNumberStr] UTF8String]);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [strongSelf fetchArtifactsForRunId:runIdOrNumber runNumber:runNumberStr];
-            });
-        } else if (httpResp.statusCode == 404) {
-            // 可能是 run_number，查询 runs 列表找内部 ID
-            gh_log("DETAIL", [[NSString stringWithFormat:@"%@ is not internal ID, querying list...", runIdOrNumber] UTF8String]);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [strongSelf fetchRunByNumberThenArtifacts:runIdOrNumber];
-            });
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                gh_hideHUD();
-                NSString *msg = error ? error.localizedDescription : [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode];
-                gh_alert(@"请求失败", msg);
-            });
-        }
-    }];
-    [task resume];
-}
-
-- (void)fetchRunByNumberThenArtifacts:(NSString *)runNumber {
-    gh_showHUD(@"查询Run列表...");
-    NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs?per_page=30",
-                        g_currentOwner, g_currentRepo];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
-    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-    GHAFloatingView * __weak weakSelf = self;
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        GHAFloatingView *strongSelf = weakSelf;
-        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) {
                 gh_hideHUD();
@@ -981,31 +938,21 @@ didCompleteWithError:(NSError *)error {
                 return;
             }
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            NSArray *runs = json[@"workflow_runs"];
-            NSString *foundRunId = nil;
-            NSString *foundRunNumber = nil;
-            for (NSDictionary *run in runs) {
-                NSString *num = [NSString stringWithFormat:@"%@", run[@"run_number"] ?: @""];
-                if ([num isEqualToString:runNumber]) {
-                    foundRunId = [NSString stringWithFormat:@"%@", run[@"id"] ?: @""];
-                    foundRunNumber = num;
-                    break;
-                }
-            }
-            if (foundRunId && foundRunId.length > 0) {
-                gh_log("LIST", [[NSString stringWithFormat:@"Found runId=%@ for run_number=%@", foundRunId, foundRunNumber] UTF8String]);
-                [strongSelf fetchArtifactsForRunId:foundRunId runNumber:foundRunNumber];
-            } else {
+            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
                 gh_hideHUD();
-                gh_alert(@"错误", [NSString stringWithFormat:@"未找到 Run #%@", runNumber]);
+                gh_alert(@"错误", @"解析响应失败");
+                return;
             }
+            NSString *runNumberStr = [NSString stringWithFormat:@"%@", json[@"run_number"] ?: @""];
+            gh_log("DETAIL", [[NSString stringWithFormat:@"runId=%@ run_number=%@", runId, runNumberStr] UTF8String]);
+            [self fetchArtifactsForRunId:runId runNumber:runNumberStr];
         });
     }];
     [task resume];
 }
 
 - (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber {
-    // 如果没有 runNumber，先查询 run 详情获取 run_number（用于列表标题显示）
+    // 如果没有 runNumber，先查询 run 详情获取 run_number
     if (!runNumber || runNumber.length == 0) {
         [self fetchRunDetailsThenArtifacts:runId];
         return;
@@ -1129,7 +1076,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.8");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.9");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
