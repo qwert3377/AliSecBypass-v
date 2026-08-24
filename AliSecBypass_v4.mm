@@ -1,11 +1,10 @@
 //
-// GitHub Actions Artifact Downloader v3.6.13
-// 改为双选项菜单："下载最新 Run" / "下载当前 Run"
-// 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
+// GitHub Actions Artifact Downloader v3.6.14
+// 修复日志过滤：按步骤分组，只提取失败步骤（红色）的日志
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime
+#import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
@@ -158,7 +157,6 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     }
 }
 
-// 从 REST API URL 解析 runId，例如 api.github.com/repos/owner/repo/actions/runs/174
 static void gh_parseRestApiUrl(NSString *urlString) {
     if (!urlString || urlString.length == 0) return;
     if (![urlString containsString:@"api.github.com"]) return;
@@ -189,7 +187,6 @@ static void gh_parseGraphQLBody(NSData *body) {
     NSString *owner = nil;
     NSString *name = nil;
 
-    // 提取仓库信息（所有页面通用）
     owner = vars[@"owner"];
     name = vars[@"name"];
     if (owner && name && owner.length > 0 && name.length > 0) {
@@ -209,7 +206,6 @@ static void gh_parseGraphQLBody(NSData *body) {
         }
     }
 
-    // 检测 Run 页面相关请求，提取 runId（不再清空！）
     BOOL isRunPage = [opName isEqualToString:@"WorkflowRun"] ||
                      [opName isEqualToString:@"WorkflowRunDetails"] ||
                      [opName isEqualToString:@"WorkflowRunJobs"] ||
@@ -224,7 +220,6 @@ static void gh_parseGraphQLBody(NSData *body) {
         } else {
             NSString *runId = vars[@"id"];
             if (runId && runId.length > 0) {
-                // id 可能是全局 ID，尝试提取数字部分
                 NSRegularExpression *numRegex = [NSRegularExpression regularExpressionWithPattern:@"\\d+" options:0 error:nil];
                 NSTextCheckingResult *numMatch = [numRegex firstMatchInString:runId options:0 range:NSMakeRange(0, runId.length)];
                 if (numMatch) {
@@ -465,7 +460,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.13";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.14";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -711,6 +706,24 @@ didCompleteWithError:(NSError *)error {
 }
 @end
 
+// ========== 日志步骤模型 ==========
+@interface GHALogStep : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, strong) NSMutableArray<NSString *> *lines;
+@property (nonatomic, assign) BOOL hasError;
+@end
+
+@implementation GHALogStep
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _lines = [NSMutableArray array];
+        _hasError = NO;
+    }
+    return self;
+}
+@end
+
 // ========== 自定义悬浮球 ==========
 @interface GHAFloatingView : UIView
 @property (nonatomic, strong) UILabel *iconLabel;
@@ -762,7 +775,6 @@ didCompleteWithError:(NSError *)error {
     [UIView animateWithDuration:0.2 animations:^{ self.alpha = 1.0; }];
 }
 
-// ========== 点击悬浮球：弹出菜单 ==========
 - (void)handleTap {
     if (!g_currentToken || g_currentToken.length == 0) {
         gh_alert(@"错误", @"未获取到 GitHub Token，请先登录 GitHub");
@@ -777,7 +789,6 @@ didCompleteWithError:(NSError *)error {
                                                                    message:[NSString stringWithFormat:@"仓库: %@/%@", g_currentOwner, g_currentRepo]
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
-    // 选项1：永远下载最新
     [alert addAction:[UIAlertAction actionWithTitle:@"下载最新 Run"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *action) {
@@ -785,7 +796,6 @@ didCompleteWithError:(NSError *)error {
         [self fetchLatestRun];
     }]];
 
-    // 选项2：下载当前（如果有 runId）
     NSString *currentTitle = (g_currentRunId && g_currentRunId.length > 0)
         ? @"下载当前 Run"
         : @"下载当前 Run (未检测到)";
@@ -954,7 +964,6 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber {
-    // 如果没有 runNumber，先查询 run 详情获取 run_number
     if (!runNumber || runNumber.length == 0) {
         [self fetchRunDetailsThenArtifacts:runId];
         return;
@@ -1007,6 +1016,88 @@ didCompleteWithError:(NSError *)error {
     [task resume];
 }
 
+// ========== 日志解析辅助：按步骤分组，只保留失败步骤 ==========
++ (NSString *)filterErrorStepsFromLog:(NSString *)logText jobName:(NSString *)jobName {
+    if (!logText || logText.length == 0) return nil;
+
+    NSArray *allLines = [logText componentsSeparatedByString:@"\n"];
+    NSMutableArray<GHALogStep *> *steps = [NSMutableArray array];
+    GHALogStep *currentStep = nil;
+
+    // 匹配时间戳前缀: 2024-01-01T00:00:00.1234567Z
+    NSRegularExpression *tsRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d+Z\\s*" options:0 error:nil];
+
+    for (NSString *rawLine in allLines) {
+        NSString *line = rawLine;
+        NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+        if (tsMatch) {
+            line = [line substringFromIndex:tsMatch.range.length];
+        }
+
+        if ([line hasPrefix:@"##[group]"]) {
+            currentStep = [[GHALogStep alloc] init];
+            currentStep.name = [line substringFromIndex:@"##[group]".length];
+            [steps addObject:currentStep];
+        } else if ([line hasPrefix:@"##[endgroup]"]) {
+            currentStep = nil;
+        } else if ([line hasPrefix:@"##[error]"]) {
+            if (currentStep) {
+                currentStep.hasError = YES;
+                [currentStep.lines addObject:line];
+            }
+        } else if (currentStep) {
+            [currentStep.lines addObject:line];
+            NSString *lower = [line lowercaseString];
+            if ([lower containsString:@"error:"] ||
+                [lower containsString:@"fatal:"] ||
+                [lower containsString:@"failed"] ||
+                [lower containsString:@"make:***"] ||
+                [lower containsString:@"undefined reference"] ||
+                [lower containsString:@"redefinition"] ||
+                [lower containsString:@"no such file"] ||
+                [lower containsString:@"permission denied"] ||
+                [lower containsString:@"command not found"] ||
+                [lower containsString:@"exit code"]) {
+                currentStep.hasError = YES;
+            }
+        }
+    }
+
+    NSMutableArray<NSString *> *errorStepsText = [NSMutableArray array];
+    for (GHALogStep *step in steps) {
+        if (step.hasError && step.lines.count > 0) {
+            NSString *stepText = [NSString stringWithFormat:@"▶ %@\n%@", step.name, [step.lines componentsJoinedByString:@"\n"]];
+            [errorStepsText addObject:stepText];
+        }
+    }
+
+    if (errorStepsText.count == 0) return nil;
+
+    NSString *header = [NSString stringWithFormat:@"📦 Job: %@\n共 %lu 个失败步骤", jobName, (unsigned long)errorStepsText.count];
+    return [NSString stringWithFormat:@"%@\n\n%@", header, [errorStepsText componentsJoinedByString:@"\n\n──────────────\n\n"]];
+}
+
+- (void)showLogAlertWithText:(NSString *)text {
+    if (!text || text.length == 0) {
+        gh_alert(@"提示", @"未找到错误日志");
+        return;
+    }
+    NSString *preview = text.length > 3000 ? [text substringToIndex:3000] : text;
+    UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"失败步骤日志"
+                                                                      message:preview
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+    [logAlert addAction:[UIAlertAction actionWithTitle:@"复制全部"
+                                                   style:UIAlertActionStyleDefault
+                                                 handler:^(UIAlertAction *action) {
+        [[UIPasteboard generalPasteboard] setString:text];
+    }]];
+    [logAlert addAction:[UIAlertAction actionWithTitle:@"关闭"
+                                                   style:UIAlertActionStyleCancel
+                                                 handler:nil]];
+    UIViewController *top = gh_topViewController();
+    if (top) [top presentViewController:logAlert animated:YES completion:nil];
+}
+
 - (void)fetchRunLogs:(NSString *)runId {
     gh_showHUD(@"获取日志...");
     NSString *jobsUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/jobs",
@@ -1016,8 +1107,11 @@ didCompleteWithError:(NSError *)error {
     [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    GHAFloatingView * __weak weakSelf = self;
     NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            GHAFloatingView *strongSelf = weakSelf;
+            if (!strongSelf) { gh_hideHUD(); return; }
             if (error) {
                 gh_hideHUD();
                 gh_alert(@"错误", @"无法获取日志");
@@ -1030,64 +1124,56 @@ didCompleteWithError:(NSError *)error {
                 gh_alert(@"错误", @"未找到 job 日志");
                 return;
             }
-            NSNumber *jobId = jobs[0][@"id"];
-            [self fetchJobLogs:jobId];
+            [strongSelf fetchAllJobLogs:jobs];
         });
     }];
     [task resume];
 }
 
-- (void)fetchJobLogs:(NSNumber *)jobId {
-    NSString *logUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/jobs/%@/logs",
-                        g_currentOwner, g_currentRepo, jobId];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:logUrl]];
-    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            gh_hideHUD();
-            if (error) {
-                gh_alert(@"错误", @"无法获取日志内容");
-                return;
-            }
-            NSString *logText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            if (!logText || logText.length == 0) {
-                gh_alert(@"错误", @"日志为空");
-                return;
-            }
-            // 过滤只保留错误行
-            NSArray *allLines = [logText componentsSeparatedByString:@"\n"];
-            NSMutableArray *errorLines = [NSMutableArray array];
-            for (NSString *line in allLines) {
-                NSString *lower = [line lowercaseString];
-                if ([lower containsString:@"error"] || [lower containsString:@"错误"]) {
-                    [errorLines addObject:line];
+- (void)fetchAllJobLogs:(NSArray *)jobs {
+    NSMutableArray<NSString *> *allErrorLogs = [NSMutableArray array];
+    dispatch_group_t group = dispatch_group_create();
+
+    for (NSDictionary *job in jobs) {
+        NSNumber *jobId = job[@"id"];
+        NSString *jobName = job[@"name"] ?: @"Unknown Job";
+        dispatch_group_enter(group);
+        NSString *logUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/jobs/%@/logs",
+                            g_currentOwner, g_currentRepo, jobId];
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:logUrl]];
+        [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+        [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+        NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (!error && data) {
+                NSString *logText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (logText) {
+                    NSString *filtered = [GHAFloatingView filterErrorStepsFromLog:logText jobName:jobName];
+                    if (filtered.length > 0) {
+                        @synchronized(allErrorLogs) {
+                            [allErrorLogs addObject:filtered];
+                        }
+                    }
                 }
             }
-            NSString *filteredText = [errorLines componentsJoinedByString:@"\n"];
-            if (filteredText.length == 0) {
-                filteredText = @"未找到错误行，以下为完整日志前2000字符：\n\n";
-                filteredText = [filteredText stringByAppendingString:logText.length > 2000 ? [logText substringToIndex:2000] : logText];
-            }
-            NSString *preview = filteredText.length > 3000 ? [filteredText substringToIndex:3000] : filteredText;
-            UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"编译错误日志"
-                                                                              message:preview
-                                                                       preferredStyle:UIAlertControllerStyleAlert];
-            [logAlert addAction:[UIAlertAction actionWithTitle:@"复制全部"
-                                                           style:UIAlertActionStyleDefault
-                                                         handler:^(UIAlertAction *action) {
-                [[UIPasteboard generalPasteboard] setString:logText];
-            }]];
-            [logAlert addAction:[UIAlertAction actionWithTitle:@"关闭"
-                                                           style:UIAlertActionStyleCancel
-                                                         handler:nil]];
-            UIViewController *top = gh_topViewController();
-            if (top) [top presentViewController:logAlert animated:YES completion:nil];
-        });
-    }];
-    [task resume];
+            dispatch_group_leave(group);
+        }];
+        [task resume];
+    }
+
+    GHAFloatingView * __weak weakSelf = self;
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        gh_hideHUD();
+        GHAFloatingView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (allErrorLogs.count == 0) {
+            gh_alert(@"提示", @"未找到失败步骤的日志，可能日志已过期或格式不兼容");
+            return;
+        }
+        NSString *finalText = [allErrorLogs componentsJoinedByString:@"\n\n================\n\n"];
+        [strongSelf showLogAlertWithText:finalText];
+    });
 }
 @end
 
@@ -1101,17 +1187,14 @@ static void gh_processRequest(NSURLRequest *request) {
     NSString *urlString = url.absoluteString;
     if (!urlString || ![urlString containsString:@"github.com"]) return;
 
-    // 捕获 Token
     NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
     if (auth && auth.length > 0) {
         g_currentToken = auth;
         gh_log("TOKEN", "Captured");
     }
 
-    // 从 REST API URL 解析 runId
     gh_parseRestApiUrl(urlString);
 
-    // 从 GraphQL body 解析
     NSData *body = gh_readBody(request);
     if (body && body.length > 0) {
         gh_parseGraphQLBody(body);
@@ -1155,7 +1238,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.13");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.14");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
