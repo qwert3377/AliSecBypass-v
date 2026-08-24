@@ -1,5 +1,5 @@
 //
-// GitHub Actions Artifact Downloader v3.6.0
+// GitHub Actions Artifact Downloader v3.6.1
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
@@ -465,7 +465,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.0";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.1";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -796,7 +796,7 @@ didCompleteWithError:(NSError *)error {
                                                           handler:^(UIAlertAction *action) {
         if (g_currentRunId && g_currentRunId.length > 0) {
             gh_log("MENU", [[NSString stringWithFormat:@"User chose: Current Run #%@", g_currentRunId] UTF8String]);
-            [self fetchArtifactsForRunId:g_currentRunId runNumber:g_currentRunId];
+            [self fetchArtifactsForRunId:g_currentRunId runNumber:nil];
         } else {
             gh_alert(@"提示", @"未检测到当前 Run 页面。\n\n请先进入某个 Workflow Run 详情页面，或选择「下载最新 Run」");
         }
@@ -905,7 +905,51 @@ didCompleteWithError:(NSError *)error {
     [task resume];
 }
 
+- (void)fetchRunDetailsThenArtifacts:(NSString *)runId {
+    gh_showHUD(@"查询Run信息...");
+    NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
+                        g_currentOwner, g_currentRepo, runId];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                gh_hideHUD();
+                gh_alert(@"请求失败", error.localizedDescription);
+                return;
+            }
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            if (httpResp.statusCode != 200) {
+                gh_hideHUD();
+                gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
+                return;
+            }
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
+                gh_hideHUD();
+                gh_alert(@"错误", @"解析响应失败");
+                return;
+            }
+            NSString *runNumberStr = [NSString stringWithFormat:@"%@", json[@"run_number"] ?: @""];
+            gh_log("DETAIL", [[NSString stringWithFormat:@"runId=%@ run_number=%@", runId, runNumberStr] UTF8String]);
+            [self fetchArtifactsForRunId:runId runNumber:runNumberStr];
+        });
+    }];
+    [task resume];
+}
+
 - (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber {
+    // 如果没有 runNumber，先查询 run 详情获取 run_number
+    if (!runNumber || runNumber.length == 0) {
+        [self fetchRunDetailsThenArtifacts:runId];
+        return;
+    }
     NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
                         g_currentOwner, g_currentRepo, runId];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
@@ -1019,7 +1063,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.0");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.1");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
