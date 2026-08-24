@@ -1,5 +1,5 @@
 //
-// GitHub Actions Artifact Downloader v3.6.5
+// GitHub Actions Artifact Downloader v3.6.6
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
@@ -11,7 +11,6 @@ static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
-static NSString *g_currentRunNumber = nil;
 static UIView *g_floatingView = nil;
 static UIView *g_hudView = nil;
 static const char kGHAssocKey = 0;
@@ -146,44 +145,22 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     NSString *cleanUrl = [urlStr componentsSeparatedByString:@"?"][0];
     cleanUrl = [cleanUrl componentsSeparatedByString:@"#"][0];
     NSArray *parts = [cleanUrl componentsSeparatedByString:@"/"];
-
-    // Find owner/repo index (skip https:// or http:// prefix)
-    NSInteger ownerIdx = -1;
-    for (NSInteger i = 0; i < (NSInteger)parts.count; i++) {
-        NSString *p = parts[i];
-        if (p.length > 0 && ![p isEqualToString:@"https:"] && ![p isEqualToString:@"http:"]) {
-            // Check if this looks like a github domain
-            if ([p containsString:@"github.com"]) {
-                ownerIdx = i + 1;
+    if (parts.count >= 8) {
+        g_currentOwner = parts[3];
+        g_currentRepo = parts[4];
+        BOOL foundRun = NO;
+        for (NSUInteger i = 5; i < parts.count; i++) {
+            if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
+                g_currentRunId = parts[i + 1];
+                gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+                foundRun = YES;
                 break;
             }
         }
-    }
-    if (ownerIdx < 0 || ownerIdx + 1 >= (NSInteger)parts.count) return;
-
-    g_currentOwner = parts[ownerIdx];
-    g_currentRepo = parts[ownerIdx + 1];
-
-    BOOL foundRun = NO;
-    for (NSInteger i = ownerIdx + 2; i < (NSInteger)parts.count; i++) {
-        if ([parts[i] isEqualToString:@"runs"] && (i + 1) < (NSInteger)parts.count) {
-            NSString *runNum = parts[i + 1];
-            // Validate: should be numeric and reasonable length (run_number, not internal ID)
-            NSRegularExpression *numRegex = [NSRegularExpression regularExpressionWithPattern:@"^\d+$" options:0 error:nil];
-            if ([numRegex firstMatchInString:runNum options:0 range:NSMakeRange(0, runNum.length)]) {
-                g_currentRunId = runNum;
-                g_currentRunNumber = runNum;
-                gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runNumber=%@", g_currentOwner, g_currentRepo, g_currentRunNumber] UTF8String]);
-                foundRun = YES;
-            }
-            break;
+        if (!foundRun) {
+            g_currentRunId = nil;
+            gh_log("PARSE", "Cleared runId (not run page)");
         }
-    }
-    if (!foundRun) {
-        // Not a run page, clear run info
-        g_currentRunId = nil;
-        g_currentRunNumber = nil;
-        gh_log("PARSE", "Cleared runId (not run page)");
     }
 }
 
@@ -494,7 +471,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.5";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.6";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -814,13 +791,9 @@ didCompleteWithError:(NSError *)error {
     }]];
 
     // 选项2：下载当前（如果有 runId）
-    NSString *currentTitle;
-    NSString *displayNum = g_currentRunNumber ?: g_currentRunId;
-    if (displayNum && displayNum.length > 0) {
-        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", displayNum];
-    } else {
-        currentTitle = @"下载当前 Run (未检测到)";
-    }
+    NSString *currentTitle = (g_currentRunId && g_currentRunId.length > 0)
+        ? @"下载当前 Run"
+        : @"下载当前 Run (未检测到)";
     UIAlertAction *currentAction = [UIAlertAction actionWithTitle:currentTitle
                                                             style:UIAlertActionStyleDefault
                                                           handler:^(UIAlertAction *action) {
@@ -935,51 +908,7 @@ didCompleteWithError:(NSError *)error {
     [task resume];
 }
 
-- (void)fetchRunDetailsThenArtifacts:(NSString *)runId {
-    gh_showHUD(@"查询Run信息...");
-    NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@",
-                        g_currentOwner, g_currentRepo, runId];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [req setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
-    [req setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) {
-                gh_hideHUD();
-                gh_alert(@"请求失败", error.localizedDescription);
-                return;
-            }
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-            if (httpResp.statusCode != 200) {
-                gh_hideHUD();
-                gh_alert(@"请求失败", [NSString stringWithFormat:@"HTTP %ld", (long)httpResp.statusCode]);
-                return;
-            }
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if (!json || ![json isKindOfClass:[NSDictionary class]]) {
-                gh_hideHUD();
-                gh_alert(@"错误", @"解析响应失败");
-                return;
-            }
-            NSString *runNumberStr = [NSString stringWithFormat:@"%@", json[@"run_number"] ?: @""];
-            gh_log("DETAIL", [[NSString stringWithFormat:@"runId=%@ run_number=%@", runId, runNumberStr] UTF8String]);
-            [self fetchArtifactsForRunId:runId runNumber:runNumberStr];
-        });
-    }];
-    [task resume];
-}
-
 - (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber {
-    // 如果没有 runNumber，先查询 run 详情获取 run_number
-    if (!runNumber || runNumber.length == 0) {
-        [self fetchRunDetailsThenArtifacts:runId];
-        return;
-    }
     NSString *urlStr = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/artifacts",
                         g_currentOwner, g_currentRepo, runId];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
@@ -1099,7 +1028,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.5");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.6");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
