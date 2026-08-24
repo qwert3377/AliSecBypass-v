@@ -1,10 +1,10 @@
 //
-// GitHub Actions Artifact Downloader v3.6.14
-// 修复日志过滤：按步骤分组，只提取失败步骤（红色）的日志
+// GitHub Actions Artifact Downloader v3.6.15
+// 修复日志过滤：修正时间戳正则转义，增加无 group 标记时的 fallback
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime
+#import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
@@ -460,7 +460,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.14";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.15";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -1023,18 +1023,23 @@ didCompleteWithError:(NSError *)error {
     NSArray *allLines = [logText componentsSeparatedByString:@"\n"];
     NSMutableArray<GHALogStep *> *steps = [NSMutableArray array];
     GHALogStep *currentStep = nil;
+    BOOL foundAnyGroup = NO;
 
     // 匹配时间戳前缀: 2024-01-01T00:00:00.1234567Z
+    // ⚠️ 必须用 \\d，Objective-C 字符串里 \d 会被解析成普通字母 d
     NSRegularExpression *tsRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d+Z\\s*" options:0 error:nil];
 
     for (NSString *rawLine in allLines) {
         NSString *line = rawLine;
-        NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
-        if (tsMatch) {
-            line = [line substringFromIndex:tsMatch.range.length];
+        if (tsRegex) {
+            NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+            if (tsMatch) {
+                line = [line substringFromIndex:tsMatch.range.length];
+            }
         }
 
         if ([line hasPrefix:@"##[group]"]) {
+            foundAnyGroup = YES;
             currentStep = [[GHALogStep alloc] init];
             currentStep.name = [line substringFromIndex:@"##[group]".length];
             [steps addObject:currentStep];
@@ -1044,6 +1049,13 @@ didCompleteWithError:(NSError *)error {
             if (currentStep) {
                 currentStep.hasError = YES;
                 [currentStep.lines addObject:line];
+            } else {
+                // 没有 group 的 error，创建匿名步骤
+                currentStep = [[GHALogStep alloc] init];
+                currentStep.name = @"(Error)";
+                currentStep.hasError = YES;
+                [currentStep.lines addObject:line];
+                [steps addObject:currentStep];
             }
         } else if (currentStep) {
             [currentStep.lines addObject:line];
@@ -1068,6 +1080,31 @@ didCompleteWithError:(NSError *)error {
         if (step.hasError && step.lines.count > 0) {
             NSString *stepText = [NSString stringWithFormat:@"▶ %@\n%@", step.name, [step.lines componentsJoinedByString:@"\n"]];
             [errorStepsText addObject:stepText];
+        }
+    }
+
+    // Fallback：如果日志里完全没有 ##[group] 标记，但包含编译错误，直接收 error: 行
+    if (errorStepsText.count == 0 && !foundAnyGroup) {
+        NSMutableArray<NSString *> *fallbackLines = [NSMutableArray array];
+        for (NSString *rawLine in allLines) {
+            NSString *line = rawLine;
+            if (tsRegex) {
+                NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+                if (tsMatch) {
+                    line = [line substringFromIndex:tsMatch.range.length];
+                }
+            }
+            NSString *lower = [line lowercaseString];
+            if ([lower containsString:@"error:"] ||
+                [lower containsString:@"fatal:"] ||
+                [lower containsString:@"make:***"] ||
+                [lower containsString:@"exit code"]) {
+                [fallbackLines addObject:line];
+            }
+        }
+        if (fallbackLines.count > 0) {
+            NSString *fb = [NSString stringWithFormat:@"▶ 未识别步骤\n%@", [fallbackLines componentsJoinedByString:@"\n"]];
+            [errorStepsText addObject:fb];
         }
     }
 
@@ -1238,7 +1275,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.14");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.15");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
