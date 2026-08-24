@@ -1,10 +1,10 @@
 //
-// GitHub Actions Artifact Downloader v3.6.15
-// 修复日志过滤：修正时间戳正则转义，增加无 group 标记时的 fallback
+// GitHub Actions Artifact Downloader v3.6.16
+// 修复日志过滤：步骤范围改为 ##[group] 到下一个 ##[group] 之前，完整保留步骤内所有内容
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime.
+#import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
@@ -460,7 +460,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.15";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.16";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -703,24 +703,6 @@ didCompleteWithError:(NSError *)error {
     }];
     objc_setAssociatedObject(self.currentTask, &kGHAssocKey, timer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [self.currentTask resume];
-}
-@end
-
-// ========== 日志步骤模型 ==========
-@interface GHALogStep : NSObject
-@property (nonatomic, copy) NSString *name;
-@property (nonatomic, strong) NSMutableArray<NSString *> *lines;
-@property (nonatomic, assign) BOOL hasError;
-@end
-
-@implementation GHALogStep
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _lines = [NSMutableArray array];
-        _hasError = NO;
-    }
-    return self;
 }
 @end
 
@@ -1016,96 +998,90 @@ didCompleteWithError:(NSError *)error {
     [task resume];
 }
 
-// ========== 日志解析辅助：按步骤分组，只保留失败步骤 ==========
+// ========== 日志解析辅助：按步骤完整提取，只保留含错误的步骤 ==========
 + (NSString *)filterErrorStepsFromLog:(NSString *)logText jobName:(NSString *)jobName {
     if (!logText || logText.length == 0) return nil;
 
     NSArray *allLines = [logText componentsSeparatedByString:@"\n"];
-    NSMutableArray<GHALogStep *> *steps = [NSMutableArray array];
-    GHALogStep *currentStep = nil;
-    BOOL foundAnyGroup = NO;
+    NSMutableArray<NSString *> *errorStepsText = [NSMutableArray array];
 
-    // 匹配时间戳前缀: 2024-01-01T00:00:00.1234567Z
-    // ⚠️ 必须用 \\d，Objective-C 字符串里 \d 会被解析成普通字母 d
+    // 时间戳正则：2024-01-01T00:00:00.1234567Z
     NSRegularExpression *tsRegex = [NSRegularExpression regularExpressionWithPattern:@"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d+Z\\s*" options:0 error:nil];
 
-    for (NSString *rawLine in allLines) {
-        NSString *line = rawLine;
+    NSInteger i = 0;
+    while (i < allLines.count) {
+        NSString *line = allLines[i];
+        NSString *cleanLine = line;
         if (tsRegex) {
             NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
             if (tsMatch) {
-                line = [line substringFromIndex:tsMatch.range.length];
+                cleanLine = [line substringFromIndex:tsMatch.range.length];
             }
         }
 
-        if ([line hasPrefix:@"##[group]"]) {
-            foundAnyGroup = YES;
-            currentStep = [[GHALogStep alloc] init];
-            currentStep.name = [line substringFromIndex:@"##[group]".length];
-            [steps addObject:currentStep];
-        } else if ([line hasPrefix:@"##[endgroup]"]) {
-            currentStep = nil;
-        } else if ([line hasPrefix:@"##[error]"]) {
-            if (currentStep) {
-                currentStep.hasError = YES;
-                [currentStep.lines addObject:line];
-            } else {
-                // 没有 group 的 error，创建匿名步骤
-                currentStep = [[GHALogStep alloc] init];
-                currentStep.name = @"(Error)";
-                currentStep.hasError = YES;
-                [currentStep.lines addObject:line];
-                [steps addObject:currentStep];
-            }
-        } else if (currentStep) {
-            [currentStep.lines addObject:line];
-            NSString *lower = [line lowercaseString];
-            if ([lower containsString:@"error:"] ||
-                [lower containsString:@"fatal:"] ||
-                [lower containsString:@"failed"] ||
-                [lower containsString:@"make:***"] ||
-                [lower containsString:@"undefined reference"] ||
-                [lower containsString:@"redefinition"] ||
-                [lower containsString:@"no such file"] ||
-                [lower containsString:@"permission denied"] ||
-                [lower containsString:@"command not found"] ||
-                [lower containsString:@"exit code"]) {
-                currentStep.hasError = YES;
-            }
-        }
-    }
+        if ([cleanLine hasPrefix:@"##[group]"]) {
+            NSString *stepName = [cleanLine substringFromIndex:@"##[group]".length];
+            NSInteger stepStart = i;
+            i++;
 
-    NSMutableArray<NSString *> *errorStepsText = [NSMutableArray array];
-    for (GHALogStep *step in steps) {
-        if (step.hasError && step.lines.count > 0) {
-            NSString *stepText = [NSString stringWithFormat:@"▶ %@\n%@", step.name, [step.lines componentsJoinedByString:@"\n"]];
-            [errorStepsText addObject:stepText];
-        }
-    }
+            // 收集到下一个 ##[group] 或文件末尾，这才是完整步骤范围
+            NSInteger stepEnd = stepStart;
+            while (i < allLines.count) {
+                NSString *nextLine = allLines[i];
+                NSString *cleanNext = nextLine;
+                if (tsRegex) {
+                    NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:nextLine options:0 range:NSMakeRange(0, nextLine.length)];
+                    if (tsMatch) {
+                        cleanNext = [nextLine substringFromIndex:tsMatch.range.length];
+                    }
+                }
+                if ([cleanNext hasPrefix:@"##[group]"]) {
+                    break;
+                }
+                stepEnd = i;
+                i++;
+            }
 
-    // Fallback：如果日志里完全没有 ##[group] 标记，但包含编译错误，直接收 error: 行
-    if (errorStepsText.count == 0 && !foundAnyGroup) {
-        NSMutableArray<NSString *> *fallbackLines = [NSMutableArray array];
-        for (NSString *rawLine in allLines) {
-            NSString *line = rawLine;
-            if (tsRegex) {
-                NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
-                if (tsMatch) {
-                    line = [line substringFromIndex:tsMatch.range.length];
+            // 提取步骤所有行（去掉时间戳）并判断是否包含错误
+            NSMutableArray<NSString *> *displayLines = [NSMutableArray array];
+            BOOL hasError = NO;
+            for (NSInteger j = stepStart; j <= stepEnd; j++) {
+                NSString *raw = allLines[j];
+                NSString *clean = raw;
+                if (tsRegex) {
+                    NSTextCheckingResult *tsMatch = [tsRegex firstMatchInString:raw options:0 range:NSMakeRange(0, raw.length)];
+                    if (tsMatch) {
+                        clean = [raw substringFromIndex:tsMatch.range.length];
+                    }
+                }
+                [displayLines addObject:clean];
+
+                if (!hasError) {
+                    NSString *lower = [clean lowercaseString];
+                    if ([clean hasPrefix:@"##[error]"] ||
+                        [lower containsString:@"error:"] ||
+                        [lower containsString:@"fatal:"] ||
+                        [lower containsString:@"make:***"] ||
+                        [lower containsString:@"undefined reference"] ||
+                        [lower containsString:@"redefinition"] ||
+                        [lower containsString:@"no such file"] ||
+                        [lower containsString:@"permission denied"] ||
+                        [lower containsString:@"command not found"] ||
+                        [lower containsString:@"exit code"]) {
+                        hasError = YES;
+                    }
                 }
             }
-            NSString *lower = [line lowercaseString];
-            if ([lower containsString:@"error:"] ||
-                [lower containsString:@"fatal:"] ||
-                [lower containsString:@"make:***"] ||
-                [lower containsString:@"exit code"]) {
-                [fallbackLines addObject:line];
+
+            if (hasError) {
+                NSString *stepText = [NSString stringWithFormat:@"▶ %@\n%@", stepName, [displayLines componentsJoinedByString:@"\n"]];
+                [errorStepsText addObject:stepText];
             }
+
+            continue;
         }
-        if (fallbackLines.count > 0) {
-            NSString *fb = [NSString stringWithFormat:@"▶ 未识别步骤\n%@", [fallbackLines componentsJoinedByString:@"\n"]];
-            [errorStepsText addObject:fb];
-        }
+
+        i++;
     }
 
     if (errorStepsText.count == 0) return nil;
@@ -1275,7 +1251,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.15");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.16");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
