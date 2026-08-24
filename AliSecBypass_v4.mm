@@ -1,7 +1,8 @@
 //
-// GitHub Actions Artifact Downloader v3.5.4
-// 修复：Run页面下载当前Run，其他页面下载最新Run
-//r
+// GitHub Actions Artifact Downloader v3.6.0
+// 改为双选项菜单："下载最新 Run" / "下载当前 Run"
+// 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
+//
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -157,6 +158,26 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     }
 }
 
+// 从 REST API URL 解析 runId，例如 api.github.com/repos/owner/repo/actions/runs/174
+static void gh_parseRestApiUrl(NSString *urlString) {
+    if (!urlString || urlString.length == 0) return;
+    if (![urlString containsString:@"api.github.com"]) return;
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"/repos/([^/]+)/([^/]+)/actions/runs/(\\d+)" options:0 error:nil];
+    NSArray *matches = [regex matchesInString:urlString options:0 range:NSMakeRange(0, urlString.length)];
+    if (matches.count > 0) {
+        NSTextCheckingResult *match = matches[0];
+        NSString *owner = [urlString substringWithRange:[match rangeAtIndex:1]];
+        NSString *repo = [urlString substringWithRange:[match rangeAtIndex:2]];
+        NSString *runId = [urlString substringWithRange:[match rangeAtIndex:3]];
+        if (owner.length > 0 && repo.length > 0 && runId.length > 0) {
+            g_currentOwner = owner;
+            g_currentRepo = repo;
+            g_currentRunId = runId;
+            gh_log("REST", [[NSString stringWithFormat:@"REST API: %@/%@ runId=%@", owner, repo, runId] UTF8String]);
+        }
+    }
+}
+
 static void gh_parseGraphQLBody(NSData *body) {
     if (!body || body.length == 0) return;
     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:body options:0 error:nil];
@@ -188,27 +209,28 @@ static void gh_parseGraphQLBody(NSData *body) {
         }
     }
 
-    // 关键：如果不是 Run 页面，清空残留的 runId
-    BOOL isRunPage = [opName isEqualToString:@"WorkflowRun"] || 
+    // 检测 Run 页面相关请求，提取 runId（不再清空！）
+    BOOL isRunPage = [opName isEqualToString:@"WorkflowRun"] ||
                      [opName isEqualToString:@"WorkflowRunDetails"] ||
-                     [opName isEqualToString:@"WorkflowRunJobs"];
+                     [opName isEqualToString:@"WorkflowRunJobs"] ||
+                     [opName isEqualToString:@"WorkflowRunLogs"] ||
+                     [opName isEqualToString:@"WorkflowRunArtifacts"] ||
+                     [opName isEqualToString:@"CheckRun"];
 
-    if (!isRunPage && g_currentRunId) {
-        g_currentRunId = nil;
-        gh_log("RUN", "Cleared (not Run page)");
-    }
-
-    // Run 页面：解析 URL 获取 runId
     if (isRunPage) {
         NSString *runUrl = vars[@"url"];
         if (runUrl) {
             gh_parseWorkflowRunUrl(runUrl);
         } else {
-            // 有些 Run 页面请求没有 url 变量，但有 id
             NSString *runId = vars[@"id"];
             if (runId && runId.length > 0) {
-                g_currentRunId = runId;
-                gh_log("RUN", [[NSString stringWithFormat:@"from id=%@", runId] UTF8String]);
+                // id 可能是全局 ID，尝试提取数字部分
+                NSRegularExpression *numRegex = [NSRegularExpression regularExpressionWithPattern:@"\\d+" options:0 error:nil];
+                NSTextCheckingResult *numMatch = [numRegex firstMatchInString:runId options:0 range:NSMakeRange(0, runId.length)];
+                if (numMatch) {
+                    g_currentRunId = [runId substringWithRange:numMatch.range];
+                    gh_log("RUN", [[NSString stringWithFormat:@"from id=%@", g_currentRunId] UTF8String]);
+                }
             }
         }
     }
@@ -443,7 +465,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.5.4";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.0";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -643,7 +665,7 @@ didCompleteWithError:(NSError *)error {
             if (!location) { gh_alert(@"错误", @"下载文件为空"); return; }
             NSString *tmpDir = NSTemporaryDirectory();
             NSString *safeName = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
-            NSString *buildNum = self.buildNumber;
+            NSString *buildNum = strongSelf.buildNumber;
             if (!buildNum || buildNum.length == 0) buildNum = @"unknown";
             NSString *buildSuffix = [NSString stringWithFormat:@"_#%@", buildNum];
             NSString *fileName = [NSString stringWithFormat:@"%@%@.zip", safeName, buildSuffix];
@@ -663,7 +685,7 @@ didCompleteWithError:(NSError *)error {
             if (copyErr) { gh_alert(@"错误", @"保存文件失败"); return; }
             NSURL *fileURL = [NSURL fileURLWithPath:destPath];
             NSString *repo = [NSString stringWithFormat:@"%@/%@", g_currentOwner ?: @"?", g_currentRepo ?: @"?"];
-            [GHAHistory addRecord:name repo:repo filePath:destPath buildNumber:self.buildNumber];
+            [GHAHistory addRecord:name repo:repo filePath:destPath buildNumber:strongSelf.buildNumber];
             UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL]
                                                                                    applicationActivities:nil];
             if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
@@ -697,7 +719,6 @@ didCompleteWithError:(NSError *)error {
 - (void)handleTap;
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture;
 - (void)handlePan:(UIPanGestureRecognizer *)pan;
-- (void)fetchArtifacts;
 - (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber;
 - (void)fetchLatestRun;
 @end
@@ -739,7 +760,60 @@ didCompleteWithError:(NSError *)error {
 - (void)stopPulse {
     [UIView animateWithDuration:0.2 animations:^{ self.alpha = 1.0; }];
 }
-- (void)handleTap { [self fetchArtifacts]; }
+
+// ========== 点击悬浮球：弹出菜单 ==========
+- (void)handleTap {
+    if (!g_currentToken || g_currentToken.length == 0) {
+        gh_alert(@"错误", @"未获取到 GitHub Token，请先登录 GitHub");
+        return;
+    }
+    if (!g_currentOwner || !g_currentRepo) {
+        gh_alert(@"错误", @"未检测到仓库信息，请先进入某个仓库页面");
+        return;
+    }
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Artifact Downloader"
+                                                                   message:[NSString stringWithFormat:@"仓库: %@/%@", g_currentOwner, g_currentRepo]
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    // 选项1：永远下载最新
+    [alert addAction:[UIAlertAction actionWithTitle:@"下载最新 Run"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        gh_log("MENU", "User chose: Latest Run");
+        [self fetchLatestRun];
+    }]];
+
+    // 选项2：下载当前（如果有 runId）
+    NSString *currentTitle;
+    if (g_currentRunId && g_currentRunId.length > 0) {
+        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", g_currentRunId];
+    } else {
+        currentTitle = @"下载当前 Run (未检测到)";
+    }
+    UIAlertAction *currentAction = [UIAlertAction actionWithTitle:currentTitle
+                                                            style:UIAlertActionStyleDefault
+                                                          handler:^(UIAlertAction *action) {
+        if (g_currentRunId && g_currentRunId.length > 0) {
+            gh_log("MENU", [[NSString stringWithFormat:@"User chose: Current Run #%@", g_currentRunId] UTF8String]);
+            [self fetchArtifactsForRunId:g_currentRunId runNumber:g_currentRunId];
+        } else {
+            gh_alert(@"提示", @"未检测到当前 Run 页面。\n\n请先进入某个 Workflow Run 详情页面，或选择「下载最新 Run」");
+        }
+    }];
+    [alert addAction:currentAction];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        alert.popoverPresentationController.sourceView = self;
+        alert.popoverPresentationController.sourceRect = self.bounds;
+    }
+
+    UIViewController *top = gh_topViewController();
+    if (top) [top presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
         GHASettingsVC *settingsVC = [[GHASettingsVC alloc] init];
@@ -759,29 +833,6 @@ didCompleteWithError:(NSError *)error {
     center.x = MAX(minX, MIN(maxX, center.x));
     center.y = MAX(minY, MIN(maxY, center.y));
     self.center = center;
-}
-
-// ========== 核心：Run页面下载当前Run，其他页面下载最新Run ==========
-- (void)fetchArtifacts {
-    if (!g_currentToken || g_currentToken.length == 0) {
-        gh_alert(@"错误", @"未获取到 GitHub Token，请先登录 GitHub");
-        return;
-    }
-    if (!g_currentOwner || !g_currentRepo) {
-        gh_alert(@"错误", @"未检测到仓库信息，请先进入某个仓库页面（代码/提交/Actions 等）");
-        return;
-    }
-
-    // Run 页面：下载当前查看的 Run
-    if (g_currentRunId && g_currentRunId.length > 0) {
-        gh_log("FETCH", [[NSString stringWithFormat:@"Run page: %@/%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
-        [self fetchArtifactsForRunId:g_currentRunId runNumber:nil];
-        return;
-    }
-
-    // 其他页面：查询最新 Run
-    gh_log("FETCH", [[NSString stringWithFormat:@"Other page: %@/%@, query latest", g_currentOwner, g_currentRepo] UTF8String]);
-    [self fetchLatestRun];
 }
 
 - (void)fetchLatestRun {
@@ -893,7 +944,7 @@ didCompleteWithError:(NSError *)error {
             }
             GHAArtifactListVC *listVC = [[GHAArtifactListVC alloc] init];
             listVC.artifacts = artifacts;
-            listVC.buildNumber = runNumber;
+            listVC.buildNumber = runNumber ?: runId;
             UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:listVC];
             nav.modalPresentationStyle = UIModalPresentationFormSheet;
             UIViewController *top = gh_topViewController();
@@ -912,12 +963,19 @@ static void gh_processRequest(NSURLRequest *request) {
     NSURL *url = request.URL;
     if (!url) return;
     NSString *urlString = url.absoluteString;
-    if (!urlString || ![urlString containsString:@"api.github.com"]) return;
+    if (!urlString || ![urlString containsString:@"github.com"]) return;
+
+    // 捕获 Token
     NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
     if (auth && auth.length > 0) {
         g_currentToken = auth;
         gh_log("TOKEN", "Captured");
     }
+
+    // 从 REST API URL 解析 runId
+    gh_parseRestApiUrl(urlString);
+
+    // 从 GraphQL body 解析
     NSData *body = gh_readBody(request);
     if (body && body.length > 0) {
         gh_parseGraphQLBody(body);
@@ -961,7 +1019,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.5.4");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.0");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
