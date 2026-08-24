@@ -1,5 +1,5 @@
 //
-// GitHub Actions Artifact Downloader v3.6.2
+// GitHub Actions Artifact Downloader v3.6.4
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
@@ -149,13 +149,21 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     if (parts.count >= 8) {
         g_currentOwner = parts[3];
         g_currentRepo = parts[4];
+        BOOL foundRun = NO;
         for (NSUInteger i = 5; i < parts.count; i++) {
             if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
                 g_currentRunId = parts[i + 1];
                 g_currentRunNumber = parts[i + 1]; // page URL shows run_number
                 gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runId=%@ runNumber=%@", g_currentOwner, g_currentRepo, g_currentRunId, g_currentRunNumber] UTF8String]);
+                foundRun = YES;
                 break;
             }
+        }
+        if (!foundRun) {
+            // Not a run page, clear run info
+            g_currentRunId = nil;
+            g_currentRunNumber = nil;
+            gh_log("PARSE", "Cleared runId (not run page)");
         }
     }
 }
@@ -467,7 +475,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.2";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.4";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -1066,7 +1074,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.2");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.4");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
