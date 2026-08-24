@@ -1,9 +1,9 @@
 //
-// GitHub Actions Artifact Downloader v3.6.16
-// 修复日志过滤：步骤范围改为 ##[group] 到下一个 ##[group] 之前，完整保留步骤内所有内容
+// GitHub Actions Artifact Downloader v3.6.17
+// 弹窗只显示步骤名列表，复制按钮拿完整日志
 //
 
-#import <UIKit/UIKit.h
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
@@ -460,7 +460,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.16";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.17";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -1024,7 +1024,7 @@ didCompleteWithError:(NSError *)error {
             NSInteger stepStart = i;
             i++;
 
-            // 收集到下一个 ##[group] 或文件末尾，这才是完整步骤范围
+            // 收集到下一个 ##[group] 或文件末尾
             NSInteger stepEnd = stepStart;
             while (i < allLines.count) {
                 NSString *nextLine = allLines[i];
@@ -1090,14 +1090,30 @@ didCompleteWithError:(NSError *)error {
     return [NSString stringWithFormat:@"%@\n\n%@", header, [errorStepsText componentsJoinedByString:@"\n\n──────────────\n\n"]];
 }
 
+// 从完整日志中提取步骤名列表作为弹窗预览
++ (NSString *)previewFromLogText:(NSString *)text {
+    if (!text || text.length == 0) return @"";
+    NSArray *lines = [text componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSString *line in lines) {
+        if ([line hasPrefix:@"▶ "]) {
+            [names addObject:line];
+        }
+    }
+    if (names.count == 0) return @"";
+    return [names componentsJoinedByString:@"\n"];
+}
+
 - (void)showLogAlertWithText:(NSString *)text {
     if (!text || text.length == 0) {
         gh_alert(@"提示", @"未找到错误日志");
         return;
     }
-    NSString *preview = text.length > 3000 ? [text substringToIndex:3000] : text;
+    NSString *preview = [GHAFloatingView previewFromLogText:text];
+    if (preview.length == 0) preview = @"未找到失败步骤";
+    NSString *message = [NSString stringWithFormat:@"%@\n\n（点击「复制全部」获取完整日志）", preview];
     UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"失败步骤日志"
-                                                                      message:preview
+                                                                      message:message
                                                                preferredStyle:UIAlertControllerStyleAlert];
     [logAlert addAction:[UIAlertAction actionWithTitle:@"复制全部"
                                                    style:UIAlertActionStyleDefault
@@ -1251,7 +1267,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.16");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.17");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
