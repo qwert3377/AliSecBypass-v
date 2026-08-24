@@ -4,7 +4,7 @@
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+#import <objc/runtime
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
