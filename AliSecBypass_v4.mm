@@ -1,5 +1,5 @@
 //
-// GitHub Actions Artifact Downloader v3.6.1
+// GitHub Actions Artifact Downloader v3.6.2
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
@@ -11,6 +11,7 @@ static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
 static NSString *g_currentRepo = nil;
 static NSString *g_currentRunId = nil;
+static NSString *g_currentRunNumber = nil;
 static UIView *g_floatingView = nil;
 static UIView *g_hudView = nil;
 static const char kGHAssocKey = 0;
@@ -151,7 +152,8 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
         for (NSUInteger i = 5; i < parts.count; i++) {
             if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
                 g_currentRunId = parts[i + 1];
-                gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
+                g_currentRunNumber = parts[i + 1]; // page URL shows run_number
+                gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runId=%@ runNumber=%@", g_currentOwner, g_currentRepo, g_currentRunId, g_currentRunNumber] UTF8String]);
                 break;
             }
         }
@@ -465,7 +467,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.1";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.2";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -786,8 +788,9 @@ didCompleteWithError:(NSError *)error {
 
     // 选项2：下载当前（如果有 runId）
     NSString *currentTitle;
-    if (g_currentRunId && g_currentRunId.length > 0) {
-        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", g_currentRunId];
+    NSString *displayNum = g_currentRunNumber ?: g_currentRunId;
+    if (displayNum && displayNum.length > 0) {
+        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", displayNum];
     } else {
         currentTitle = @"下载当前 Run (未检测到)";
     }
@@ -1063,7 +1066,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.1");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.2");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
