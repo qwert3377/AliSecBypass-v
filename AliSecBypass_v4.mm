@@ -1,5 +1,5 @@
 //
-// GitHub Actions Artifact Downloader v3.6.9
+// GitHub Actions Artifact Downloader v3.6.1
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
@@ -148,18 +148,12 @@ static void gh_parseWorkflowRunUrl(NSString *urlStr) {
     if (parts.count >= 8) {
         g_currentOwner = parts[3];
         g_currentRepo = parts[4];
-        BOOL foundRun = NO;
         for (NSUInteger i = 5; i < parts.count; i++) {
             if ([parts[i] isEqualToString:@"runs"] && (i + 1) < parts.count) {
                 g_currentRunId = parts[i + 1];
                 gh_log("PARSE", [[NSString stringWithFormat:@"URL: owner=%@ repo=%@ runId=%@", g_currentOwner, g_currentRepo, g_currentRunId] UTF8String]);
-                foundRun = YES;
                 break;
             }
-        }
-        if (!foundRun) {
-            g_currentRunId = nil;
-            gh_log("PARSE", "Cleared runId (not run page)");
         }
     }
 }
@@ -471,7 +465,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.9";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.1";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -792,9 +786,8 @@ didCompleteWithError:(NSError *)error {
 
     // 选项2：下载当前（如果有 runId）
     NSString *currentTitle;
-    NSString *displayNum = g_currentRunId;
-    if (displayNum && displayNum.length > 0) {
-        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", displayNum];
+    if (g_currentRunId && g_currentRunId.length > 0) {
+        currentTitle = [NSString stringWithFormat:@"下载当前 Run (#%@)", g_currentRunId];
     } else {
         currentTitle = @"下载当前 Run (未检测到)";
     }
@@ -1016,12 +1009,6 @@ static void gh_processRequest(NSURLRequest *request) {
     NSString *urlString = url.absoluteString;
     if (!urlString || ![urlString containsString:@"github.com"]) return;
 
-    // 关键：从页面 URL 直接解析（最可靠）
-    // GitHub App 加载页面时的 GET 请求 URL 就是当前页面地址
-    if ([request.HTTPMethod isEqualToString:@"GET"] || !request.HTTPMethod) {
-        gh_parseWorkflowRunUrl(urlString);
-    }
-
     // 捕获 Token
     NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
     if (auth && auth.length > 0) {
@@ -1029,7 +1016,7 @@ static void gh_processRequest(NSURLRequest *request) {
         gh_log("TOKEN", "Captured");
     }
 
-    // 从 REST API URL 解析仓库信息
+    // 从 REST API URL 解析 runId
     gh_parseRestApiUrl(urlString);
 
     // 从 GraphQL body 解析
@@ -1076,7 +1063,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.9");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.1");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
