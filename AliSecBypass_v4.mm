@@ -5,7 +5,7 @@
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime
+#import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
@@ -1057,8 +1057,22 @@ didCompleteWithError:(NSError *)error {
                 gh_alert(@"错误", @"日志为空");
                 return;
             }
-            NSString *preview = logText.length > 2000 ? [logText substringToIndex:2000] : logText;
-            UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"编译日志（前2000字符）"
+            // 过滤只保留错误行
+            NSArray *allLines = [logText componentsSeparatedByString:@"\n"];
+            NSMutableArray *errorLines = [NSMutableArray array];
+            for (NSString *line in allLines) {
+                NSString *lower = [line lowercaseString];
+                if ([lower containsString:@"error"] || [lower containsString:@"错误"]) {
+                    [errorLines addObject:line];
+                }
+            }
+            NSString *filteredText = [errorLines componentsJoinedByString:@"\n"];
+            if (filteredText.length == 0) {
+                filteredText = @"未找到错误行，以下为完整日志前2000字符：\n\n";
+                filteredText = [filteredText stringByAppendingString:logText.length > 2000 ? [logText substringToIndex:2000] : logText];
+            }
+            NSString *preview = filteredText.length > 3000 ? [filteredText substringToIndex:3000] : filteredText;
+            UIAlertController *logAlert = [UIAlertController alertControllerWithTitle:@"编译错误日志"
                                                                               message:preview
                                                                        preferredStyle:UIAlertControllerStyleAlert];
             [logAlert addAction:[UIAlertAction actionWithTitle:@"复制全部"
