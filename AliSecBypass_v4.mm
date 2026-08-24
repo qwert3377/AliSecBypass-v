@@ -3,7 +3,7 @@
 // 修复日志过滤：步骤范围改为 ##[group] 到下一个 ##[group] 之前，完整保留步骤内所有内容
 //
 
-#import <UIKit/UIKit.h>
+#import <UIKit/UIKit.h
 #import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
