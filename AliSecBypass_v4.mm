@@ -1,7 +1,7 @@
 //
 //  ElyndorTVVIP.mm
 //  纯 Runtime Hook（无 Logos）— TrollStore 注入
-//  功能：VIP状态 + 过期时间 + 等级V8
+//  功能：VIP状态 + 过期时间 + 等级V8 + UILabel文本替换
 //
 
 #import <Foundation/Foundation.h>
@@ -223,6 +223,36 @@ static void hookUserDefaults(void) {
     if (m4) { orig_objectForKey = (ObjImp_t)method_getImplementation(m4); method_setImplementation(m4, (IMP)new_objectForKey); }
 }
 
+#pragma mark - Hook UILabel setText:
+
+typedef void (*LabelSetTextImp_t)(id, SEL, NSString *);
+static LabelSetTextImp_t orig_labelSetText = NULL;
+
+static void new_labelSetText(id self, SEL sel, NSString *text) {
+    if (text) {
+        NSString *nt = nil;
+        if ([text containsString:@"立即开通"] || [text containsString:@"尚未开通"] ||
+            [text containsString:@"未开通"] || [text containsString:@"非会员"]) {
+            nt = @"VIP会员已开通";
+        }
+        if (nt) {
+            orig_labelSetText(self, sel, nt);
+            return;
+        }
+    }
+    orig_labelSetText(self, sel, text);
+}
+
+static void hookUILabel(void) {
+    Class cls = objc_getClass("UILabel");
+    if (!cls) return;
+    SEL sel = @selector(setText:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    orig_labelSetText = (LabelSetTextImp_t)method_getImplementation(m);
+    method_setImplementation(m, (IMP)new_labelSetText);
+}
+
 #pragma mark - Entry
 
 __attribute__((constructor))
@@ -230,5 +260,6 @@ static void init(void) {
     NSLog(@"[ElyndorTV] VIP v4.3 MM — 加载中...");
     hookJSONSerialization();
     hookUserDefaults();
-    NSLog(@"[ElyndorTV] VIP v4.3 MM — 已激活（NSJSONSerialization + NSUserDefaults）");
+    hookUILabel();
+    NSLog(@"[ElyndorTV] VIP v4.3 MM — 已激活（NSJSONSerialization + NSUserDefaults + UILabel）");
 }
