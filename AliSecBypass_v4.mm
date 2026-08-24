@@ -1,11 +1,11 @@
 //
-// GitHub Actions Artifact Downloader v3.6.12
+// GitHub Actions Artifact Downloader v3.6.13
 // 改为双选项菜单："下载最新 Run" / "下载当前 Run"
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
 
 #import <UIKit/UIKit.h>
-#import <objc/runtime.
+#import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
 static NSString *g_currentOwner = nil;
@@ -465,7 +465,7 @@ didCompleteWithError:(NSError *)error {
     self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"scell"];
     UILabel *versionLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 40)];
-    versionLabel.text = @"GitHub Artifact Downloader v3.6.12";
+    versionLabel.text = @"GitHub Artifact Downloader v3.6.13";
     versionLabel.textAlignment = NSTextAlignmentCenter;
     versionLabel.font = [UIFont systemFontOfSize:12];
     versionLabel.textColor = [UIColor colorWithWhite:0.6 alpha:1];
@@ -721,6 +721,46 @@ didCompleteWithError:(NSError *)error {
 - (void)handlePan:(UIPanGestureRecognizer *)pan;
 - (void)fetchArtifactsForRunId:(NSString *)runId runNumber:(NSString *)runNumber;
 - (void)fetchLatestRun;
+- (void)fetchRunLogs:(NSString *)runId;
+@end
+
+// ========== 日志查看器 VC ==========
+@interface GHALogViewerVC : UIViewController
+@property (nonatomic, copy) NSString *logText;
+@end
+
+@implementation GHALogViewerVC
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"编译日志";
+    self.view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
+
+    UITextView *textView = [[UITextView alloc] initWithFrame:self.view.bounds];
+    textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    textView.text = self.logText ?: @"无日志内容";
+    textView.font = [UIFont fontWithName:@"Menlo" size:12] ?: [UIFont systemFontOfSize:12];
+    textView.textColor = [UIColor colorWithWhite:0.1 alpha:1];
+    textView.backgroundColor = [UIColor whiteColor];
+    textView.editable = NO;
+    textView.selectable = YES;
+    textView.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
+    [self.view addSubview:textView];
+
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
+                                                                               style:UIBarButtonItemStylePlain
+                                                                              target:self
+                                                                              action:@selector(copyLog)];
+}
+- (void)copyLog {
+    if (self.logText && self.logText.length > 0) {
+        [[UIPasteboard generalPasteboard] setString:self.logText];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已复制"
+                                                                       message:@"日志已复制到剪贴板"
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
+}
 @end
 
 @implementation GHAFloatingView
@@ -994,6 +1034,69 @@ didCompleteWithError:(NSError *)error {
     }];
     [task resume];
 }
+
+- (void)fetchRunLogs:(NSString *)runId {
+    gh_showHUD(@"获取日志...");
+    // 1. Get jobs for this run
+    NSString *jobsUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/runs/%@/jobs",
+                         g_currentOwner, g_currentRepo, runId];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:jobsUrl]];
+    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                gh_hideHUD();
+                gh_alert(@"错误", @"无法获取日志");
+                return;
+            }
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSArray *jobs = json[@"jobs"];
+            if (!jobs || jobs.count == 0) {
+                gh_hideHUD();
+                gh_alert(@"错误", @"未找到 job 日志");
+                return;
+            }
+            // Get first job id and fetch its logs
+            NSNumber *jobId = jobs[0][@"id"];
+            [self fetchJobLogs:jobId];
+        });
+    }];
+    [task resume];
+}
+
+- (void)fetchJobLogs:(NSNumber *)jobId {
+    NSString *logUrl = [NSString stringWithFormat:@"https://api.github.com/repos/%@/%@/actions/jobs/%@/logs",
+                        g_currentOwner, g_currentRepo, jobId];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:logUrl]];
+    [req setValue:g_currentToken forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gh_hideHUD();
+            if (error) {
+                gh_alert(@"错误", @"无法获取日志内容");
+                return;
+            }
+            NSString *logText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (!logText || logText.length == 0) {
+                gh_alert(@"错误", @"日志为空");
+                return;
+            }
+            GHALogViewerVC *logVC = [[GHALogViewerVC alloc] init];
+            logVC.logText = logText;
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logVC];
+            nav.modalPresentationStyle = UIModalPresentationFormSheet;
+            UIViewController *top = gh_topViewController();
+            if (top) [top presentViewController:nav animated:YES completion:nil];
+        });
+    }];
+    [task resume];
+}
 @end
 
 // ========== Hook NSURLSession ==========
@@ -1060,7 +1163,7 @@ static void gh_addFloatingView(void) {
 
 __attribute__((constructor))
 static void gh_init(void) {
-    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.12");
+    gh_log("INIT", "GitHub Actions Artifact Downloader v3.6.13");
     gh_hookSessionClass(NSClassFromString(@"NSURLSession"));
     gh_hookSessionClass(NSClassFromString(@"__NSCFURLSession"));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
