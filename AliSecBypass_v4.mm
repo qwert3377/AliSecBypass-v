@@ -4,7 +4,7 @@
 // 改进 runId 捕获：支持 REST API URL + GraphQL，不再自动清空
 //
 
-#import <UIKit/UIKit
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 static NSString *g_currentToken = nil;
