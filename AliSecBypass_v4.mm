@@ -1,6 +1,6 @@
 //
-//  ElyndorTV VIP Tweak v4.4 — Enhanced for new App version
-//  Based on v4.3, adds: dataForKey, dictionaryForKey, NSJSONSerialization, wider keys
+//  ElyndorTV VIP Tweak v4.4 — Data Key Fix
+//  Adds dataForKey: + dictionaryForKey: hooks (v4.3 was missing these)
 //
 
 #import <Foundation/Foundation.h>
@@ -40,6 +40,53 @@ static BOOL isUDKey(const char *k)      {
         if (strcasecmp(k, UD_KEYS[i]) == 0) return YES;
     }
     return NO;
+}
+
+#pragma mark - Fake JSON Data
+
+static NSData *fakeVipJsonData(void) {
+    static NSData *gData = nil;
+    if (!gData) {
+        NSDictionary *d = @{
+            @"isVip": @YES,
+            @"isMember": @YES,
+            @"tier": @8,
+            @"level": @8,
+            @"grade": @8,
+            @"vipLevel": @8,
+            @"memberLevel": @8,
+            @"expireTime": @(4102444800),
+            @"vipExpire": @(4102444800),
+            @"memberExpire": @(4102444800),
+            @"status": @"active",
+            @"type": @"lifetime",
+            @"membershipType": @"premium"
+        };
+        gData = [NSJSONSerialization dataWithJSONObject:d options:0 error:nil];
+    }
+    return gData;
+}
+
+static NSDictionary *fakeVipDict(void) {
+    static NSDictionary *gDict = nil;
+    if (!gDict) {
+        gDict = @{
+            @"isVip": @YES,
+            @"isMember": @YES,
+            @"tier": @8,
+            @"level": @8,
+            @"grade": @8,
+            @"vipLevel": @8,
+            @"memberLevel": @8,
+            @"expireTime": @(4102444800),
+            @"vipExpire": @(4102444800),
+            @"memberExpire": @(4102444800),
+            @"status": @"active",
+            @"type": @"lifetime",
+            @"membershipType": @"premium"
+        };
+    }
+    return gDict;
 }
 
 #pragma mark - JSON Patch (recursive)
@@ -123,7 +170,7 @@ static void hookJSONSerialization(void) {
     method_setImplementation(m, (IMP)new_JSON);
 }
 
-#pragma mark - NSUserDefaults Hooks
+#pragma mark - NSUserDefaults Hooks (8 methods)
 
 typedef BOOL (*BoolImp_t)(id, SEL, NSString *);
 typedef NSInteger (*IntImp_t)(id, SEL, NSString *);
@@ -182,20 +229,32 @@ static id new_objectForKey(id self, SEL sel, NSString *key) {
                 return @"8";
             }
         } else if ([val isKindOfClass:[NSDictionary class]]) {
-            // If it's a dict, patch it recursively
             NSDictionary *patched = patchDictRecursively(val);
             if (patched) return patched;
+        } else if ([val isKindOfClass:[NSData class]]) {
+            // Parse NSData as JSON and patch
+            NSData *d = val;
+            NSError *err = nil;
+            id json = [NSJSONSerialization JSONObjectWithData:d options:0 error:&err];
+            if (json && [json isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *patched = patchDictRecursively(json);
+                if (patched) {
+                    NSData *newData = [NSJSONSerialization dataWithJSONObject:patched options:0 error:nil];
+                    if (newData) return newData;
+                }
+            }
         }
     }
     return val;
 }
 
+// ===== NEW: dataForKey hook =====
 static id new_dataForKey(id self, SEL sel, NSString *key) {
     const char *k = [key UTF8String];
     id val = orig_dataForKey(self, sel, key);
     if (!val) return val;
     if (isUDKey(k) || isLevelKey(k) || isAuthKey(k) || isExpireKey(k)) {
-        // Try to parse as JSON and patch
+        // If the stored value is NSData, try to parse and patch
         if ([val isKindOfClass:[NSData class]]) {
             NSData *d = val;
             NSError *err = nil;
@@ -212,6 +271,7 @@ static id new_dataForKey(id self, SEL sel, NSString *key) {
     return val;
 }
 
+// ===== NEW: dictionaryForKey hook =====
 static id new_dictionaryForKey(id self, SEL sel, NSString *key) {
     const char *k = [key UTF8String];
     id val = orig_dictionaryForKey(self, sel, key);
@@ -241,6 +301,7 @@ static void hookUserDefaults(void) {
     Method m4 = class_getInstanceMethod(cls, @selector(objectForKey:));
     if (m4) { orig_objectForKey = (ObjImp_t)method_getImplementation(m4); method_setImplementation(m4, (IMP)new_objectForKey); }
 
+    // NEW in v4.4
     Method m5 = class_getInstanceMethod(cls, @selector(dataForKey:));
     if (m5) { orig_dataForKey = (DataImp_t)method_getImplementation(m5); method_setImplementation(m5, (IMP)new_dataForKey); }
 
@@ -283,5 +344,5 @@ static void init(void) {
     hookJSONSerialization();
     hookUserDefaults();
     hookUILabel();
-    NSLog(@"[ElyndorTV] VIP v4.4 MM — 已激活（NSJSONSerialization + NSUserDefaults(6种) + UILabel）");
+    NSLog(@"[ElyndorTV] VIP v4.4 MM — 已激活（NSJSONSerialization + NSUserDefaults(8种) + UILabel）");
 }
