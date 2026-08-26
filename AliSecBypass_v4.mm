@@ -1,10 +1,12 @@
 //
-//  ElyndorTV KeyFinder — Logs ALL UserDefaults reads
-//  Find the actual key storing tier/level
+//  ElyndorTV VIP Tweak v4.5 — NSKeyedUnarchiver + Safe JSON
+//  Based on v4.3, fixes: patchDict nil return, adds unarchiver hook, file logging
 //
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+
+#pragma mark - Logger
 
 static NSString *gLogPath = nil;
 
@@ -12,20 +14,20 @@ static NSString *getLogPath(void) {
     if (gLogPath) return gLogPath;
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     if (docs.count > 0) {
-        gLogPath = [[docs[0] stringByAppendingPathComponent:@"keyfinder.log"] copy];
+        gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_v45.log"] copy];
     } else {
-        gLogPath = @"/tmp/keyfinder.log";
+        gLogPath = @"/tmp/vip_v45.log";
     }
     return gLogPath;
 }
 
-static void kfLog(NSString *fmt, ...) {
+static void vipLog(NSString *fmt, ...) {
     @try {
         va_list args;
         va_start(args, fmt);
         NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
         va_end(args);
-        NSString *line = [NSString stringWithFormat:@"%@ %@\n",
+        NSString *line = [NSString stringWithFormat:@"%@ [VIP] %@\n",
             [[NSDate date] descriptionWithLocale:nil], msg];
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
         NSString *path = getLogPath();
@@ -40,156 +42,289 @@ static void kfLog(NSString *fmt, ...) {
     } @catch (NSException *e) {}
 }
 
-// ===== Hook ALL NSUserDefaults accessors, log EVERY key =====
+#pragma mark - 字段配置
 
-typedef id (*ObjImp)(id, SEL, NSString *);
-typedef NSInteger (*IntImp)(id, SEL, NSString *);
-typedef BOOL (*BoolImp)(id, SEL, NSString *);
-typedef NSString* (*StrImp)(id, SEL, NSString *);
-typedef id (*DataImp)(id, SEL, NSString *);
-typedef id (*DictImp)(id, SEL, NSString *);
-typedef float (*FloatImp)(id, SEL, NSString *);
-typedef double (*DoubleImp)(id, SEL, NSString *);
+static const char *AUTH_KEYS[] = {"authcode", "auth_code", "status", "isVip", "isMember", "isPremium", "isSubscribed"};
+static const char *EXPIRE_KEYS[] = {"expire", "endtime", "end_time", "is_expired", "expireTime", "vipExpire", "memberExpire"};
+static const char *LEVEL_KEYS[] = {
+    "participantvoteterm", "edtcactivedirectacquirecentral",
+    "k9mnpq7xzv2r8w4t", "kgdtdeviceav1forceresetdowngradeversionkey",
+    "vip_level", "viplevel", "member_level", "user_level", "level", "grade",
+    "viplevel", "memberlevel", "userlevel", "vip_grade", "vipgrade",
+    "tier", "vipTier", "memberTier", "subscriptionLevel", "requiredVipTier"
+};
+static const char *UD_KEYS[] = {"kvipStatusStorageKey", "kvipstatusstoragekey", "EDTCActiveDirectAcquireCentral"};
 
-static ObjImp orig_obj = NULL;
-static IntImp orig_int = NULL;
-static BoolImp orig_bool = NULL;
-static StrImp orig_str = NULL;
-static DataImp orig_data = NULL;
-static DictImp orig_dict = NULL;
-static FloatImp orig_float = NULL;
-static DoubleImp orig_double = NULL;
-
-static id new_obj(id self, SEL sel, NSString *key) {
-    id val = orig_obj(self, sel, key);
-    NSString *vstr = val ? [[val description] substringToIndex:MIN(200, [[val description] length])] : @"nil";
-    kfLog(@"[ALL] objectForKey:'%@' -> %@", key, vstr);
-    return val;
-}
-
-static NSInteger new_int(id self, SEL sel, NSString *key) {
-    NSInteger val = orig_int(self, sel, key);
-    kfLog(@"[ALL] integerForKey:'%@' -> %ld", key, (long)val);
-    return val;
-}
-
-static BOOL new_bool(id self, SEL sel, NSString *key) {
-    BOOL val = orig_bool(self, sel, key);
-    kfLog(@"[ALL] boolForKey:'%@' -> %d", key, val);
-    return val;
-}
-
-static NSString *new_str(id self, SEL sel, NSString *key) {
-    NSString *val = orig_str(self, sel, key);
-    kfLog(@"[ALL] stringForKey:'%@' -> '%@'", key, val ?: @"nil");
-    return val;
-}
-
-static id new_data(id self, SEL sel, NSString *key) {
-    id val = orig_data(self, sel, key);
-    NSString *vstr = val ? [NSString stringWithFormat:@"[NSData %lu bytes]", (unsigned long)[val length]] : @"nil";
-    kfLog(@"[ALL] dataForKey:'%@' -> %@", key, vstr);
-    return val;
-}
-
-static id new_dict(id self, SEL sel, NSString *key) {
-    id val = orig_dict(self, sel, key);
-    NSString *vstr = val ? [[val description] substringToIndex:MIN(200, [[val description] length])] : @"nil";
-    kfLog(@"[ALL] dictionaryForKey:'%@' -> %@", key, vstr);
-    return val;
-}
-
-static float new_float(id self, SEL sel, NSString *key) {
-    float val = orig_float(self, sel, key);
-    kfLog(@"[ALL] floatForKey:'%@' -> %f", key, val);
-    return val;
-}
-
-static double new_double(id self, SEL sel, NSString *key) {
-    double val = orig_double(self, sel, key);
-    kfLog(@"[ALL] doubleForKey:'%@' -> %f", key, val);
-    return val;
-}
-
-// ===== Hook NSURLSession to log ALL responses =====
-
-typedef id (*TaskImp)(id, SEL, id, id);
-static TaskImp orig_dataTask = NULL;
-
-static id new_dataTask(id self, SEL sel, id arg2, id completion) {
-    // Log the URL
-    NSString *url = nil;
-    if ([arg2 isKindOfClass:[NSURLRequest class]]) {
-        url = [[arg2 URL] absoluteString];
-    } else if ([arg2 isKindOfClass:[NSURL class]]) {
-        url = [arg2 absoluteString];
+static BOOL strMatch(const char *key, const char **list, size_t count) {
+    if (!key) return NO;
+    size_t klen = strlen(key);
+    for (size_t i = 0; i < count; i++) {
+        const char *v = list[i];
+        size_t vlen = strlen(v);
+        if (klen == vlen && strcasecmp(key, v) == 0) return YES;
+        if (strcasestr(key, v) != NULL) return YES;
     }
-    if (url) {
-        kfLog(@"[NET] URL: %@", url);
-    }
+    return NO;
+}
 
-    // Wrap completion handler to log response
-    if (completion) {
-        id origBlock = completion;
-        id newBlock = ^(NSData *data, NSURLResponse *response, NSError *error) {
-            if (data) {
-                NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                if (body) {
-                    kfLog(@"[NET] RESP (%lu): %@", (unsigned long)[body length],
-                          [body substringToIndex:MIN(2000, [body length])]);
+static BOOL isAuthKey(const char *k)    { return strMatch(k, AUTH_KEYS, sizeof(AUTH_KEYS)/sizeof(char*)); }
+static BOOL isExpireKey(const char *k)  { return strMatch(k, EXPIRE_KEYS, sizeof(EXPIRE_KEYS)/sizeof(char*)); }
+static BOOL isLevelKey(const char *k)   { return strMatch(k, LEVEL_KEYS, sizeof(LEVEL_KEYS)/sizeof(char*)); }
+static BOOL isUDKey(const char *k)      {
+    if (!k) return NO;
+    for (size_t i = 0; i < sizeof(UD_KEYS)/sizeof(char*); i++) {
+        if (strcasecmp(k, UD_KEYS[i]) == 0) return YES;
+    }
+    return NO;
+}
+
+#pragma mark - JSON Patch (FIXED: never returns nil)
+
+static NSDictionary * patchDictRecursively(NSDictionary *dict) {
+    if (!dict || ![dict isKindOfClass:[NSDictionary class]]) return dict;
+    NSArray *keys = [dict allKeys];
+    if (!keys || keys.count == 0) return dict;
+
+    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:dict];
+    BOOL modified = NO;
+
+    for (NSString *key in keys) {
+        const char *kl = [key UTF8String];
+        id v = dict[key];
+        if (!v) continue;
+
+        if (isLevelKey(kl)) {
+            if ([v isKindOfClass:[NSNumber class]]) {
+                int iv = [v intValue];
+                if (iv >= 0 && iv < 8) { m[key] = @8; modified = YES; }
+            } else if ([v isKindOfClass:[NSString class]]) {
+                NSString *s = v;
+                if ([s isEqualToString:@"0"] || [s isEqualToString:@"1"] || [s isEqualToString:@"2"] ||
+                    [s isEqualToString:@"3"] || [s isEqualToString:@"4"] || [s isEqualToString:@"5"] ||
+                    [s isEqualToString:@"6"] || [s isEqualToString:@"7"]) {
+                    m[key] = @"8"; modified = YES;
                 }
             }
-            // Call original
-            if ([origBlock isKindOfClass:NSClassFromString(@"NSBlock")]) {
-                void (^orig)(NSData*, NSURLResponse*, NSError*) = origBlock;
-                orig(data, response, error);
+        }
+        else if (isAuthKey(kl)) {
+            if ([v isKindOfClass:[NSNumber class]] && [v intValue] == 0) { m[key] = @1; modified = YES; }
+            else if ([v isKindOfClass:[NSString class]] && [v isEqualToString:@"0"]) { m[key] = @"1"; modified = YES; }
+        }
+        else if (isExpireKey(kl)) {
+            if ([v isKindOfClass:[NSString class]]) { m[key] = @"2099-12-31"; modified = YES; }
+            else if ([v isKindOfClass:[NSNumber class]]) { m[key] = @(4102444799000LL); modified = YES; }
+        }
+        else if ([v isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *n = patchDictRecursively(v);
+            if (n != v) { m[key] = n; modified = YES; }
+        }
+        else if ([v isKindOfClass:[NSArray class]]) {
+            NSArray *arr = v;
+            NSMutableArray *ma = [NSMutableArray arrayWithArray:arr];
+            BOOL arrMod = NO;
+            for (NSUInteger j = 0; j < ma.count; j++) {
+                id item = ma[j];
+                if ([item isKindOfClass:[NSDictionary class]]) {
+                    NSDictionary *np = patchDictRecursively(item);
+                    if (np != item) { ma[j] = np; arrMod = YES; }
+                }
             }
-        };
-        return orig_dataTask(self, sel, arg2, newBlock);
+            if (arrMod) { m[key] = ma; modified = YES; }
+        }
     }
-    return orig_dataTask(self, sel, arg2, completion);
+    return modified ? m : dict;  // FIXED: return original dict if not modified
 }
 
-// ===== Entry =====
+#pragma mark - NSJSONSerialization Hook
+
+typedef id (*JSONImp_t)(Class, SEL, NSData *, NSJSONReadingOptions, NSError **);
+static JSONImp_t orig_JSON = NULL;
+
+static id new_JSON(Class cls, SEL sel, NSData *data, NSJSONReadingOptions opt, NSError **error) {
+    id result = orig_JSON(cls, sel, data, opt, error);
+    if ([result isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *patched = patchDictRecursively(result);
+        if (patched != result) {
+            vipLog(@"[JSON] Patched dict");
+            return patched;
+        }
+    }
+    return result;
+}
+
+static void hookJSONSerialization(void) {
+    Class cls = objc_getClass("NSJSONSerialization");
+    if (!cls) return;
+    SEL sel = @selector(JSONObjectWithData:options:error:);
+    Method m = class_getClassMethod(cls, sel);
+    if (!m) return;
+    orig_JSON = (JSONImp_t)method_getImplementation(m);
+    method_setImplementation(m, (IMP)new_JSON);
+    vipLog(@"[HOOK] NSJSONSerialization");
+}
+
+#pragma mark - NSKeyedUnarchiver Hook (NEW in v4.5)
+
+typedef id (*UnarchiveImp_t)(Class, SEL, Class, NSData *, NSError **);
+static UnarchiveImp_t orig_unarchive = NULL;
+
+static id new_unarchive(Class cls, SEL sel, Class aClass, NSData *data, NSError **error) {
+    id result = orig_unarchive(cls, sel, aClass, data, error);
+    if (result) {
+        NSString *name = NSStringFromClass([result class]);
+        if ([name containsString:@"Member"] || [name containsString:@"VIP"] ||
+            [name containsString:@"Tier"] || [name containsString:@"Level"] ||
+            [name containsString:@"Account"] || [name containsString:@"Profile"] ||
+            [name containsString:@"User"]) {
+            vipLog(@"[UNARCHIVE] class=%@ result=%@", name, result);
+            // Try to patch if it's a dict
+            if ([result isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *patched = patchDictRecursively(result);
+                if (patched != result) {
+                    vipLog(@"[UNARCHIVE] Patched");
+                    return patched;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+static void hookUnarchiver(void) {
+    Class cls = objc_getClass("NSKeyedUnarchiver");
+    if (!cls) return;
+    SEL sel = @selector(unarchivedObjectOfClass:fromData:error:);
+    Method m = class_getClassMethod(cls, sel);
+    if (m) {
+        orig_unarchive = (UnarchiveImp_t)method_getImplementation(m);
+        method_setImplementation(m, (IMP)new_unarchive);
+        vipLog(@"[HOOK] NSKeyedUnarchiver");
+    }
+}
+
+#pragma mark - NSUserDefaults Hooks
+
+typedef BOOL (*BoolImp_t)(id, SEL, NSString *);
+typedef NSInteger (*IntImp_t)(id, SEL, NSString *);
+typedef NSString * (*StrImp_t)(id, SEL, NSString *);
+typedef id (*ObjImp_t)(id, SEL, NSString *);
+
+static BoolImp_t orig_boolForKey = NULL;
+static IntImp_t orig_integerForKey = NULL;
+static StrImp_t orig_stringForKey = NULL;
+static ObjImp_t orig_objectForKey = NULL;
+
+static BOOL new_boolForKey(id self, SEL sel, NSString *key) {
+    const char *k = [key UTF8String];
+    if (isUDKey(k) || isAuthKey(k)) return YES;
+    return orig_boolForKey(self, sel, key);
+}
+
+static NSInteger new_integerForKey(id self, SEL sel, NSString *key) {
+    const char *k = [key UTF8String];
+    NSInteger val = orig_integerForKey(self, sel, key);
+    if ((isUDKey(k) || isLevelKey(k)) && val >= 0 && val < 8) return 8;
+    return val;
+}
+
+static NSString * new_stringForKey(id self, SEL sel, NSString *key) {
+    const char *k = [key UTF8String];
+    NSString *val = orig_stringForKey(self, sel, key);
+    if (!val) return val;
+    if (isUDKey(k) || isLevelKey(k)) {
+        if ([val isEqualToString:@"0"] || [val isEqualToString:@"1"] || [val isEqualToString:@"2"] ||
+            [val isEqualToString:@"3"] || [val isEqualToString:@"4"] || [val isEqualToString:@"5"] ||
+            [val isEqualToString:@"6"] || [val isEqualToString:@"7"]) {
+            return @"8";
+        }
+    }
+    return val;
+}
+
+static id new_objectForKey(id self, SEL sel, NSString *key) {
+    const char *k = [key UTF8String];
+    id val = orig_objectForKey(self, sel, key);
+    if (!val) return val;
+    if (isUDKey(k) || isLevelKey(k)) {
+        if ([val isKindOfClass:[NSNumber class]]) {
+            int iv = [val intValue];
+            if (iv >= 0 && iv < 8) return @8;
+        } else if ([val isKindOfClass:[NSString class]]) {
+            NSString *s = val;
+            if ([s isEqualToString:@"0"] || [s isEqualToString:@"1"] || [s isEqualToString:@"2"] ||
+                [s isEqualToString:@"3"] || [s isEqualToString:@"4"] || [s isEqualToString:@"5"] ||
+                [s isEqualToString:@"6"] || [s isEqualToString:@"7"]) {
+                return @"8";
+            }
+        } else if ([val isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *patched = patchDictRecursively(val);
+            if (patched != val) return patched;
+        }
+    }
+    return val;
+}
+
+static void hookUserDefaults(void) {
+    Class cls = objc_getClass("NSUserDefaults");
+    if (!cls) return;
+
+    Method m1 = class_getInstanceMethod(cls, @selector(boolForKey:));
+    if (m1) { orig_boolForKey = (BoolImp_t)method_getImplementation(m1); method_setImplementation(m1, (IMP)new_boolForKey); }
+
+    Method m2 = class_getInstanceMethod(cls, @selector(integerForKey:));
+    if (m2) { orig_integerForKey = (IntImp_t)method_getImplementation(m2); method_setImplementation(m2, (IMP)new_integerForKey); }
+
+    Method m3 = class_getInstanceMethod(cls, @selector(stringForKey:));
+    if (m3) { orig_stringForKey = (StrImp_t)method_getImplementation(m3); method_setImplementation(m3, (IMP)new_stringForKey); }
+
+    Method m4 = class_getInstanceMethod(cls, @selector(objectForKey:));
+    if (m4) { orig_objectForKey = (ObjImp_t)method_getImplementation(m4); method_setImplementation(m4, (IMP)new_objectForKey); }
+
+    vipLog(@"[HOOK] NSUserDefaults 4 accessors");
+}
+
+#pragma mark - Hook UILabel setText:
+
+typedef void (*LabelSetTextImp_t)(id, SEL, NSString *);
+static LabelSetTextImp_t orig_labelSetText = NULL;
+
+static void new_labelSetText(id self, SEL sel, NSString *text) {
+    if (text) {
+        NSString *nt = nil;
+        if ([text containsString:@"立即开通"] || [text containsString:@"尚未开通"] ||
+            [text containsString:@"未开通"] || [text containsString:@"非会员"]) {
+            nt = @"VIP会员已开通";
+        }
+        if (nt) { orig_labelSetText(self, sel, nt); return; }
+    }
+    orig_labelSetText(self, sel, text);
+}
+
+static void hookUILabel(void) {
+    Class cls = objc_getClass("UILabel");
+    if (!cls) return;
+    SEL sel = @selector(setText:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    orig_labelSetText = (LabelSetTextImp_t)method_getImplementation(m);
+    method_setImplementation(m, (IMP)new_labelSetText);
+    vipLog(@"[HOOK] UILabel");
+}
+
+#pragma mark - Entry
 
 __attribute__((constructor))
 static void init(void) {
-    kfLog(@"========================================");
-    kfLog(@"ElyndorTV KeyFinder v1.0");
-    kfLog(@"Build: 2026-08-26");
-    kfLog(@"Log: %@", getLogPath());
-    kfLog(@"========================================");
+    vipLog(@"========================================");
+    vipLog(@"ElyndorTV VIP Tweak v4.5");
+    vipLog(@"Build: 2026-08-26");
+    vipLog(@"Log: %@", getLogPath());
+    vipLog(@"========================================");
 
-    Class UD = objc_getClass("NSUserDefaults");
-    if (UD) {
-        Method m;
-        m = class_getInstanceMethod(UD, @selector(objectForKey:));
-        if (m) { orig_obj = (ObjImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_obj); }
-        m = class_getInstanceMethod(UD, @selector(integerForKey:));
-        if (m) { orig_int = (IntImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_int); }
-        m = class_getInstanceMethod(UD, @selector(boolForKey:));
-        if (m) { orig_bool = (BoolImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_bool); }
-        m = class_getInstanceMethod(UD, @selector(stringForKey:));
-        if (m) { orig_str = (StrImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_str); }
-        m = class_getInstanceMethod(UD, @selector(dataForKey:));
-        if (m) { orig_data = (DataImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_data); }
-        m = class_getInstanceMethod(UD, @selector(dictionaryForKey:));
-        if (m) { orig_dict = (DictImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_dict); }
-        m = class_getInstanceMethod(UD, @selector(floatForKey:));
-        if (m) { orig_float = (FloatImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_float); }
-        m = class_getInstanceMethod(UD, @selector(doubleForKey:));
-        if (m) { orig_double = (DoubleImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_double); }
-        kfLog(@"[INIT] NSUserDefaults 8 accessors hooked");
-    }
+    hookJSONSerialization();
+    hookUnarchiver();  // NEW in v4.5
+    hookUserDefaults();
+    hookUILabel();
 
-    Class Session = objc_getClass("NSURLSession");
-    if (Session) {
-        Method m = class_getInstanceMethod(Session, @selector(dataTaskWithRequest:completionHandler:));
-        if (m) { orig_dataTask = (TaskImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_dataTask); }
-        m = class_getInstanceMethod(Session, @selector(dataTaskWithURL:completionHandler:));
-        if (m) { orig_dataTask = (TaskImp)method_getImplementation(m); method_setImplementation(m, (IMP)new_dataTask); }
-        kfLog(@"[INIT] NSURLSession hooked");
-    }
-
-    kfLog(@"[INIT] KeyFinder active — open member page and check log");
+    vipLog(@"[INIT] All hooks installed");
 }
