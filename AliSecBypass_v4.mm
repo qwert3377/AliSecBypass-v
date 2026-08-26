@@ -1,8 +1,7 @@
 //
-//  ElyndorTV VIP Delayed Tweak v12.0
+//  ElyndorTV VIP Tweak v13.0 — Log to App Documents
 //  Target: LysenthoTVSpace (com.influx4.motion.axis26)
 //  Build: 2026-08-26
-//  Strategy: Delayed hook (5s after launch) + /tmp logging
 //
 
 #import <Foundation/Foundation.h>
@@ -11,7 +10,23 @@
 #define MAX_TIER 8
 #define VIP_KEY @"kvipstatusstoragekey"
 
-#pragma mark - Ultra-safe logger to /tmp
+static NSString *gLogPath = nil;
+
+#pragma mark - Logger (App Documents, fallback /tmp)
+
+static NSString *getLogPath(void) {
+    if (gLogPath) return gLogPath;
+    @try {
+        NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        if (docs.count > 0) {
+            NSString *path = [docs[0] stringByAppendingPathComponent:@"vip_tweak.log"];
+            gLogPath = [path copy];
+            return gLogPath;
+        }
+    } @catch (NSException *e) {}
+    gLogPath = @"/tmp/vip_tweak.log";
+    return gLogPath;
+}
 
 static void vipLog(NSString *fmt, ...) {
     @try {
@@ -24,13 +39,20 @@ static void vipLog(NSString *fmt, ...) {
             [[NSDate date] descriptionWithLocale:nil], msg];
 
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/tmp/vip_tweak.log"];
-        if (fh) {
-            [fh seekToEndOfFile];
-            [fh writeData:data];
-            [fh closeFile];
+        NSString *path = getLogPath();
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) {
+            [data writeToFile:path atomically:YES];
         } else {
-            [data writeToFile:@"/tmp/vip_tweak.log" atomically:YES];
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            if (fh) {
+                [fh seekToEndOfFile];
+                [fh writeData:data];
+                [fh closeFile];
+            } else {
+                [data writeToFile:path atomically:YES];
+            }
         }
     } @catch (NSException *e) {}
 }
@@ -82,7 +104,7 @@ static BOOL  (*orig_boolForKey)(id, SEL, NSString *);
 static void (*orig_setObject)(id, SEL, id, NSString *);
 static void (*orig_removeObject)(id, SEL, NSString *);
 
-#pragma mark - Minimal Hooks (only 5 most critical)
+#pragma mark - Minimal Hooks
 
 static id hook_objectForKey(id self, SEL _cmd, NSString *key) {
     @try {
@@ -180,17 +202,17 @@ static void swizzle(Class cls, SEL sel, IMP newImp, IMP *origImp) {
     }
 }
 
-#pragma mark - Core Logic (called after delay)
+#pragma mark - Core Logic
 
 static void doHook(void) {
     vipLog(@"========================================");
-    vipLog(@"ElyndorTV VIP Delayed Tweak v12.0");
+    vipLog(@"ElyndorTV VIP Tweak v13.0");
     vipLog(@"Build: 2026-08-26");
     vipLog(@"Target: LysenthoTVSpace");
     vipLog(@"Max Tier: %d", MAX_TIER);
+    vipLog(@"LogPath: %@", getLogPath());
     vipLog(@"========================================");
 
-    // Check if NSUserDefaults class is loaded
     Class UD = objc_getClass("NSUserDefaults");
     if (!UD) {
         vipLog(@"[ERR] NSUserDefaults class not found, aborting");
@@ -198,7 +220,6 @@ static void doHook(void) {
     }
     vipLog(@"[OK] NSUserDefaults class found");
 
-    // Swizzle only the most critical methods
     swizzle(UD, @selector(objectForKey:),     (IMP)hook_objectForKey,     (IMP *)&orig_objectForKey);
     swizzle(UD, @selector(stringForKey:),     (IMP)hook_stringForKey,     (IMP *)&orig_stringForKey);
     swizzle(UD, @selector(dataForKey:),       (IMP)hook_dataForKey,       (IMP *)&orig_dataForKey);
@@ -208,7 +229,6 @@ static void doHook(void) {
     swizzle(UD, @selector(setObject:forKey:), (IMP)hook_setObject,        (IMP *)&orig_setObject);
     swizzle(UD, @selector(removeObjectForKey:), (IMP)hook_removeObject,   (IMP *)&orig_removeObject);
 
-    // Inject into existing standardUserDefaults
     @try {
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
         if (ud) {
@@ -225,18 +245,26 @@ static void doHook(void) {
     vipLog(@"[INIT] All hooks installed");
 }
 
-#pragma mark - Constructor (DO NOTHING except schedule delay)
+#pragma mark - Constructor
 
 __attribute__((constructor))
 static void init(void) {
-    // Write a startup marker immediately
+    // Write startup marker to both locations
     @try {
-        NSString *marker = @"[STARTUP] Constructor called\n";
+        NSString *marker = @"[STARTUP] v13.0 constructor called\n";
         NSData *data = [marker dataUsingEncoding:NSUTF8StringEncoding];
-        [data writeToFile:@"/tmp/vip_tweak.log" atomically:YES];
+        NSString *tmpPath = @"/tmp/vip_tweak.log";
+        [data writeToFile:tmpPath atomically:YES];
+
+        // Also try Documents immediately
+        NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        if (docs.count > 0) {
+            NSString *docPath = [docs[0] stringByAppendingPathComponent:@"vip_tweak.log"];
+            [data writeToFile:docPath atomically:YES];
+        }
     } @catch (NSException *e) {}
 
-    // Schedule actual work after 5 seconds
+    // Delay 5 seconds then hook
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         doHook();
     });
