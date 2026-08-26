@@ -1,6 +1,6 @@
 //
-//  ElyndorTV VIP Tweak v4.6 — Detailed JSON Logging + URL Tracking
-//  Logs WHAT keys were patched + WHICH URLs returned member data
+//  ElyndorTV VIP Tweak v4.7 — Handle tier=0 or tier=1
+//  Expands detection: 0-7 -> 8, wider key matching
 //
 
 #import <Foundation/Foundation.h>
@@ -14,9 +14,9 @@ static NSString *getLogPath(void) {
     if (gLogPath) return gLogPath;
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     if (docs.count > 0) {
-        gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_v46.log"] copy];
+        gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_v47.log"] copy];
     } else {
-        gLogPath = @"/tmp/vip_v46.log";
+        gLogPath = @"/tmp/vip_v47.log";
     }
     return gLogPath;
 }
@@ -42,7 +42,7 @@ static void vipLog(NSString *fmt, ...) {
     } @catch (NSException *e) {}
 }
 
-#pragma mark - 字段配置
+#pragma mark - Wider field config
 
 static const char *AUTH_KEYS[] = {"authcode", "auth_code", "status", "isVip", "isMember", "isPremium", "isSubscribed"};
 static const char *EXPIRE_KEYS[] = {"expire", "endtime", "end_time", "is_expired", "expireTime", "vipExpire", "memberExpire"};
@@ -51,7 +51,8 @@ static const char *LEVEL_KEYS[] = {
     "k9mnpq7xzv2r8w4t", "kgdtdeviceav1forceresetdowngradeversionkey",
     "vip_level", "viplevel", "member_level", "user_level", "level", "grade",
     "viplevel", "memberlevel", "userlevel", "vip_grade", "vipgrade",
-    "tier", "vipTier", "memberTier", "subscriptionLevel", "requiredVipTier"
+    "tier", "vipTier", "memberTier", "subscriptionLevel", "requiredVipTier",
+    "vip_tier", "member_tier", "user_tier", "vip_grade", "member_grade"
 };
 static const char *UD_KEYS[] = {"kvipStatusStorageKey", "kvipstatusstoragekey", "EDTCActiveDirectAcquireCentral"};
 
@@ -78,7 +79,7 @@ static BOOL isUDKey(const char *k)      {
     return NO;
 }
 
-#pragma mark - JSON Patch with detailed logging
+#pragma mark - JSON Patch: detect 0-7 -> 8
 
 static NSDictionary * patchDictRecursively(NSDictionary *dict, int depth) {
     if (!dict || ![dict isKindOfClass:[NSDictionary class]]) return dict;
@@ -93,43 +94,50 @@ static NSDictionary * patchDictRecursively(NSDictionary *dict, int depth) {
         id v = dict[key];
         if (!v) continue;
 
+        // Level/tier: detect 0-7 -> 8
         if (isLevelKey(kl)) {
             if ([v isKindOfClass:[NSNumber class]]) {
                 int iv = [v intValue];
-                if (iv >= 0 && iv < 8) {
+                if (iv >= 0 && iv <= 7) {
                     m[key] = @8;
                     modified = YES;
-                    vipLog(@"[PATCH] level key='%@' %d->8 (depth=%d)", key, iv, depth);
+                    vipLog(@"[PATCH] level key='%@' %d->8", key, iv);
                 }
             } else if ([v isKindOfClass:[NSString class]]) {
                 NSString *s = v;
-                if ([s isEqualToString:@"0"] || [s isEqualToString:@"1"] || [s isEqualToString:@"2"] ||
-                    [s isEqualToString:@"3"] || [s isEqualToString:@"4"] || [s isEqualToString:@"5"] ||
-                    [s isEqualToString:@"6"] || [s isEqualToString:@"7"]) {
+                // Check if string is "0" to "7"
+                NSScanner *scanner = [NSScanner scannerWithString:s];
+                int num;
+                if ([scanner scanInt:&num] && [scanner isAtEnd] && num >= 0 && num <= 7) {
                     m[key] = @"8";
                     modified = YES;
-                    vipLog(@"[PATCH] level key='%@' '%@'->'8' (depth=%d)", key, s, depth);
+                    vipLog(@"[PATCH] level key='%@' '%@'->'8'", key, s);
                 }
             }
         }
+        // Auth: detect 0/false -> 1/true
         else if (isAuthKey(kl)) {
-            if ([v isKindOfClass:[NSNumber class]] && [v intValue] == 0) {
-                m[key] = @1; modified = YES;
-                vipLog(@"[PATCH] auth key='%@' 0->1 (depth=%d)", key, depth);
-            }
-            else if ([v isKindOfClass:[NSString class]] && [v isEqualToString:@"0"]) {
-                m[key] = @"1"; modified = YES;
-                vipLog(@"[PATCH] auth key='%@' '0'->'1' (depth=%d)", key, depth);
+            if ([v isKindOfClass:[NSNumber class]]) {
+                int iv = [v intValue];
+                if (iv == 0) { m[key] = @1; modified = YES; }
+            } else if ([v isKindOfClass:[NSString class]]) {
+                NSString *s = v;
+                if ([s isEqualToString:@"0"] || [s isEqualToString:@"false"] || [s isEqualToString:@"False"]) {
+                    m[key] = @"1"; modified = YES;
+                }
             }
         }
+        // Expire
         else if (isExpireKey(kl)) {
             if ([v isKindOfClass:[NSString class]]) { m[key] = @"2099-12-31"; modified = YES; }
             else if ([v isKindOfClass:[NSNumber class]]) { m[key] = @(4102444799000LL); modified = YES; }
         }
+        // Recurse into nested dict
         else if ([v isKindOfClass:[NSDictionary class]]) {
             NSDictionary *n = patchDictRecursively(v, depth + 1);
             if (n != v) { m[key] = n; modified = YES; }
         }
+        // Recurse into array
         else if ([v isKindOfClass:[NSArray class]]) {
             NSArray *arr = v;
             NSMutableArray *ma = [NSMutableArray arrayWithArray:arr];
@@ -147,7 +155,7 @@ static NSDictionary * patchDictRecursively(NSDictionary *dict, int depth) {
     return modified ? m : dict;
 }
 
-#pragma mark - NSJSONSerialization Hook with URL tracking
+#pragma mark - NSJSONSerialization Hook
 
 static NSString *gLastURL = nil;
 
@@ -159,7 +167,7 @@ static id new_JSON(Class cls, SEL sel, NSData *data, NSJSONReadingOptions opt, N
     if ([result isKindOfClass:[NSDictionary class]]) {
         NSDictionary *patched = patchDictRecursively(result, 0);
         if (patched != result) {
-            vipLog(@"[JSON] Patched dict from URL: %@", gLastURL ?: @"<unknown>");
+            vipLog(@"[JSON] Patched from URL: %@", gLastURL ?: @"<unknown>");
             return patched;
         }
     }
@@ -177,7 +185,7 @@ static void hookJSONSerialization(void) {
     vipLog(@"[HOOK] NSJSONSerialization");
 }
 
-#pragma mark - NSURLSession URL Logger (safe, no block wrap)
+#pragma mark - NSURLSession URL Logger
 
 typedef id (*DTImp_t)(id, SEL, id, id);
 static DTImp_t orig_dtReq = NULL;
@@ -190,7 +198,6 @@ static id new_dtReq(id self, SEL sel, id req, id completion) {
     }
     if (url) {
         gLastURL = url;
-        // Log member-related URLs
         NSString *lower = [url lowercaseString];
         if ([lower containsString:@"member"] || [lower containsString:@"vip"] ||
             [lower containsString:@"user"] || [lower containsString:@"account"] ||
@@ -248,7 +255,10 @@ static BOOL new_boolForKey(id self, SEL sel, NSString *key) {
 static NSInteger new_integerForKey(id self, SEL sel, NSString *key) {
     const char *k = [key UTF8String];
     NSInteger val = orig_integerForKey(self, sel, key);
-    if ((isUDKey(k) || isLevelKey(k)) && val >= 0 && val < 8) return 8;
+    if ((isUDKey(k) || isLevelKey(k)) && val >= 0 && val <= 7) {
+        vipLog(@"[UD-PATCH] integerForKey:'%@' %ld->8", key, (long)val);
+        return 8;
+    }
     return val;
 }
 
@@ -257,9 +267,10 @@ static NSString * new_stringForKey(id self, SEL sel, NSString *key) {
     NSString *val = orig_stringForKey(self, sel, key);
     if (!val) return val;
     if (isUDKey(k) || isLevelKey(k)) {
-        if ([val isEqualToString:@"0"] || [val isEqualToString:@"1"] || [val isEqualToString:@"2"] ||
-            [val isEqualToString:@"3"] || [val isEqualToString:@"4"] || [val isEqualToString:@"5"] ||
-            [val isEqualToString:@"6"] || [val isEqualToString:@"7"]) {
+        NSScanner *scanner = [NSScanner scannerWithString:val];
+        int num;
+        if ([scanner scanInt:&num] && [scanner isAtEnd] && num >= 0 && num <= 7) {
+            vipLog(@"[UD-PATCH] stringForKey:'%@' '%@'->'8'", key, val);
             return @"8";
         }
     }
@@ -273,12 +284,16 @@ static id new_objectForKey(id self, SEL sel, NSString *key) {
     if (isUDKey(k) || isLevelKey(k)) {
         if ([val isKindOfClass:[NSNumber class]]) {
             int iv = [val intValue];
-            if (iv >= 0 && iv < 8) return @8;
+            if (iv >= 0 && iv <= 7) {
+                vipLog(@"[UD-PATCH] objectForKey:'%@' %d->8", key, iv);
+                return @8;
+            }
         } else if ([val isKindOfClass:[NSString class]]) {
             NSString *s = val;
-            if ([s isEqualToString:@"0"] || [s isEqualToString:@"1"] || [s isEqualToString:@"2"] ||
-                [s isEqualToString:@"3"] || [s isEqualToString:@"4"] || [s isEqualToString:@"5"] ||
-                [s isEqualToString:@"6"] || [s isEqualToString:@"7"]) {
+            NSScanner *scanner = [NSScanner scannerWithString:s];
+            int num;
+            if ([scanner scanInt:&num] && [scanner isAtEnd] && num >= 0 && num <= 7) {
+                vipLog(@"[UD-PATCH] objectForKey:'%@' '%@'->'8'", key, s);
                 return @"8";
             }
         } else if ([val isKindOfClass:[NSDictionary class]]) {
@@ -336,9 +351,10 @@ static void hookUILabel(void) {
 __attribute__((constructor))
 static void init(void) {
     vipLog(@"========================================");
-    vipLog(@"ElyndorTV VIP Tweak v4.6");
+    vipLog(@"ElyndorTV VIP Tweak v4.7");
     vipLog(@"Build: 2026-08-26");
     vipLog(@"Log: %@", getLogPath());
+    vipLog(@"Detect: tier/level 0-7 -> 8");
     vipLog(@"========================================");
 
     hookJSONSerialization();
