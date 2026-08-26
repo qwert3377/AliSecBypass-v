@@ -1,6 +1,6 @@
 //
-//  ElyndorTV VIP Tweak v4.7 — Handle tier=0 or tier=1
-//  Expands detection: 0-7 -> 8, wider key matching
+//  ElyndorTV VIP Tweak v4.8 — UILabel Full Trace + Member Context Replace
+//  Logs ALL setText: calls, replaces "1"/"0" with "8" in member-related views
 //
 
 #import <Foundation/Foundation.h>
@@ -14,9 +14,9 @@ static NSString *getLogPath(void) {
     if (gLogPath) return gLogPath;
     NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     if (docs.count > 0) {
-        gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_v47.log"] copy];
+        gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_v48.log"] copy];
     } else {
-        gLogPath = @"/tmp/vip_v47.log";
+        gLogPath = @"/tmp/vip_v48.log";
     }
     return gLogPath;
 }
@@ -42,263 +42,138 @@ static void vipLog(NSString *fmt, ...) {
     } @catch (NSException *e) {}
 }
 
-#pragma mark - Wider field config
+#pragma mark - Check if view is in member-related hierarchy
 
-static const char *AUTH_KEYS[] = {"authcode", "auth_code", "status", "isVip", "isMember", "isPremium", "isSubscribed"};
-static const char *EXPIRE_KEYS[] = {"expire", "endtime", "end_time", "is_expired", "expireTime", "vipExpire", "memberExpire"};
-static const char *LEVEL_KEYS[] = {
-    "participantvoteterm", "edtcactivedirectacquirecentral",
-    "k9mnpq7xzv2r8w4t", "kgdtdeviceav1forceresetdowngradeversionkey",
-    "vip_level", "viplevel", "member_level", "user_level", "level", "grade",
-    "viplevel", "memberlevel", "userlevel", "vip_grade", "vipgrade",
-    "tier", "vipTier", "memberTier", "subscriptionLevel", "requiredVipTier",
-    "vip_tier", "member_tier", "user_tier", "vip_grade", "member_grade"
-};
-static const char *UD_KEYS[] = {"kvipStatusStorageKey", "kvipstatusstoragekey", "EDTCActiveDirectAcquireCentral"};
-
-static BOOL strMatch(const char *key, const char **list, size_t count) {
-    if (!key) return NO;
-    size_t klen = strlen(key);
-    for (size_t i = 0; i < count; i++) {
-        const char *v = list[i];
-        size_t vlen = strlen(v);
-        if (klen == vlen && strcasecmp(key, v) == 0) return YES;
-        if (strcasestr(key, v) != NULL) return YES;
+static BOOL isMemberViewHierarchy(UIView *view) {
+    if (!view) return NO;
+    UIView *current = view;
+    int depth = 0;
+    while (current && depth < 20) {
+        NSString *clsName = NSStringFromClass([current class]);
+        NSString *lower = [clsName lowercaseString];
+        if ([lower containsString:@"member"] || [lower containsString:@"vip"] ||
+            [lower containsString:@"profile"] || [lower containsString:@"account"] ||
+            [lower containsString:@"subscription"] || [lower containsString:@"premium"]) {
+            return YES;
+        }
+        current = [current superview];
+        depth++;
     }
     return NO;
 }
 
-static BOOL isAuthKey(const char *k)    { return strMatch(k, AUTH_KEYS, sizeof(AUTH_KEYS)/sizeof(char*)); }
-static BOOL isExpireKey(const char *k)  { return strMatch(k, EXPIRE_KEYS, sizeof(EXPIRE_KEYS)/sizeof(char*)); }
-static BOOL isLevelKey(const char *k)   { return strMatch(k, LEVEL_KEYS, sizeof(LEVEL_KEYS)/sizeof(char*)); }
-static BOOL isUDKey(const char *k)      {
-    if (!k) return NO;
-    for (size_t i = 0; i < sizeof(UD_KEYS)/sizeof(char*); i++) {
-        if (strcasecmp(k, UD_KEYS[i]) == 0) return YES;
-    }
-    return NO;
-}
+#pragma mark - UILabel setText: Hook
 
-#pragma mark - JSON Patch: detect 0-7 -> 8
+typedef void (*LabelSetTextImp_t)(id, SEL, NSString *);
+static LabelSetTextImp_t orig_labelSetText = NULL;
 
-static NSDictionary * patchDictRecursively(NSDictionary *dict, int depth) {
-    if (!dict || ![dict isKindOfClass:[NSDictionary class]]) return dict;
-    NSArray *keys = [dict allKeys];
-    if (!keys || keys.count == 0) return dict;
+static void new_labelSetText(id self, SEL sel, NSString *text) {
+    @try {
+        if (text && [text length] > 0) {
+            // Log all numeric texts
+            NSScanner *scanner = [NSScanner scannerWithString:text];
+            int num;
+            BOOL isNumber = [scanner scanInt:&num] && [scanner isAtEnd];
 
-    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:dict];
-    BOOL modified = NO;
+            if (isNumber) {
+                // Check if this label is in member view hierarchy
+                if ([self isKindOfClass:[UIView class]]) {
+                    UIView *v = (UIView *)self;
+                    BOOL inMember = isMemberViewHierarchy(v);
+                    vipLog(@"[LABEL] setText:'%@' class=%@ memberCtx=%d", text, NSStringFromClass([v class]), inMember);
 
-    for (NSString *key in keys) {
-        const char *kl = [key UTF8String];
-        id v = dict[key];
-        if (!v) continue;
-
-        // Level/tier: detect 0-7 -> 8
-        if (isLevelKey(kl)) {
-            if ([v isKindOfClass:[NSNumber class]]) {
-                int iv = [v intValue];
-                if (iv >= 0 && iv <= 7) {
-                    m[key] = @8;
-                    modified = YES;
-                    vipLog(@"[PATCH] level key='%@' %d->8", key, iv);
-                }
-            } else if ([v isKindOfClass:[NSString class]]) {
-                NSString *s = v;
-                // Check if string is "0" to "7"
-                NSScanner *scanner = [NSScanner scannerWithString:s];
-                int num;
-                if ([scanner scanInt:&num] && [scanner isAtEnd] && num >= 0 && num <= 7) {
-                    m[key] = @"8";
-                    modified = YES;
-                    vipLog(@"[PATCH] level key='%@' '%@'->'8'", key, s);
+                    // If it's "0" or "1" and in member context, replace with "8"
+                    if (inMember && (num == 0 || num == 1)) {
+                        vipLog(@"[LABEL-REPLACE] '%@' -> '8' in member view", text);
+                        orig_labelSetText(self, sel, @"8");
+                        return;
+                    }
                 }
             }
-        }
-        // Auth: detect 0/false -> 1/true
-        else if (isAuthKey(kl)) {
-            if ([v isKindOfClass:[NSNumber class]]) {
-                int iv = [v intValue];
-                if (iv == 0) { m[key] = @1; modified = YES; }
-            } else if ([v isKindOfClass:[NSString class]]) {
-                NSString *s = v;
-                if ([s isEqualToString:@"0"] || [s isEqualToString:@"false"] || [s isEqualToString:@"False"]) {
-                    m[key] = @"1"; modified = YES;
-                }
+
+            // Replace Chinese VIP status text
+            if ([text containsString:@"立即开通"] || [text containsString:@"尚未开通"] ||
+                [text containsString:@"未开通"] || [text containsString:@"非会员"]) {
+                orig_labelSetText(self, sel, @"VIP会员已开通");
+                return;
             }
         }
-        // Expire
-        else if (isExpireKey(kl)) {
-            if ([v isKindOfClass:[NSString class]]) { m[key] = @"2099-12-31"; modified = YES; }
-            else if ([v isKindOfClass:[NSNumber class]]) { m[key] = @(4102444799000LL); modified = YES; }
-        }
-        // Recurse into nested dict
-        else if ([v isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *n = patchDictRecursively(v, depth + 1);
-            if (n != v) { m[key] = n; modified = YES; }
-        }
-        // Recurse into array
-        else if ([v isKindOfClass:[NSArray class]]) {
-            NSArray *arr = v;
-            NSMutableArray *ma = [NSMutableArray arrayWithArray:arr];
-            BOOL arrMod = NO;
-            for (NSUInteger j = 0; j < ma.count; j++) {
-                id item = ma[j];
-                if ([item isKindOfClass:[NSDictionary class]]) {
-                    NSDictionary *np = patchDictRecursively(item, depth + 1);
-                    if (np != item) { ma[j] = np; arrMod = YES; }
-                }
-            }
-            if (arrMod) { m[key] = ma; modified = YES; }
-        }
-    }
-    return modified ? m : dict;
+    } @catch (NSException *e) {}
+    orig_labelSetText(self, sel, text);
 }
 
-#pragma mark - NSJSONSerialization Hook
-
-static NSString *gLastURL = nil;
-
-typedef id (*JSONImp_t)(Class, SEL, NSData *, NSJSONReadingOptions, NSError **);
-static JSONImp_t orig_JSON = NULL;
-
-static id new_JSON(Class cls, SEL sel, NSData *data, NSJSONReadingOptions opt, NSError **error) {
-    id result = orig_JSON(cls, sel, data, opt, error);
-    if ([result isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *patched = patchDictRecursively(result, 0);
-        if (patched != result) {
-            vipLog(@"[JSON] Patched from URL: %@", gLastURL ?: @"<unknown>");
-            return patched;
-        }
-    }
-    return result;
-}
-
-static void hookJSONSerialization(void) {
-    Class cls = objc_getClass("NSJSONSerialization");
+static void hookUILabel(void) {
+    Class cls = objc_getClass("UILabel");
     if (!cls) return;
-    SEL sel = @selector(JSONObjectWithData:options:error:);
+    SEL sel = @selector(setText:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    orig_labelSetText = (LabelSetTextImp_t)method_getImplementation(m);
+    method_setImplementation(m, (IMP)new_labelSetText);
+    vipLog(@"[HOOK] UILabel setText:");
+}
+
+#pragma mark - UIImage imageNamed: Hook
+
+typedef id (*ImgNamedImp_t)(Class, SEL, NSString *);
+static ImgNamedImp_t orig_imgNamed = NULL;
+
+static id new_imgNamed(Class self, SEL sel, NSString *name) {
+    @try {
+        if (name) {
+            NSString *lower = [name lowercaseString];
+            if ([lower containsString:@"vip"] || [lower containsString:@"member"] ||
+                [lower containsString:@"tier"] || [lower containsString:@"level"] ||
+                [lower containsString:@"grade"] || [lower containsString:@"badge"]) {
+                vipLog(@"[IMAGE] imageNamed:'%@'", name);
+                // Try to replace _1 with _8 in image name
+                if ([name hasSuffix:@"_1"] || [name hasSuffix:@"1"]) {
+                    NSString *newName = [name stringByReplacingOccurrencesOfString:@"_1" withString:@"_8"];
+                    if (![newName isEqualToString:name]) {
+                        vipLog(@"[IMAGE-REPLACE] '%@' -> '%@'", name, newName);
+                        return orig_imgNamed(self, sel, newName);
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    return orig_imgNamed(self, sel, name);
+}
+
+static void hookUIImage(void) {
+    Class cls = objc_getClass("UIImage");
+    if (!cls) return;
+    SEL sel = @selector(imageNamed:);
     Method m = class_getClassMethod(cls, sel);
     if (!m) return;
-    orig_JSON = (JSONImp_t)method_getImplementation(m);
-    method_setImplementation(m, (IMP)new_JSON);
-    vipLog(@"[HOOK] NSJSONSerialization");
+    orig_imgNamed = (ImgNamedImp_t)method_getImplementation(m);
+    method_setImplementation(m, (IMP)new_imgNamed);
+    vipLog(@"[HOOK] UIImage imageNamed:");
 }
 
-#pragma mark - NSURLSession URL Logger
-
-typedef id (*DTImp_t)(id, SEL, id, id);
-static DTImp_t orig_dtReq = NULL;
-static DTImp_t orig_dtURL = NULL;
-
-static id new_dtReq(id self, SEL sel, id req, id completion) {
-    NSString *url = nil;
-    if ([req isKindOfClass:[NSURLRequest class]]) {
-        url = [[req URL] absoluteString];
-    }
-    if (url) {
-        gLastURL = url;
-        NSString *lower = [url lowercaseString];
-        if ([lower containsString:@"member"] || [lower containsString:@"vip"] ||
-            [lower containsString:@"user"] || [lower containsString:@"account"] ||
-            [lower containsString:@"profile"] || [lower containsString:@"tier"] ||
-            [lower containsString:@"level"] || [lower containsString:@"grade"]) {
-            vipLog(@"[NET-MEMBER] %@", url);
-        }
-    }
-    return orig_dtReq(self, sel, req, completion);
-}
-
-static id new_dtURL(id self, SEL sel, id url, id completion) {
-    if ([url isKindOfClass:[NSURL class]]) {
-        NSString *urlStr = [url absoluteString];
-        gLastURL = urlStr;
-        NSString *lower = [urlStr lowercaseString];
-        if ([lower containsString:@"member"] || [lower containsString:@"vip"] ||
-            [lower containsString:@"user"] || [lower containsString:@"account"] ||
-            [lower containsString:@"profile"] || [lower containsString:@"tier"] ||
-            [lower containsString:@"level"] || [lower containsString:@"grade"]) {
-            vipLog(@"[NET-MEMBER] %@", urlStr);
-        }
-    }
-    return orig_dtURL(self, sel, url, completion);
-}
-
-static void hookNSURLSession(void) {
-    Class cls = objc_getClass("NSURLSession");
-    if (!cls) return;
-    Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-    if (m1) { orig_dtReq = (DTImp_t)method_getImplementation(m1); method_setImplementation(m1, (IMP)new_dtReq); }
-    Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
-    if (m2) { orig_dtURL = (DTImp_t)method_getImplementation(m2); method_setImplementation(m2, (IMP)new_dtURL); }
-    vipLog(@"[HOOK] NSURLSession");
-}
-
-#pragma mark - NSUserDefaults Hooks
+#pragma mark - NSUserDefaults (minimal, from v4.3)
 
 typedef BOOL (*BoolImp_t)(id, SEL, NSString *);
 typedef NSInteger (*IntImp_t)(id, SEL, NSString *);
-typedef NSString * (*StrImp_t)(id, SEL, NSString *);
-typedef id (*ObjImp_t)(id, SEL, NSString *);
-
 static BoolImp_t orig_boolForKey = NULL;
 static IntImp_t orig_integerForKey = NULL;
-static StrImp_t orig_stringForKey = NULL;
-static ObjImp_t orig_objectForKey = NULL;
 
 static BOOL new_boolForKey(id self, SEL sel, NSString *key) {
     const char *k = [key UTF8String];
-    if (isUDKey(k) || isAuthKey(k)) return YES;
+    if (strcasecmp(k, "kvipStatusStorageKey") == 0 || strcasecmp(k, "kvipstatusstoragekey") == 0) return YES;
     return orig_boolForKey(self, sel, key);
 }
 
 static NSInteger new_integerForKey(id self, SEL sel, NSString *key) {
     const char *k = [key UTF8String];
     NSInteger val = orig_integerForKey(self, sel, key);
-    if ((isUDKey(k) || isLevelKey(k)) && val >= 0 && val <= 7) {
-        vipLog(@"[UD-PATCH] integerForKey:'%@' %ld->8", key, (long)val);
-        return 8;
-    }
-    return val;
-}
-
-static NSString * new_stringForKey(id self, SEL sel, NSString *key) {
-    const char *k = [key UTF8String];
-    NSString *val = orig_stringForKey(self, sel, key);
-    if (!val) return val;
-    if (isUDKey(k) || isLevelKey(k)) {
-        NSScanner *scanner = [NSScanner scannerWithString:val];
-        int num;
-        if ([scanner scanInt:&num] && [scanner isAtEnd] && num >= 0 && num <= 7) {
-            vipLog(@"[UD-PATCH] stringForKey:'%@' '%@'->'8'", key, val);
-            return @"8";
-        }
-    }
-    return val;
-}
-
-static id new_objectForKey(id self, SEL sel, NSString *key) {
-    const char *k = [key UTF8String];
-    id val = orig_objectForKey(self, sel, key);
-    if (!val) return val;
-    if (isUDKey(k) || isLevelKey(k)) {
-        if ([val isKindOfClass:[NSNumber class]]) {
-            int iv = [val intValue];
-            if (iv >= 0 && iv <= 7) {
-                vipLog(@"[UD-PATCH] objectForKey:'%@' %d->8", key, iv);
-                return @8;
-            }
-        } else if ([val isKindOfClass:[NSString class]]) {
-            NSString *s = val;
-            NSScanner *scanner = [NSScanner scannerWithString:s];
-            int num;
-            if ([scanner scanInt:&num] && [scanner isAtEnd] && num >= 0 && num <= 7) {
-                vipLog(@"[UD-PATCH] objectForKey:'%@' '%@'->'8'", key, s);
-                return @"8";
-            }
-        } else if ([val isKindOfClass:[NSDictionary class]]) {
-            NSDictionary *patched = patchDictRecursively(val, 0);
-            if (patched != val) return patched;
+    if (val >= 0 && val <= 7) {
+        NSString *lower = [key lowercaseString];
+        if ([lower containsString:@"vip"] || [lower containsString:@"member"] ||
+            [lower containsString:@"tier"] || [lower containsString:@"level"] ||
+            [lower containsString:@"grade"]) {
+            vipLog(@"[UD] integerForKey:'%@' %ld->8", key, (long)val);
+            return 8;
         }
     }
     return val;
@@ -311,39 +186,7 @@ static void hookUserDefaults(void) {
     if (m1) { orig_boolForKey = (BoolImp_t)method_getImplementation(m1); method_setImplementation(m1, (IMP)new_boolForKey); }
     Method m2 = class_getInstanceMethod(cls, @selector(integerForKey:));
     if (m2) { orig_integerForKey = (IntImp_t)method_getImplementation(m2); method_setImplementation(m2, (IMP)new_integerForKey); }
-    Method m3 = class_getInstanceMethod(cls, @selector(stringForKey:));
-    if (m3) { orig_stringForKey = (StrImp_t)method_getImplementation(m3); method_setImplementation(m3, (IMP)new_stringForKey); }
-    Method m4 = class_getInstanceMethod(cls, @selector(objectForKey:));
-    if (m4) { orig_objectForKey = (ObjImp_t)method_getImplementation(m4); method_setImplementation(m4, (IMP)new_objectForKey); }
     vipLog(@"[HOOK] NSUserDefaults");
-}
-
-#pragma mark - Hook UILabel setText:
-
-typedef void (*LabelSetTextImp_t)(id, SEL, NSString *);
-static LabelSetTextImp_t orig_labelSetText = NULL;
-
-static void new_labelSetText(id self, SEL sel, NSString *text) {
-    if (text) {
-        NSString *nt = nil;
-        if ([text containsString:@"立即开通"] || [text containsString:@"尚未开通"] ||
-            [text containsString:@"未开通"] || [text containsString:@"非会员"]) {
-            nt = @"VIP会员已开通";
-        }
-        if (nt) { orig_labelSetText(self, sel, nt); return; }
-    }
-    orig_labelSetText(self, sel, text);
-}
-
-static void hookUILabel(void) {
-    Class cls = objc_getClass("UILabel");
-    if (!cls) return;
-    SEL sel = @selector(setText:);
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
-    orig_labelSetText = (LabelSetTextImp_t)method_getImplementation(m);
-    method_setImplementation(m, (IMP)new_labelSetText);
-    vipLog(@"[HOOK] UILabel");
 }
 
 #pragma mark - Entry
@@ -351,16 +194,14 @@ static void hookUILabel(void) {
 __attribute__((constructor))
 static void init(void) {
     vipLog(@"========================================");
-    vipLog(@"ElyndorTV VIP Tweak v4.7");
+    vipLog(@"ElyndorTV VIP Tweak v4.8");
     vipLog(@"Build: 2026-08-26");
-    vipLog(@"Log: %@", getLogPath());
-    vipLog(@"Detect: tier/level 0-7 -> 8");
+    vipLog(@"Strategy: UILabel trace + member context replace");
     vipLog(@"========================================");
 
-    hookJSONSerialization();
-    hookNSURLSession();
-    hookUserDefaults();
     hookUILabel();
+    hookUIImage();
+    hookUserDefaults();
 
     vipLog(@"[INIT] All hooks installed");
 }
