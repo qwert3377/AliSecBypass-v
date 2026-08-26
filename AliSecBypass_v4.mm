@@ -1,91 +1,154 @@
-// ElyndorTV VIP v4.0 — 合并精简版
-// 合并v3.41会员状态 + v8等级V8，去掉广告拦截和NSDictionary Hook避免卡死
+//
+//  ElyndorTV VIP v4.1 — Theos .mm Plugin
+//  TrollStore / Non-Jailbreak Injection
+//  Pure ObjC Runtime, no Logos / %hook
+//
 
-const TAG = { VIP: '[VIP]', JSON: '[JSON]', UD: '[UD]', UI: '[UI]' };
-function log(t, m) { console.log(t + ' ' + m); }
+#import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 
-// ===================== 字段配置 =====================
-// VIP状态字段
-const AUTH_KEYS = ['authcode', 'auth_code', 'status'];
-// VIP过期字段
-const EXPIRE_KEYS = ['expire', 'endtime', 'end_time', 'is_expired'];
-// VIP等级字段（混淆+原始）
-const LEVEL_KEYS = [
-    'participantvoteterm', 'edtcactivedirectacquirecentral',
-    'k9mnpq7xzv2r8w4t', 'kgdtdeviceav1forceresetdowngradeversionkey',
-    'vip_level', 'viplevel', 'member_level', 'user_level', 'level', 'grade',
-    'vipLevel', 'memberLevel', 'userLevel', 'vip_grade', 'vipGrade'
-];
-// NSUserDefaults关键key
-const UD_KEYS = ['kvipStatusStorageKey', 'EDTCActiveDirectAcquireCentral'];
+#pragma mark - Config
 
-function matchKey(key, list) {
-    const k = key.toLowerCase();
-    return list.some(v => k === v.toLowerCase() || k.includes(v.toLowerCase()));
+static NSArray *gAuthKeys;
+static NSArray *gExpireKeys;
+static NSArray *gLevelKeys;
+static NSArray *gUDKeys;
+
+static void InitKeys(void) {
+    gAuthKeys   = @[ @"authcode", @"auth_code", @"status" ];
+    gExpireKeys = @[ @"expire", @"endtime", @"end_time", @"is_expired" ];
+    gLevelKeys  = @[
+        @"participantvoteterm", @"edtcactivedirectacquirecentral",
+        @"k9mnpq7xzv2r8w4t", @"kgdtdeviceav1forceresetdowngradeversionkey",
+        @"vip_level", @"viplevel", @"member_level", @"user_level", @"level", @"grade",
+        @"vipLevel", @"memberLevel", @"userLevel", @"vip_grade", @"vipGrade"
+    ];
+    gUDKeys     = @[ @"kvipStatusStorageKey", @"EDTCActiveDirectAcquireCentral" ];
 }
-function isAuthKey(k) { return matchKey(k, AUTH_KEYS); }
-function isExpireKey(k) { return matchKey(k, EXPIRE_KEYS); }
-function isLevelKey(k) { return matchKey(k, LEVEL_KEYS); }
-function isUDKey(k) { return UD_KEYS.some(v => v === k); }
 
-// ===================== JSON Patch =====================
-function patchDict(d) {
-    if (!d || d.isNull() || !d.isKindOfClass_(ObjC.classes.NSDictionary)) return null;
-    const keys = d.allKeys();
-    if (!keys || keys.isNull()) return null;
-    let need = false;
-    for (let i = 0, n = keys.count(); i < n; i++) {
-        const k = keys.objectAtIndex_(i).toString().toLowerCase();
-        const v = d.objectForKey_(keys.objectAtIndex_(i));
-        if (!v || v.isNull()) continue;
-        if ((isAuthKey(k) && v.isKindOfClass_(ObjC.classes.NSNumber) && v.intValue() === 0) ||
-            (isExpireKey(k) && (v.isKindOfClass_(ObjC.classes.NSString) || v.isKindOfClass_(ObjC.classes.NSNumber))) ||
-            (isLevelKey(k) && v.isKindOfClass_(ObjC.classes.NSNumber) && v.intValue() >= 0 && v.intValue() < 8)) {
-            need = true;
+static void VIPLog(NSString *tag, NSString *msg) {
+    NSLog(@"%@ %@", tag, msg);
+}
+
+#pragma mark - Key Matching
+
+static BOOL MatchKey(NSString *key, NSArray *list) {
+    NSString *kl = [key lowercaseString];
+    for (NSString *v in list) {
+        if ([kl isEqualToString:[v lowercaseString]] || [kl containsString:[v lowercaseString]]) {
+            return YES;
         }
     }
-    if (!need) return null;
-    const m = ObjC.classes.NSMutableDictionary.dictionaryWithDictionary_(d);
-    for (let i = 0, n = keys.count(); i < n; i++) {
-        const key = keys.objectAtIndex_(i);
-        const ks = key.toString();
-        const kl = ks.toLowerCase();
-        const v = d.objectForKey_(key);
-        if (!v || v.isNull()) continue;
+    return NO;
+}
 
-        // auth/status → 1
-        if (isAuthKey(kl)) {
-            if (v.isKindOfClass_(ObjC.classes.NSNumber) && v.intValue() === 0) {
-                m.setObject_forKey_(ObjC.classes.NSNumber.numberWithInt_(1), key);
-                log(TAG.JSON, ks + ': 0→1');
-            } else if (v.isKindOfClass_(ObjC.classes.NSString) && v.toString() === '0') {
-                m.setObject_forKey_(ObjC.classes.NSString.stringWithString_('1'), key);
-                log(TAG.JSON, ks + ': "0"→"1"');
-            }
-        }
-        // expire → 2099
-        else if (isExpireKey(kl)) {
-            if (v.isKindOfClass_(ObjC.classes.NSString)) {
-                m.setObject_forKey_(ObjC.classes.NSString.stringWithString_('2099-12-31'), key);
-                log(TAG.JSON, ks + '→2099-12-31');
-            } else if (v.isKindOfClass_(ObjC.classes.NSNumber)) {
-                m.setObject_forKey_(ObjC.classes.NSNumber.numberWithLongLong_(4102444799000), key);
-                log(TAG.JSON, ks + '→MAX');
-            }
-        }
-        // level → 8
-        else if (isLevelKey(kl)) {
-            if (v.isKindOfClass_(ObjC.classes.NSNumber)) {
-                const iv = v.intValue ? v.intValue() : 0;
-                if (iv >= 0 && iv < 8) {
-                    m.setObject_forKey_(ObjC.classes.NSNumber.numberWithInt_(8), key);
-                    log(TAG.JSON, '等级 ' + ks + ': ' + iv + '→8');
+static BOOL IsUDKey(NSString *k) {
+    for (NSString *v in gUDKeys) {
+        if ([v isEqualToString:k]) return YES;
+    }
+    return NO;
+}
+
+static BOOL IsLevelKey(NSString *k) {
+    return MatchKey(k, gLevelKeys);
+}
+
+#pragma mark - JSON Patch
+
+static NSMutableDictionary *PatchDict(NSDictionary *d);
+
+static id PatchRecursively(id obj) {
+    NSMutableDictionary *p = PatchDict(obj);
+    if (p) return p;
+
+    if (![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *d = obj;
+    NSArray *keys = [d allKeys];
+    BOOL mod = NO;
+    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:d];
+    for (id keyObj in keys) {
+        if (![keyObj isKindOfClass:[NSString class]]) continue;
+        NSString *key = (NSString *)keyObj;
+        id v = d[key];
+        if ([v isKindOfClass:[NSDictionary class]]) {
+            id n = PatchRecursively(v);
+            if (n) { m[key] = n; mod = YES; }
+        } else if ([v isKindOfClass:[NSArray class]]) {
+            NSArray *arr = v;
+            NSMutableArray *ma = [NSMutableArray arrayWithArray:arr];
+            BOOL am = NO;
+            for (NSUInteger j = 0; j < ma.count; j++) {
+                id item = ma[j];
+                if ([item isKindOfClass:[NSDictionary class]]) {
+                    id np = PatchRecursively(item);
+                    if (np) { ma[j] = np; am = YES; }
                 }
-            } else if (v.isKindOfClass_(ObjC.classes.NSString)) {
-                const s = v.toString();
-                if (['0','1','2','3','4','5','6','7'].includes(s)) {
-                    m.setObject_forKey_(ObjC.classes.NSString.stringWithString_('8'), key);
-                    log(TAG.JSON, '等级 ' + ks + ': "' + s + '"→"8"');
+            }
+            if (am) { m[key] = ma; mod = YES; }
+        }
+    }
+    return mod ? m : nil;
+}
+
+static NSMutableDictionary *PatchDict(NSDictionary *d) {
+    if (!d || ![d isKindOfClass:[NSDictionary class]]) return nil;
+    NSArray *keys = [d allKeys];
+    if (!keys || keys.count == 0) return nil;
+
+    BOOL need = NO;
+    for (id keyObj in keys) {
+        if (![keyObj isKindOfClass:[NSString class]]) continue;
+        NSString *k = (NSString *)keyObj;
+        NSString *kl = [k lowercaseString];
+        id v = d[k];
+        if (!v || [v isKindOfClass:[NSNull class]]) continue;
+        if ((MatchKey(kl, gAuthKeys) && [v isKindOfClass:[NSNumber class]] && [v intValue] == 0) ||
+            (MatchKey(kl, gExpireKeys) && ([v isKindOfClass:[NSString class]] || [v isKindOfClass:[NSNumber class]])) ||
+            (MatchKey(kl, gLevelKeys) && [v isKindOfClass:[NSNumber class]] && [v intValue] >= 0 && [v intValue] < 8)) {
+            need = YES;
+        }
+    }
+    if (!need) return nil;
+
+    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:d];
+    for (id keyObj in keys) {
+        if (![keyObj isKindOfClass:[NSString class]]) continue;
+        NSString *key = (NSString *)keyObj;
+        NSString *ks = key;
+        NSString *kl = [ks lowercaseString];
+        id v = d[key];
+        if (!v || [v isKindOfClass:[NSNull class]]) continue;
+
+        if (MatchKey(kl, gAuthKeys)) {
+            if ([v isKindOfClass:[NSNumber class]] && [v intValue] == 0) {
+                m[key] = @1;
+                VIPLog(@"[JSON]", [NSString stringWithFormat:@"%@: 0→1", ks]);
+            } else if ([v isKindOfClass:[NSString class]] && [v isEqualToString:@"0"]) {
+                m[key] = @"1";
+                VIPLog(@"[JSON]", [NSString stringWithFormat:@"%@: \"0\"→\"1\"", ks]);
+            }
+        } else if (MatchKey(kl, gExpireKeys)) {
+            if ([v isKindOfClass:[NSString class]]) {
+                m[key] = @"2099-12-31";
+                VIPLog(@"[JSON]", [NSString stringWithFormat:@"%@→2099", ks]);
+            } else if ([v isKindOfClass:[NSNumber class]]) {
+                m[key] = @(4102444799000);
+                VIPLog(@"[JSON]", [NSString stringWithFormat:@"%@→MAX", ks]);
+            }
+        } else if (MatchKey(kl, gLevelKeys)) {
+            if ([v isKindOfClass:[NSNumber class]]) {
+                int iv = [v intValue];
+                if (iv >= 0 && iv < 8) {
+                    m[key] = @8;
+                    VIPLog(@"[JSON]", [NSString stringWithFormat:@"等级 %@: %d→8", ks, iv]);
+                }
+            } else if ([v isKindOfClass:[NSString class]]) {
+                NSString *s = v;
+                if ([@"0" isEqualToString:s] || [@"1" isEqualToString:s] || [@"2" isEqualToString:s] ||
+                    [@"3" isEqualToString:s] || [@"4" isEqualToString:s] || [@"5" isEqualToString:s] ||
+                    [@"6" isEqualToString:s] || [@"7" isEqualToString:s]) {
+                    m[key] = @"8";
+                    VIPLog(@"[JSON]", [NSString stringWithFormat:@"等级 %@: \"%@\"→\"8\"", ks, s]);
                 }
             }
         }
@@ -93,284 +156,149 @@ function patchDict(d) {
     return m;
 }
 
-function patchDictRecursively(dict) {
-    const p = patchDict(dict);
-    if (p) return p;
-    // 递归处理嵌套
-    try {
-        const keys = dict.allKeys();
-        let modified = false;
-        const m = ObjC.classes.NSMutableDictionary.dictionaryWithDictionary_(dict);
-        for (let i = 0; i < keys.count(); i++) {
-            const key = keys.objectAtIndex_(i);
-            const val = dict.objectForKey_(key);
-            if (val.isKindOfClass_(ObjC.classes.NSDictionary)) {
-                const nested = patchDictRecursively(val);
-                if (nested) { m.setObject_forKey_(nested, key); modified = true; }
-            } else if (val.isKindOfClass_(ObjC.classes.NSArray)) {
-                const arr = ObjC.classes.NSMutableArray.arrayWithArray_(val);
-                let arrMod = false;
-                for (let j = 0; j < arr.count(); j++) {
-                    const item = arr.objectAtIndex_(j);
-                    if (item.isKindOfClass_(ObjC.classes.NSDictionary)) {
-                        const np = patchDictRecursively(item);
-                        if (np) { arr.replaceObjectAtIndex_withObject_(j, np); arrMod = true; }
-                    }
-                }
-                if (arrMod) { m.setObject_forKey_(arr, key); modified = true; }
+#pragma mark - Original IMPs
+
+static id   (*orig_JSONObjectWithData)(id self, SEL _cmd, NSData *data, NSUInteger options, NSError **error);
+static BOOL (*orig_boolForKey)(id self, SEL _cmd, NSString *key);
+static NSInteger (*orig_integerForKey)(id self, SEL _cmd, NSString *key);
+static NSString * (*orig_stringForKey)(id self, SEL _cmd, NSString *key);
+static id   (*orig_objectForKey)(id self, SEL _cmd, NSString *key);
+static void (*orig_setText)(id self, SEL _cmd, NSString *text);
+
+#pragma mark - Hooks
+
+static id hook_JSONObjectWithData(id self, SEL _cmd, NSData *data, NSUInteger options, NSError **error) {
+    id result = orig_JSONObjectWithData(self, _cmd, data, options, error);
+    if (!result || ![result isKindOfClass:[NSDictionary class]]) return result;
+    id patched = PatchRecursively(result);
+    if (patched) {
+        VIPLog(@"[VIP]", @"NSJSONSerialization patched");
+        return patched;
+    }
+    return result;
+}
+
+static BOOL hook_boolForKey(id self, SEL _cmd, NSString *key) {
+    if (IsUDKey(key)) return YES;
+    return orig_boolForKey(self, _cmd, key);
+}
+
+static NSInteger hook_integerForKey(id self, SEL _cmd, NSString *key) {
+    if (IsUDKey(key) || IsLevelKey(key)) {
+        NSInteger v = orig_integerForKey(self, _cmd, key);
+        if (v >= 0 && v < 8) return 8;
+        return v;
+    }
+    return orig_integerForKey(self, _cmd, key);
+}
+
+static NSString * hook_stringForKey(id self, SEL _cmd, NSString *key) {
+    NSString *v = orig_stringForKey(self, _cmd, key);
+    if (!v) return v;
+    if ((IsUDKey(key) || IsLevelKey(key)) &&
+        ([@"0" isEqualToString:v] || [@"1" isEqualToString:v] || [@"2" isEqualToString:v] ||
+         [@"3" isEqualToString:v] || [@"4" isEqualToString:v] || [@"5" isEqualToString:v] ||
+         [@"6" isEqualToString:v] || [@"7" isEqualToString:v])) {
+        VIPLog(@"[UD]", [NSString stringWithFormat:@"UD等级: \"%@\"→\"8\"", v]);
+        return @"8";
+    }
+    return v;
+}
+
+static id hook_objectForKey(id self, SEL _cmd, NSString *key) {
+    id v = orig_objectForKey(self, _cmd, key);
+    if (!v) return v;
+    if (IsUDKey(key) || IsLevelKey(key)) {
+        if ([v isKindOfClass:[NSNumber class]]) {
+            int iv = [v intValue];
+            if (iv >= 0 && iv < 8) {
+                VIPLog(@"[UD]", [NSString stringWithFormat:@"UD等级: %d→8", iv]);
+                return @8;
+            }
+        } else if ([v isKindOfClass:[NSString class]]) {
+            NSString *s = v;
+            if ([@"0" isEqualToString:s] || [@"1" isEqualToString:s] || [@"2" isEqualToString:s] ||
+                [@"3" isEqualToString:s] || [@"4" isEqualToString:s] || [@"5" isEqualToString:s] ||
+                [@"6" isEqualToString:s] || [@"7" isEqualToString:s]) {
+                VIPLog(@"[UD]", [NSString stringWithFormat:@"UD等级: \"%@\"→\"8\"", s]);
+                return @"8";
             }
         }
-        return modified ? m : null;
-    } catch(e) { return null; }
-}
-
-// ===================== 1. NSJSONSerialization =====================
-function hookJSON() {
-    const JSON = ObjC.classes.NSJSONSerialization;
-    if (!JSON) return;
-    try {
-        const m = JSON['+ JSONObjectWithData:options:error:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onLeave(retval) {
-                    try {
-                        if (retval.isNull()) return;
-                        const obj = new ObjC.Object(retval);
-                        if (!obj.isKindOfClass_(ObjC.classes.NSDictionary)) return;
-                        const p = patchDictRecursively(obj);
-                        if (p) retval.replace(p);
-                    } catch(e) {}
-                }
-            });
-            log(TAG.VIP, '已Hook NSJSONSerialization');
-        }
-    } catch(e) {}
-}
-
-// ===================== 2. NSUserDefaults（安全版）====================
-function hookUserDefaults() {
-    const UD = ObjC.classes.NSUserDefaults;
-    if (!UD) return;
-
-    // boolForKey:
-    try {
-        const m = UD['- boolForKey:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onEnter(args) {
-                    try { this.isUD = isUDKey(new ObjC.Object(args[2]).toString()); } catch(e) { this.isUD = false; }
-                },
-                onLeave(retval) {
-                    try { if (this.isUD) retval.replace(1); } catch(e) {}
-                }
-            });
-        }
-    } catch(e) {}
-
-    // integerForKey:
-    try {
-        const m = UD['- integerForKey:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onEnter(args) {
-                    try {
-                        const key = new ObjC.Object(args[2]).toString();
-                        this.isUD = isUDKey(key);
-                        this.isLevel = isLevelKey(key);
-                    } catch(e) { this.isUD = false; this.isLevel = false; }
-                },
-                onLeave(retval) {
-                    try {
-                        if (this.isUD || this.isLevel) {
-                            const val = retval.toInt32 ? retval.toInt32() : parseInt(retval);
-                            if (val >= 0 && val < 8) retval.replace(8);
-                        }
-                    } catch(e) {}
-                }
-            });
-        }
-    } catch(e) {}
-
-    // stringForKey: — 安全写法：alloc+init
-    try {
-        const m = UD['- stringForKey:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onEnter(args) {
-                    try {
-                        const key = new ObjC.Object(args[2]).toString();
-                        this.isUD = isUDKey(key);
-                        this.isLevel = isLevelKey(key);
-                    } catch(e) { this.isUD = false; this.isLevel = false; }
-                },
-                onLeave(retval) {
-                    try {
-                        if (retval.isNull()) return;
-                        if (this.isUD || this.isLevel) {
-                            const val = new ObjC.Object(retval).toString();
-                            if (['0','1','2','3','4','5','6','7'].includes(val)) {
-                                const newStr = ObjC.classes.NSString.alloc().initWithString_('8');
-                                retval.replace(newStr);
-                                log(TAG.UD, 'UD等级: "' + val + '"→"8"');
-                            }
-                        }
-                    } catch(e) {}
-                }
-            });
-        }
-    } catch(e) {}
-
-    // objectForKey:
-    try {
-        const m = UD['- objectForKey:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onEnter(args) {
-                    try {
-                        const key = new ObjC.Object(args[2]).toString();
-                        this.isUD = isUDKey(key);
-                        this.isLevel = isLevelKey(key);
-                    } catch(e) { this.isUD = false; this.isLevel = false; }
-                },
-                onLeave(retval) {
-                    try {
-                        if (retval.isNull()) return;
-                        if (this.isUD || this.isLevel) {
-                            const val = new ObjC.Object(retval);
-                            if (val.isKindOfClass_(ObjC.classes.NSNumber)) {
-                                const iv = val.intValue ? val.intValue() : 0;
-                                if (iv >= 0 && iv < 8) {
-                                    retval.replace(ObjC.classes.NSNumber.numberWithInt_(8));
-                                    log(TAG.UD, 'UD等级: ' + iv + '→8');
-                                }
-                            } else if (val.isKindOfClass_(ObjC.classes.NSString)) {
-                                const s = val.toString();
-                                if (['0','1','2','3','4','5','6','7'].includes(s)) {
-                                    retval.replace(ObjC.classes.NSString.alloc().initWithString_('8'));
-                                    log(TAG.UD, 'UD等级: "' + s + '"→"8"');
-                                }
-                            }
-                        }
-                    } catch(e) {}
-                }
-            });
-        }
-    } catch(e) {}
-
-    log(TAG.VIP, '已Hook NSUserDefaults');
-}
-
-// ===================== 3. NSMutableDictionary setObject:forKey: =====================
-function hookMutableDict() {
-    const MD = ObjC.classes.NSMutableDictionary;
-    if (!MD) return;
-    try {
-        const m = MD['- setObject:forKey:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onEnter(args) {
-                    try {
-                        const key = new ObjC.Object(args[3]).toString();
-                        const val = new ObjC.Object(args[2]);
-                        const kl = key.toLowerCase();
-
-                        if (isAuthKey(kl)) {
-                            if (val.isKindOfClass_(ObjC.classes.NSNumber) && val.intValue() === 0) {
-                                args[2] = ObjC.classes.NSNumber.numberWithInt_(1);
-                                log(TAG.VIP, 'MD auth: 0→1');
-                            } else if (val.isKindOfClass_(ObjC.classes.NSString) && val.toString() === '0') {
-                                args[2] = ObjC.classes.NSString.stringWithString_('1');
-                                log(TAG.VIP, 'MD auth: "0"→"1"');
-                            }
-                        } else if (isExpireKey(kl) && val.isKindOfClass_(ObjC.classes.NSString)) {
-                            args[2] = ObjC.classes.NSString.stringWithString_('2099-12-31');
-                            log(TAG.VIP, 'MD expire→2099');
-                        } else if (isLevelKey(kl)) {
-                            if (val.isKindOfClass_(ObjC.classes.NSNumber)) {
-                                const iv = val.intValue ? val.intValue() : 0;
-                                if (iv >= 0 && iv < 8) {
-                                    args[2] = ObjC.classes.NSNumber.numberWithInt_(8);
-                                    log(TAG.VIP, 'MD等级: ' + iv + '→8');
-                                }
-                            }
-                        }
-                    } catch(e) {}
-                }
-            });
-            log(TAG.VIP, '已Hook NSMutableDictionary');
-        }
-    } catch(e) {}
-}
-
-// ===================== 4. UILabel setText: =====================
-function hookUILabel() {
-    const LABEL = ObjC.classes.UILabel;
-    if (!LABEL) return;
-    try {
-        const m = LABEL['- setText:'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onEnter(args) {
-                    try {
-                        const t = new ObjC.Object(args[2]).toString();
-                        let nt = null;
-                        if (t.includes('立即开通') || t.includes('尚未开通') || t.includes('未开通') || t.includes('非会员')) {
-                            nt = 'VIP会员已开通';
-                            log(TAG.UI, '"' + t + '"→"VIP会员已开通"');
-                        }
-                        if (nt) args[2] = ObjC.classes.NSString.stringWithString_(nt);
-                    } catch(e) {}
-                }
-            });
-            log(TAG.VIP, '已Hook UILabel');
-        }
-    } catch(e) {}
-}
-
-// ===================== 5. hasVipMembership =====================
-function forceVIP() {
-    const cls = ObjC.classes['ElyndorTVCode.EDTCDeviceCoreHandler'];
-    if (!cls) {
-        log(TAG.VIP, '[-] 未找到 EDTCDeviceCoreHandler');
-        return;
     }
-    try {
-        const m = cls['+ hasVipMembership'];
-        if (m && m.implementation) {
-            Interceptor.attach(m.implementation, {
-                onLeave(retval) {
-                    try {
-                        const val = retval.toInt32 ? retval.toInt32() : parseInt(retval);
-                        if (val === 0) {
-                            retval.replace(1);
-                            log(TAG.VIP, 'hasVipMembership: 0→1');
-                        }
-                    } catch(e) {}
-                }
-            });
-            log(TAG.VIP, '已Hook hasVipMembership');
-        }
-    } catch(e) {}
+    return v;
 }
 
-// ===================== Main =====================
-function main() {
-    console.log('\n=== ElyndorTV VIP v4.0 ===');
-    console.log('=== 合并精简版 (v3.41会员 + v8等级V8) ===\n');
+static void hook_setText(id self, SEL _cmd, NSString *text) {
+    NSString *nt = nil;
+    if ([text containsString:@"立即开通"] || [text containsString:@"尚未开通"] ||
+        [text containsString:@"未开通"] || [text containsString:@"非会员"]) {
+        nt = @"VIP会员已开通";
+    }
+    if (nt) {
+        VIPLog(@"[UI]", [NSString stringWithFormat:@"\"%@\"→\"VIP会员已开通\"", text]);
+        orig_setText(self, _cmd, nt);
+    } else {
+        orig_setText(self, _cmd, text);
+    }
+}
 
-    if (!ObjC.available) {
-        console.log('[-] ObjC不可用');
-        return;
+#pragma mark - Constructor
+
+__attribute__((constructor))
+static void ElyndorInit(void) {
+    NSLog(@"\n=== ElyndorTV VIP v4.1 ===");
+    NSLog(@"=== Theos .mm Plugin ===\n");
+
+    InitKeys();
+
+    // 1. NSJSONSerialization
+    Class jsonClass = objc_getClass("NSJSONSerialization");
+    if (jsonClass) {
+        Method m = class_getClassMethod(jsonClass, @selector(JSONObjectWithData:options:error:));
+        if (m) {
+            orig_JSONObjectWithData = (id (*)(id, SEL, NSData *, NSUInteger, NSError **))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_JSONObjectWithData);
+            VIPLog(@"[VIP]", @"已Hook NSJSONSerialization");
+        }
     }
 
-    hookJSON();
-    hookUserDefaults();
-    hookMutableDict();
-    hookUILabel();
-    forceVIP();
+    // 2. NSUserDefaults
+    Class udClass = objc_getClass("NSUserDefaults");
+    if (udClass) {
+        Method m1 = class_getInstanceMethod(udClass, @selector(boolForKey:));
+        if (m1) {
+            orig_boolForKey = (BOOL (*)(id, SEL, NSString *))method_getImplementation(m1);
+            method_setImplementation(m1, (IMP)hook_boolForKey);
+        }
+        Method m2 = class_getInstanceMethod(udClass, @selector(integerForKey:));
+        if (m2) {
+            orig_integerForKey = (NSInteger (*)(id, SEL, NSString *))method_getImplementation(m2);
+            method_setImplementation(m2, (IMP)hook_integerForKey);
+        }
+        Method m3 = class_getInstanceMethod(udClass, @selector(stringForKey:));
+        if (m3) {
+            orig_stringForKey = (NSString * (*)(id, SEL, NSString *))method_getImplementation(m3);
+            method_setImplementation(m3, (IMP)hook_stringForKey);
+        }
+        Method m4 = class_getInstanceMethod(udClass, @selector(objectForKey:));
+        if (m4) {
+            orig_objectForKey = (id (*)(id, SEL, NSString *))method_getImplementation(m4);
+            method_setImplementation(m4, (IMP)hook_objectForKey);
+        }
+        VIPLog(@"[VIP]", @"已Hook NSUserDefaults");
+    }
 
-    console.log('\n=== 已激活 ===');
-    console.log('=== NSJSONSerialization + NSUserDefaults + NSMutableDictionary + UILabel + hasVipMembership ===\n');
+    // 3. UILabel
+    Class labelClass = objc_getClass("UILabel");
+    if (labelClass) {
+        Method m = class_getInstanceMethod(labelClass, @selector(setText:));
+        if (m) {
+            orig_setText = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hook_setText);
+            VIPLog(@"[VIP]", @"已Hook UILabel");
+        }
+    }
+
+    NSLog(@"\n=== 已激活 ===");
+    NSLog(@"=== NSJSONSerialization + NSUserDefaults + UILabel ===\n");
 }
-
-setTimeout(main, 500);
