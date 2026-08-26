@@ -1,8 +1,8 @@
 //
-//  ElyndorTV VIP Tweak v10.0
+//  ElyndorTV VIP Safe Tweak v11.0
 //  Target: LysenthoTVSpace (com.influx4.motion.axis26)
 //  Build: 2026-08-26
-//  Strategy: Pure Runtime Hook (no Logos %hook)
+//  Strategy: NSUserDefaults ONLY + file logging + crash-proof
 //
 
 #import <Foundation/Foundation.h>
@@ -11,7 +11,46 @@
 #define MAX_TIER 8
 #define VIP_KEY @"kvipstatusstoragekey"
 
-#pragma mark - Fake Data Builder
+static NSString *gLogPath = nil;
+
+#pragma mark - File Logger (write to App Documents)
+
+static void vipLog(NSString *fmt, ...) {
+    @try {
+        if (!gLogPath) {
+            NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+            if (docs.count > 0) {
+                gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_tweak.log"] copy];
+            }
+        }
+        if (!gLogPath) return;
+
+        va_list args;
+        va_start(args, fmt);
+        NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+        va_end(args);
+
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
+            [[NSDate date] descriptionWithLocale:nil], msg];
+
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:gLogPath]) {
+            [fm createFileAtPath:gLogPath contents:data attributes:nil];
+        } else {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
+            if (fh) {
+                [fh seekToEndOfFile];
+                [fh writeData:data];
+                [fh closeFile];
+            }
+        }
+    } @catch (NSException *e) {
+        // silent fail
+    }
+}
+
+#pragma mark - Fake Data
 
 static NSMutableDictionary *buildFakeVipDict(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
@@ -32,19 +71,21 @@ static NSMutableDictionary *buildFakeVipDict(void) {
 }
 
 static BOOL isMemberKey(NSString *key) {
-    if (!key) return NO;
-    NSString *lower = [key lowercaseString];
-    return [lower containsString:@"vip"]
-        || [lower containsString:@"member"]
-        || [lower containsString:@"tier"]
-        || [lower containsString:@"level"]
-        || [lower containsString:@"grade"]
-        || [lower containsString:@"premium"]
-        || [lower containsString:@"subscri"]
-        || [lower containsString:@"expire"];
+    @try {
+        if (!key) return NO;
+        NSString *lower = [key lowercaseString];
+        return [lower containsString:@"vip"]
+            || [lower containsString:@"member"]
+            || [lower containsString:@"tier"]
+            || [lower containsString:@"level"]
+            || [lower containsString:@"grade"]
+            || [lower containsString:@"premium"]
+            || [lower containsString:@"subscri"]
+            || [lower containsString:@"expire"];
+    } @catch (NSException *e) { return NO; }
 }
 
-#pragma mark - NSUserDefaults Hooks
+#pragma mark - Original IMPs
 
 static id  (*orig_objectForKey)(id, SEL, NSString *);
 static id  (*orig_stringForKey)(id, SEL, NSString *);
@@ -64,230 +105,189 @@ static void (*orig_setDouble)(id, SEL, double, NSString *);
 static void (*orig_setFloat)(id, SEL, float, NSString *);
 static void (*orig_removeObject)(id, SEL, NSString *);
 
+#pragma mark - Hooks
+
 static id hook_objectForKey(id self, SEL _cmd, NSString *key) {
-    if ([key isEqualToString:VIP_KEY] || isMemberKey(key)) {
-        NSLog(@"[VIP] objectForKey:'%@' -> fake dict", key);
-        return buildFakeVipDict();
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[FAKE] objectForKey:'%@' -> dict", key);
+            return buildFakeVipDict();
+        }
+    } @catch (NSException *e) {}
     return orig_objectForKey(self, _cmd, key);
 }
 
 static id hook_stringForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] stringForKey:'%@' -> fake JSON", key);
-        return @"{\"isVip\":true,\"tier\":8,\"level\":8,\"grade\":8}";
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[FAKE] stringForKey:'%@' -> JSON", key);
+            return @"{\"isVip\":true,\"tier\":8,\"level\":8,\"grade\":8}";
+        }
+    } @catch (NSException *e) {}
     return orig_stringForKey(self, _cmd, key);
 }
 
 static id hook_dataForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] dataForKey:'%@' -> fake data", key);
-        return [NSJSONSerialization dataWithJSONObject:buildFakeVipDict() options:0 error:nil];
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[FAKE] dataForKey:'%@' -> data", key);
+            return [NSJSONSerialization dataWithJSONObject:buildFakeVipDict() options:0 error:nil];
+        }
+    } @catch (NSException *e) {}
     return orig_dataForKey(self, _cmd, key);
 }
 
 static id hook_dictionaryForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] dictionaryForKey:'%@' -> fake dict", key);
-        return buildFakeVipDict();
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[FAKE] dictionaryForKey:'%@' -> dict", key);
+            return buildFakeVipDict();
+        }
+    } @catch (NSException *e) {}
     return orig_dictionaryForKey(self, _cmd, key);
 }
 
 static id hook_arrayForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) return @[];
+    @try {
+        if (isMemberKey(key)) return @[];
+    } @catch (NSException *e) {}
     return orig_arrayForKey(self, _cmd, key);
 }
 
 static NSInteger hook_integerForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] integerForKey:'%@' -> %d", key, MAX_TIER);
-        return MAX_TIER;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[FAKE] integerForKey:'%@' -> %d", key, MAX_TIER);
+            return MAX_TIER;
+        }
+    } @catch (NSException *e) {}
     return orig_integerForKey(self, _cmd, key);
 }
 
 static int hook_intForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) return MAX_TIER;
+    @try {
+        if (isMemberKey(key)) return MAX_TIER;
+    } @catch (NSException *e) {}
     return orig_intForKey(self, _cmd, key);
 }
 
 static BOOL hook_boolForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] boolForKey:'%@' -> YES", key);
-        return YES;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[FAKE] boolForKey:'%@' -> YES", key);
+            return YES;
+        }
+    } @catch (NSException *e) {}
     return orig_boolForKey(self, _cmd, key);
 }
 
 static double hook_doubleForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) return 4102444800.0;
+    @try {
+        if (isMemberKey(key)) return 4102444800.0;
+    } @catch (NSException *e) {}
     return orig_doubleForKey(self, _cmd, key);
 }
 
 static float hook_floatForKey(id self, SEL _cmd, NSString *key) {
-    if (isMemberKey(key)) return 4102444800.0f;
+    @try {
+        if (isMemberKey(key)) return 4102444800.0f;
+    } @catch (NSException *e) {}
     return orig_floatForKey(self, _cmd, key);
 }
 
 static void hook_setObject(id self, SEL _cmd, id value, NSString *key) {
-    if ([key isEqualToString:VIP_KEY] || isMemberKey(key)) {
-        NSLog(@"[VIP] BLOCKED setObject:forKey:'%@'", key);
-        return;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[BLOCK] setObject:forKey:'%@'", key);
+            return;
+        }
+    } @catch (NSException *e) {}
     orig_setObject(self, _cmd, value, key);
 }
 
 static void hook_setInteger(id self, SEL _cmd, NSInteger value, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] BLOCKED setInteger:forKey:'%@'", key);
-        return;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[BLOCK] setInteger:forKey:'%@'", key);
+            return;
+        }
+    } @catch (NSException *e) {}
     orig_setInteger(self, _cmd, value, key);
 }
 
 static void hook_setBool(id self, SEL _cmd, BOOL value, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] BLOCKED setBool:forKey:'%@'", key);
-        return;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[BLOCK] setBool:forKey:'%@'", key);
+            return;
+        }
+    } @catch (NSException *e) {}
     orig_setBool(self, _cmd, value, key);
 }
 
 static void hook_setDouble(id self, SEL _cmd, double value, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] BLOCKED setDouble:forKey:'%@'", key);
-        return;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[BLOCK] setDouble:forKey:'%@'", key);
+            return;
+        }
+    } @catch (NSException *e) {}
     orig_setDouble(self, _cmd, value, key);
 }
 
 static void hook_setFloat(id self, SEL _cmd, float value, NSString *key) {
-    if (isMemberKey(key)) {
-        NSLog(@"[VIP] BLOCKED setFloat:forKey:'%@'", key);
-        return;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[BLOCK] setFloat:forKey:'%@'", key);
+            return;
+        }
+    } @catch (NSException *e) {}
     orig_setFloat(self, _cmd, value, key);
 }
 
 static void hook_removeObject(id self, SEL _cmd, NSString *key) {
-    if ([key isEqualToString:VIP_KEY] || isMemberKey(key)) {
-        NSLog(@"[VIP] BLOCKED removeObjectForKey:'%@'", key);
-        return;
-    }
+    @try {
+        if (isMemberKey(key)) {
+            vipLog(@"[BLOCK] removeObjectForKey:'%@'", key);
+            return;
+        }
+    } @catch (NSException *e) {}
     orig_removeObject(self, _cmd, key);
 }
 
-#pragma mark - NSJSONSerialization Hook
-
-static id (*orig_JSONWithData)(Class, SEL, NSData *, NSJSONReadingOptions, NSError **);
-
-static id hook_JSONWithData(Class self, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **error) {
-    id result = orig_JSONWithData(self, _cmd, data, opt, error);
-    if (![result isKindOfClass:[NSDictionary class]]) return result;
-
-    NSDictionary *dict = result;
-    BOOL isMember = NO;
-    for (NSString *k in dict.allKeys) {
-        NSString *lower = [k lowercaseString];
-        if ([lower containsString:@"vip"] || [lower containsString:@"member"] ||
-            [lower containsString:@"tier"] || [lower containsString:@"level"] ||
-            [lower containsString:@"grade"] || [lower containsString:@"premium"] ||
-            [lower containsString:@"subscri"] || [lower containsString:@"expire"]) {
-            isMember = YES;
-            break;
-        }
-    }
-
-    if (isMember) {
-        NSLog(@"[VIP] JSON member response detected");
-        if ([result isKindOfClass:[NSMutableDictionary class]]) {
-            NSMutableDictionary *md = result;
-            md[@"isVip"]     = @YES;
-            md[@"tier"]      = @(MAX_TIER);
-            md[@"level"]     = @(MAX_TIER);
-            md[@"grade"]     = @(MAX_TIER);
-            md[@"status"]    = @"active";
-            md[@"expireTime"] = @(4102444800);
-            NSLog(@"[VIP] Injected into mutable JSON dict");
-        }
-    }
-    return result;
-}
-
-#pragma mark - NSKeyedUnarchiver Hooks
-
-static id (*orig_unarchivedObject)(Class, SEL, Class, NSData *, NSError **);
-static id (*orig_unarchiveObject)(Class, SEL, NSData *);
-
-static id hook_unarchivedObject(Class self, SEL _cmd, Class cls, NSData *data, NSError **error) {
-    id result = orig_unarchivedObject(self, _cmd, cls, data, error);
-    NSString *name = NSStringFromClass(cls);
-    if ([name containsString:@"Member"] || [name containsString:@"VIP"] ||
-        [name containsString:@"Tier"] || [name containsString:@"Level"] ||
-        [name containsString:@"Account"] || [name containsString:@"Profile"]) {
-        NSLog(@"[VIP] Unarchived member class: %@ -> %@", name, result);
-    }
-    return result;
-}
-
-static id hook_unarchiveObject(Class self, SEL _cmd, NSData *data) {
-    id result = orig_unarchiveObject(self, _cmd, data);
-    if (result) {
-        NSString *name = NSStringFromClass([result class]);
-        if ([name containsString:@"Member"] || [name containsString:@"VIP"] ||
-            [name containsString:@"Tier"] || [name containsString:@"Level"]) {
-            NSLog(@"[VIP] Unarchived object: %@ -> %@", name, result);
-        }
-    }
-    return result;
-}
-
-#pragma mark - NSDate Hook (expire checks)
-
-static id (*orig_dateWithTI)(Class, SEL, NSTimeInterval);
-
-static id hook_dateWithTI(Class self, SEL _cmd, NSTimeInterval ti) {
-    if (ti > 1000000000 && ti < 1704067200) {
-        NSLog(@"[VIP] Rewriting past NSDate %f -> 4102444800", ti);
-        return orig_dateWithTI(self, _cmd, 4102444800);
-    }
-    return orig_dateWithTI(self, _cmd, ti);
-}
-
-#pragma mark - Helper
+#pragma mark - Swizzle Helper
 
 static void swizzle(Class cls, SEL sel, IMP newImp, IMP *origImp) {
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) m = class_getClassMethod(cls, sel);
-    if (!m) {
-        NSLog(@"[VIP] WARNING: method not found %@ %@", NSStringFromClass(cls), NSStringFromSelector(sel));
-        return;
+    @try {
+        Method m = class_getInstanceMethod(cls, sel);
+        if (!m) m = class_getClassMethod(cls, sel);
+        if (!m) {
+            vipLog(@"[WARN] method not found %@ %@", NSStringFromClass(cls), NSStringFromSelector(sel));
+            return;
+        }
+        *origImp = method_setImplementation(m, newImp);
+    } @catch (NSException *e) {
+        vipLog(@"[WARN] swizzle exception: %@", e);
     }
-    *origImp = method_setImplementation(m, newImp);
-}
-
-static void swizzleClass(Class cls, SEL sel, IMP newImp, IMP *origImp) {
-    Method m = class_getClassMethod(cls, sel);
-    if (!m) {
-        NSLog(@"[VIP] WARNING: class method not found %@ %@", NSStringFromClass(cls), NSStringFromSelector(sel));
-        return;
-    }
-    *origImp = method_setImplementation(m, newImp);
 }
 
 #pragma mark - Constructor
 
 __attribute__((constructor))
 static void init(void) {
-    NSLog(@"[VIP] ============================================");
-    NSLog(@"[VIP] ElyndorTV VIP Tweak v10.0 Loading");
-    NSLog(@"[VIP] Build: 2026-08-26");
-    NSLog(@"[VIP] Target: LysenthoTVSpace");
-    NSLog(@"[VIP] Max Tier: %d", MAX_TIER);
-    NSLog(@"[VIP] ============================================");
+    // Init log path early
+    NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    if (docs.count > 0) {
+        gLogPath = [[docs[0] stringByAppendingPathComponent:@"vip_tweak.log"] copy];
+    }
+
+    vipLog(@"========================================");
+    vipLog(@"ElyndorTV VIP Safe Tweak v11.0 Loading");
+    vipLog(@"Build: 2026-08-26");
+    vipLog(@"Target: LysenthoTVSpace");
+    vipLog(@"Max Tier: %d", MAX_TIER);
+    vipLog(@"Log: %@", gLogPath ?: @"<unknown>");
+    vipLog(@"========================================");
 
     Class UD = [NSUserDefaults class];
     swizzle(UD, @selector(objectForKey:),            (IMP)hook_objectForKey,      (IMP *)&orig_objectForKey);
@@ -307,29 +307,27 @@ static void init(void) {
     swizzle(UD, @selector(setFloat:forKey:),         (IMP)hook_setFloat,          (IMP *)&orig_setFloat);
     swizzle(UD, @selector(removeObjectForKey:),      (IMP)hook_removeObject,      (IMP *)&orig_removeObject);
 
-    Class JSON = [NSJSONSerialization class];
-    swizzleClass(JSON, @selector(JSONObjectWithData:options:error:), (IMP)hook_JSONWithData, (IMP *)&orig_JSONWithData);
-
-    Class Unarchiver = [NSKeyedUnarchiver class];
-    swizzleClass(Unarchiver, @selector(unarchivedObjectOfClass:fromData:error:), (IMP)hook_unarchivedObject, (IMP *)&orig_unarchivedObject);
-    swizzleClass(Unarchiver, @selector(unarchiveObjectWithData:), (IMP)hook_unarchiveObject, (IMP *)&orig_unarchiveObject);
-
-    Class NSDateClass = [NSDate class];
-    swizzleClass(NSDateClass, @selector(dateWithTimeIntervalSince1970:), (IMP)hook_dateWithTI, (IMP *)&orig_dateWithTI);
-
     // Initial injection
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    [ud setObject:buildFakeVipDict() forKey:VIP_KEY];
-    [ud synchronize];
-    NSLog(@"[VIP] Injected fake VIP dict at load time");
+    @try {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setObject:buildFakeVipDict() forKey:VIP_KEY];
+        [ud synchronize];
+        vipLog(@"[INIT] Injected fake VIP dict at load time");
+    } @catch (NSException *e) {
+        vipLog(@"[INIT] Injection failed: %@", e);
+    }
 
-    // Re-inject after delay (catch async loads)
+    // Re-inject after delay
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        NSUserDefaults *ud2 = [NSUserDefaults standardUserDefaults];
-        [ud2 setObject:buildFakeVipDict() forKey:VIP_KEY];
-        [ud2 synchronize];
-        NSLog(@"[VIP] Re-injected after 3s delay");
+        @try {
+            NSUserDefaults *ud2 = [NSUserDefaults standardUserDefaults];
+            [ud2 setObject:buildFakeVipDict() forKey:VIP_KEY];
+            [ud2 synchronize];
+            vipLog(@"[INIT] Re-injected after 3s delay");
+        } @catch (NSException *e) {
+            vipLog(@"[INIT] Re-inject failed: %@", e);
+        }
     });
 
-    NSLog(@"[VIP] All hooks installed, tweak active");
+    vipLog(@"[INIT] All hooks installed, tweak active");
 }
