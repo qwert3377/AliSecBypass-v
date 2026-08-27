@@ -8,7 +8,6 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <execinfo.h>
-#import <WebKit/WebKit.h>
 
 static NSString *const kTargetDomain = @"meticulous.gxzmei.com";
 static NSString *const kLogDirName   = @"ElyndorTV_Logs";
@@ -158,7 +157,6 @@ static BOOL IsTargetURL(NSString *url) {
         }
         WriteLog(@"%@", GetStackTrace());
 
-        // 包装 completionHandler 拦截响应
         void (^wrapped)(NSData *, NSURLResponse *, NSError *) = completionHandler;
         if (completionHandler) {
             wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -184,12 +182,6 @@ static BOOL IsTargetURL(NSString *url) {
 @implementation WKWebView (VIPHook)
 
 - (void)vip_evaluateJavaScript:(NSString *)javaScriptString completionHandler:(void (^)(id, NSError *))completionHandler {
-    // 如果 JS 代码里包含我们的注入标记，直接放行
-    if ([javaScriptString containsString:@"__frida_hook_injected__"]) {
-        [self vip_evaluateJavaScript:javaScriptString completionHandler:completionHandler];
-        return;
-    }
-
     // 注入 fetch/XHR 拦截代码
     NSString *injectCode = @""
         @"(function(){"
@@ -202,7 +194,7 @@ static BOOL IsTargetURL(NSString *url) {
         @"      var m=(opts&&opts.method)?opts.method:'GET';"
         @"      var b=(opts&&opts.body)?String(opts.body):'';"
         @"      var h=(opts&&opts.headers)?JSON.stringify(opts.headers):'';"
-        @"      document.title='[VIP_FETCH]'+m+'|'+u+'|'+h+'|'+b;"
+        @"      console.log('[VIP_FETCH]'+m+'|'+u+'|'+h+'|'+b);"
         @"    }"
         @"    return origFetch.apply(this,arguments);"
         @"  };"
@@ -210,14 +202,14 @@ static BOOL IsTargetURL(NSString *url) {
         @"  XMLHttpRequest.prototype.open=function(m,u){"
         @"    if(u&&u.indexOf('meticulous.gxzmei.com')!==-1){"
         @"      this._vip_url=u;this._vip_method=m;"
-        @"      document.title='[VIP_XHR]'+m+'|'+u;"
+        @"      console.log('[VIP_XHR]'+m+'|'+u);"
         @"    }"
         @"    return origOpen.apply(this,arguments);"
         @"  };"
         @"  var origSend=XMLHttpRequest.prototype.send;"
         @"  XMLHttpRequest.prototype.send=function(b){"
         @"    if(this._vip_url){"
-        @"      document.title='[VIP_XHR_SEND]'+this._vip_method+'|'+this._vip_url+'|'+(b||'');"
+        @"      console.log('[VIP_XHR_SEND]'+this._vip_method+'|'+this._vip_url+'|'+(b||''));"
         @"    }"
         @"    return origSend.apply(this,arguments);"
         @"  };"
@@ -229,56 +221,7 @@ static BOOL IsTargetURL(NSString *url) {
 
 @end
 
-// ===================== 5. 定时轮询 WebView document.title =====================
-static void StartTitlePolling(void) {
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 0.5 * NSEC_PER_SEC, 0);
-    dispatch_source_set_event_handler(timer, ^{
-        Class wkCls = objc_getClass("WKWebView");
-        if (!wkCls) return;
-        // 遍历所有 WKWebView 实例
-        unsigned int count;
-        id *webViews = (id *)objc_copyClassInstances(wkCls, &count);
-        for (unsigned int i = 0; i < count; i++) {
-            id webView = webViews[i];
-            if (!webView) continue;
-            // 使用 performSelector 避免类型检查问题
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            SEL evalSel = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
-            if ([webView respondsToSelector:evalSel]) {
-                NSString *js = @"document.title";
-                id handler = ^(id result, NSError *error) {
-                    if (error || !result) return;
-                    NSString *title = [result description];
-                    if ([title hasPrefix:@"[VIP_"]) {
-                        WriteLog(@"[WEBVIEW] %@", title);
-                    }
-                };
-                // 使用 NSInvocation 避免类型不匹配
-                NSMethodSignature *sig = [webView methodSignatureForSelector:evalSel];
-                if (sig) {
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setSelector:evalSel];
-                    [inv setTarget:webView];
-                    [inv setArgument:&js atIndex:2];
-                    [inv setArgument:&handler atIndex:3];
-                    [inv invoke];
-                }
-            }
-            #pragma clang diagnostic pop
-        }
-        if (webViews) free(webViews);
-    });
-    dispatch_resume(timer);
-}
-
-// ===================== 6. 自动触发体验会员请求模板 =====================
-/*
-  用法：在插件里调用 [ElyndorTVVIPTrigger triggerVipRequest];
-  注意：authUser / messageComponentTask / asyncColumnFeature 是动态字段，
-        需要从 App 内存中提取（Hook 生成方法）或从抓包中复制最新值。
- */
+// ===================== 5. 自动触发体验会员请求模板 =====================
 @interface ElyndorTVVIPTrigger : NSObject
 + (void)triggerVipRequest;
 @end
@@ -286,21 +229,19 @@ static void StartTitlePolling(void) {
 @implementation ElyndorTVVIPTrigger
 
 + (void)triggerVipRequest {
-    // 从抓包中提取的固定参数
     NSString *stateMemoryClient = @"210390710";
     NSString *createInsertFlow = @"ios";
     NSString *historyFavoriteThread = @"1.2.1";
     NSString *jobHistorySearch = @"ios_leo";
     NSString *userAgent = @"ElyndorTVCode/1 CFNetwork/1410.0.3 Darwin/22.6.0";
 
-    // 动态字段（需要从运行时提取或抓包复制）
-    NSString *authUser = @"dHDdpyuT54ib+W57JrI1TLeMMtbeZ58lNRNkyHyQaYg=";      // Base64, 会过期
-    NSString *asyncServiceSession = @"57ACB9D2-9710-43DA-A81B-B528962016C4";   // UUID
-    NSString *helperSessionHistory = @"57ACB9D2-9710-43DA-A81B-B528962016C4";  // UUID
-    NSString *messageComponentTask = @"afff7d302d7bfdda476ed4b73ab11c43d4660ccf"; // SHA1-like
-    NSString *asyncColumnFeature = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000]; // 毫秒时间戳
+    // 动态字段（需要从运行时提取或抓包复制，会过期）
+    NSString *authUser = @"dHDdpyuT54ib+W57JrI1TLeMMtbeZ58lNRNkyHyQaYg=";
+    NSString *asyncServiceSession = @"57ACB9D2-9710-43DA-A81B-B528962016C4";
+    NSString *helperSessionHistory = @"57ACB9D2-9710-43DA-A81B-B528962016C4";
+    NSString *messageComponentTask = @"afff7d302d7bfdda476ed4b73ab11c43d4660ccf";
+    NSString *asyncColumnFeature = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000];
 
-    // Cookie（从抓包复制，会过期）
     NSString *cookie = @"HWWAFSESID=5da9a76401fa884f0a; HWWAFSESTIME=1787822905636";
 
     NSString *urlStr = [NSString stringWithFormat:@"https://meticulous.gxzmei.com/event/response/list?stateMemoryClient=%@", stateMemoryClient];
@@ -363,7 +304,6 @@ static __attribute__((constructor)) void VIPHookInit(void) {
         WriteLog(@"=== ElyndorTV VIP Hook Loaded ===");
         WriteLog(@"Log: %@", GetLogPath());
 
-        // Swizzle NSURLRequest
         Class reqCls = objc_getClass("NSURLRequest");
         if (reqCls) {
             SwizzleClassMethod(reqCls, @selector(requestWithURL:), @selector(vip_requestWithURL:));
@@ -371,7 +311,6 @@ static __attribute__((constructor)) void VIPHookInit(void) {
             WriteLog(@"[+] NSURLRequest swizzled");
         }
 
-        // Swizzle NSMutableURLRequest
         Class mReqCls = objc_getClass("NSMutableURLRequest");
         if (mReqCls) {
             SwizzleInstanceMethod(mReqCls, @selector(setValue:forHTTPHeaderField:), @selector(vip_setValue:forHTTPHeaderField:));
@@ -380,7 +319,6 @@ static __attribute__((constructor)) void VIPHookInit(void) {
             WriteLog(@"[+] NSMutableURLRequest swizzled");
         }
 
-        // Swizzle NSURLSession
         Class sessionCls = objc_getClass("NSURLSession");
         if (sessionCls) {
             SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:), @selector(vip_dataTaskWithRequest:));
@@ -388,12 +326,10 @@ static __attribute__((constructor)) void VIPHookInit(void) {
             WriteLog(@"[+] NSURLSession swizzled");
         }
 
-        // Swizzle WKWebView evaluateJavaScript
         Class wkCls = objc_getClass("WKWebView");
         if (wkCls) {
             SwizzleInstanceMethod(wkCls, @selector(evaluateJavaScript:completionHandler:), @selector(vip_evaluateJavaScript:completionHandler:));
             WriteLog(@"[+] WKWebView swizzled");
-            StartTitlePolling();
         }
 
         WriteLog(@"=== Setup complete. Click VIP button and check log ===");
