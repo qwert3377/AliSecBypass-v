@@ -35,11 +35,12 @@ static void logMsg(NSString *msg) {
 }
 
 // ============================================================
-// 获取当前 keyWindow（兼容 iOS 13+）
+// 获取当前 keyWindow - 完全不用 deprecated API
 // ============================================================
 static UIWindow* getKeyWindow(void) {
     UIWindow *result = nil;
     if (@available(iOS 13.0, *)) {
+        // 先找前台 active scene
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
                 UIWindowScene *ws = (UIWindowScene *)scene;
@@ -54,9 +55,21 @@ static UIWindow* getKeyWindow(void) {
                 }
             }
         }
-    }
-    if (!result) {
-        result = [UIApplication sharedApplication].keyWindow;
+        // 如果没找到，遍历所有 scene
+        if (!result) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    for (UIWindow *w in ws.windows) {
+                        if (w.isKeyWindow) {
+                            result = w;
+                            break;
+                        }
+                    }
+                    if (result) break;
+                }
+            }
+        }
     }
     return result;
 }
