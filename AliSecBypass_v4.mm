@@ -1,6 +1,7 @@
 //
 //  BaiduPan_ExperienceTrigger.mm
 //  TrollStore inject plugin
+//  v5 - 自动预创建实例，无需进下载页
 //
 
 #import <UIKit/UIKit.h>
@@ -9,7 +10,7 @@
 static NSString *const kLogFile = @"trigger.log";
 static NSMutableArray *gInstances = nil;
 static UIButton *gFloatBtn = nil;
-static id gFloatTarget = nil;  // 强引用保活 target，防止 ARC 释放
+static id gFloatTarget = nil;
 static id (*orig_init)(id self, SEL _cmd);
 
 // ============================================================
@@ -138,22 +139,54 @@ static void createFloatButton(void) {
     [btn setTitle:@"VIP" forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
-    btn.userInteractionEnabled = YES;  // 确保可交互
+    btn.userInteractionEnabled = YES;
 
-    // 创建 target 并保存到全局变量保活
     FloatTarget *target = [[FloatTarget alloc] init];
-    gFloatTarget = target;  // 强引用，防止 ARC 释放
+    gFloatTarget = target;
     [btn addTarget:target action:@selector(onTap:) forControlEvents:UIControlEventTouchUpInside];
 
     UIWindow *kw = getKeyWindow();
     if (kw) {
         [kw addSubview:btn];
-        [kw bringSubviewToFront:btn];  // 确保在最上层
+        [kw bringSubviewToFront:btn];
         gFloatBtn = btn;
         logMsg(@"button created");
     } else {
         logMsg(@"no key window");
     }
+}
+
+// ============================================================
+// 预创建实例 - 无需进下载页
+// ============================================================
+static void precreateInstance(void) {
+    Class ribbonClass = NSClassFromString(@"ElyndorTVCode.EDTCGuildFeatureRibbon");
+    if (!ribbonClass) {
+        logMsg(@"precreate: class not found");
+        return;
+    }
+
+    if (!gInstances) {
+        gInstances = [[NSMutableArray alloc] init];
+    }
+
+    // 方法1: 直接 alloc/init
+    id inst = [[ribbonClass alloc] init];
+    if (inst) {
+        [gInstances addObject:inst];
+        logMsg([NSString stringWithFormat:@"precreate: alloc/init ok, count=%lu", (unsigned long)gInstances.count]);
+
+        // 测试一下是否有效
+        SEL sel = NSSelectorFromString(@"edtc_flowEnhanceAction");
+        if ([inst respondsToSelector:sel]) {
+            logMsg(@"precreate: has selector");
+        } else {
+            logMsg(@"precreate: no selector");
+        }
+        return;
+    }
+
+    logMsg(@"precreate: alloc/init failed");
 }
 
 // ============================================================
@@ -178,6 +211,9 @@ static void initPlugin(void) {
         } else {
             logMsg(@"class not found");
         }
+
+        // 预创建实例（无需进下载页）
+        precreateInstance();
 
         createFloatButton();
     });
