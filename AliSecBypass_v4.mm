@@ -1,7 +1,6 @@
 //
 //  BaiduPan_ExperienceTrigger.mm
 //  TrollStore inject plugin
-//  Pure ObjC Runtime, no Logos %hook
 //
 
 #import <UIKit/UIKit.h>
@@ -36,7 +35,34 @@ static void logMsg(NSString *msg) {
 }
 
 // ============================================================
-// Hook EDTCGuildFeatureRibbon init - 保存实例到全局数组保活
+// 获取当前 keyWindow（兼容 iOS 13+）
+// ============================================================
+static UIWindow* getKeyWindow(void) {
+    UIWindow *result = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                if (ws.activationState == UISceneActivationStateForegroundActive) {
+                    for (UIWindow *w in ws.windows) {
+                        if (w.isKeyWindow) {
+                            result = w;
+                            break;
+                        }
+                    }
+                    if (result) break;
+                }
+            }
+        }
+    }
+    if (!result) {
+        result = [UIApplication sharedApplication].keyWindow;
+    }
+    return result;
+}
+
+// ============================================================
+// Hook init - 保存实例到全局数组强引用保活
 // ============================================================
 static id hook_init(id self, SEL _cmd) {
     id result = orig_init(self, _cmd);
@@ -102,13 +128,7 @@ static void createFloatButton(void) {
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
     FloatTarget *target = [[FloatTarget alloc] init];
     [btn addTarget:target action:@selector(onTap:) forControlEvents:UIControlEventTouchUpInside];
-    UIWindow *kw = nil;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
-        if (w.isKeyWindow) {
-            kw = w;
-            break;
-        }
-    }
+    UIWindow *kw = getKeyWindow();
     if (kw) {
         [kw addSubview:btn];
         gFloatBtn = btn;
