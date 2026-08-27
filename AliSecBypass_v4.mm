@@ -1,5 +1,5 @@
-// ElyndorTV_VIP_v5.2.mm
-// Updated fields for new App version | Smart Toggle | 0-delay | No logs
+// ElyndorTV_VIP_v6.0.mm
+// New fields + Smart Toggle Ad Kill + 0-delay restore + No logs
 // TrollStore injectable, pure ObjC Runtime
 
 #import <Foundation/Foundation.h>
@@ -243,36 +243,23 @@ static void hook_dismissVC(UIViewController *self, SEL sel, BOOL animated, dispa
 // ===================== Constructor =====================
 __attribute__((constructor))
 static void init() {
-    // Auth keys: 0 -> 1
-    kAuthKeys = @[@"authcode", @"auth_code", @"status",
-                  @"perCommercialLeast", @"positionPassQuite"];
-
-    // Expire keys
+    kAuthKeys = @[@"authcode", @"auth_code", @"status"];
     kExpireKeys = @[@"expire", @"endtime", @"end_time", @"is_expired"];
-
-    // Level keys: 0-7 -> 8
     kLevelKeys = @[
-        // Old fields
+        // Old
         @"participantvoteterm", @"edtcactivedirectacquirecentral",
         @"k9mnpq7xzv2r8w4t", @"kgdtdeviceav1forceresetdowngradeversionkey",
         @"vip_level", @"viplevel", @"member_level", @"user_level", @"level", @"grade",
         @"vipLevel", @"memberLevel", @"userLevel", @"vip_grade", @"vipGrade",
-        // New fields (detected)
+        // New
         @"increaseSeekSomebody", @"duringBehaviorDirection", @"radioExecutiveEach",
         @"runMilitaryResponse", @"chancePublicAll", @"serveFaceWay",
         @"todayRealityLearn", @"glassHundredPeace", @"yardOptionTask",
         @"placePassUsually", @"sortLearnMore", @"partnerCourtYou",
         @"answerHoldGrowth", @"presentIdeaNot"
     ];
-
-    // UD keys
-    kUDKeys = @[@"kvipStatusStorageKey", @"EDTCActiveDirectAcquireCentral",
-                @"yituanlaunma"];
-
-    // Ad trigger buttons
+    kUDKeys = @[@"kvipStatusStorageKey", @"EDTCActiveDirectAcquireCentral", @"yituanlaunma"];
     kAdTargets = @[@"立即体验", @"立即领取", @"领取奖励", @"我要加速", @"看视频", @"去浏览", @"体验"];
-
-    // Ad class prefixes
     kAdPrefixes = @[
         @"gdtsplash", @"gdtbasead", @"gdtreward", @"gdtinterstitial", @"gdtnative",
         @"kssplash", @"ksad", @"ksreward", @"ksinterstitial", @"ksnative",
@@ -282,7 +269,6 @@ static void init() {
         @"tradplus", @"splash", @"interstitial", @"reward", @"nativeexpress",
         @"adviewcontroller", @"adview", @"adsplash"
     ];
-
     gProcessedAds = [NSMutableSet new];
 
     Method m;
