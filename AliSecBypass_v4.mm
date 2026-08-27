@@ -1,5 +1,5 @@
-// ElyndorTV_VIP_v6.0.mm
-// New fields + Smart Toggle Ad Kill + 0-delay restore + No logs
+// ElyndorTV_VIP_v6.1.mm
+// Ad Kill: zero-flash, intercept at click + present/push layer
 // TrollStore injectable, pure ObjC Runtime
 
 #import <Foundation/Foundation.h>
@@ -7,8 +7,6 @@
 #import <objc/runtime.h>
 
 static BOOL gVIPFakeEnabled = YES;
-static BOOL gSkipAd = NO;
-static NSMutableSet *gProcessedAds = nil;
 
 static NSArray *kAuthKeys = nil;
 static NSArray *kExpireKeys = nil;
@@ -150,7 +148,7 @@ static NSString *hook_stringForKey(NSUserDefaults *self, SEL sel, NSString *key)
         if ([k isEqualToString:key]) { hit = YES; break; }
     }
     if (!hit && keyMatch(key, kLevelKeys)) hit = YES;
-    if (hit && [@[@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:result]) return @"8";
+    if (hit && [@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:result) return @"8";
     return result;
 }
 
@@ -186,7 +184,7 @@ static void hook_setText(UILabel *self, SEL sel, NSString *text) {
     orig_setText(self, sel, text);
 }
 
-// ===================== 4. UIControl (查看下载 + 广告触发) =====================
+// ===================== 4. UIControl (广告点击直接吃掉) =====================
 static void (*orig_sendActions)(UIControl *self, SEL sel, UIControlEvents events, UIEvent *event);
 static void hook_sendActions(UIControl *self, SEL sel, UIControlEvents events, UIEvent *event) {
     if ([self respondsToSelector:@selector(titleLabel)]) {
@@ -198,8 +196,8 @@ static void hook_sendActions(UIControl *self, SEL sel, UIControlEvents events, U
             }
             for (NSString *t in kAdTargets) {
                 if ([title containsString:t]) {
-                    gSkipAd = YES;
-                    break;
+                    // 广告按钮点击直接吃掉，不调原始方法，广告连触发的机会都没有
+                    return;
                 }
             }
         }
@@ -207,27 +205,29 @@ static void hook_sendActions(UIControl *self, SEL sel, UIControlEvents events, U
     orig_sendActions(self, sel, events, event);
 }
 
-// ===================== 5. UIViewController (广告 dismiss + 0-delay restore) =====================
-static void (*orig_viewDidAppear)(UIViewController *self, SEL sel, BOOL animated);
-static void hook_viewDidAppear(UIViewController *self, SEL sel, BOOL animated) {
-    orig_viewDidAppear(self, sel, animated);
-    NSString *cn = NSStringFromClass([self class]);
-    if (!isAdClass(cn)) return;
-    NSString *ptrStr = [NSString stringWithFormat:@"%p", self];
-    if ([gProcessedAds containsObject:ptrStr]) return;
-    [gProcessedAds addObject:ptrStr];
-    if (gSkipAd) {
-        if (self.presentingViewController) {
-            [self dismissViewControllerAnimated:NO completion:nil];
-        } else if (self.navigationController) {
-            [self.navigationController popViewControllerAnimated:NO];
-        }
-        gSkipAd = NO;
-        gVIPFakeEnabled = YES;
+// ===================== 5. UIViewController present 拦截 =====================
+static void (*orig_presentVC)(UIViewController *self, SEL sel, UIViewController *viewControllerToPresent, BOOL animated, dispatch_block_t completion);
+static void hook_presentVC(UIViewController *self, SEL sel, UIViewController *viewControllerToPresent, BOOL animated, dispatch_block_t completion) {
+    NSString *cn = NSStringFromClass([viewControllerToPresent class]);
+    if (isAdClass(cn)) {
+        // 广告VC直接拒收，连闪一下都不给
+        return;
     }
+    orig_presentVC(self, sel, viewControllerToPresent, animated, completion);
 }
 
-// ===================== 6. Back Navigation fallback =====================
+// ===================== 6. UINavigationController push 拦截 =====================
+static void (*orig_pushVC)(UINavigationController *self, SEL sel, UIViewController *viewController, BOOL animated);
+static void hook_pushVC(UINavigationController *self, SEL sel, UIViewController *viewController, BOOL animated) {
+    NSString *cn = NSStringFromClass([viewController class]);
+    if (isAdClass(cn)) {
+        // 广告VC直接拒收，连闪一下都不给
+        return;
+    }
+    orig_pushVC(self, sel, viewController, animated);
+}
+
+// ===================== 7. Back Navigation fallback =====================
 static UIViewController *(*orig_popVC)(UINavigationController *self, SEL sel, BOOL animated);
 static UIViewController *hook_popVC(UINavigationController *self, SEL sel, BOOL animated) {
     if (!gVIPFakeEnabled) gVIPFakeEnabled = YES;
@@ -246,12 +246,10 @@ static void init() {
     kAuthKeys = @[@"authcode", @"auth_code", @"status"];
     kExpireKeys = @[@"expire", @"endtime", @"end_time", @"is_expired"];
     kLevelKeys = @[
-        // Old
         @"participantvoteterm", @"edtcactivedirectacquirecentral",
         @"k9mnpq7xzv2r8w4t", @"kgdtdeviceav1forceresetdowngradeversionkey",
         @"vip_level", @"viplevel", @"member_level", @"user_level", @"level", @"grade",
         @"vipLevel", @"memberLevel", @"userLevel", @"vip_grade", @"vipGrade",
-        // New
         @"increaseSeekSomebody", @"duringBehaviorDirection", @"radioExecutiveEach",
         @"runMilitaryResponse", @"chancePublicAll", @"serveFaceWay",
         @"todayRealityLearn", @"glassHundredPeace", @"yardOptionTask",
@@ -269,7 +267,6 @@ static void init() {
         @"tradplus", @"splash", @"interstitial", @"reward", @"nativeexpress",
         @"adviewcontroller", @"adview", @"adsplash"
     ];
-    gProcessedAds = [NSMutableSet new];
 
     Method m;
     m = class_getClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:));
@@ -294,12 +291,14 @@ static void init() {
     if (m) { orig_sendActions = (void (*)(UIControl*,SEL,UIControlEvents,UIEvent*))method_getImplementation(m); method_setImplementation(m, (IMP)hook_sendActions); }
 
     Class vc = [UIViewController class];
-    m = class_getInstanceMethod(vc, @selector(viewDidAppear:));
-    if (m) { orig_viewDidAppear = (void (*)(UIViewController*,SEL,BOOL))method_getImplementation(m); method_setImplementation(m, (IMP)hook_viewDidAppear); }
+    m = class_getInstanceMethod(vc, @selector(presentViewController:animated:completion:));
+    if (m) { orig_presentVC = (void (*)(UIViewController*,SEL,UIViewController*,BOOL,dispatch_block_t))method_getImplementation(m); method_setImplementation(m, (IMP)hook_presentVC); }
     m = class_getInstanceMethod(vc, @selector(dismissViewControllerAnimated:completion:));
     if (m) { orig_dismissVC = (void (*)(UIViewController*,SEL,BOOL,dispatch_block_t))method_getImplementation(m); method_setImplementation(m, (IMP)hook_dismissVC); }
 
     Class nc = [UINavigationController class];
+    m = class_getInstanceMethod(nc, @selector(pushViewController:animated:));
+    if (m) { orig_pushVC = (void (*)(UINavigationController*,SEL,UIViewController*,BOOL))method_getImplementation(m); method_setImplementation(m, (IMP)hook_pushVC); }
     m = class_getInstanceMethod(nc, @selector(popViewControllerAnimated:));
     if (m) { orig_popVC = (UIViewController *(*)(UINavigationController*,SEL,BOOL))method_getImplementation(m); method_setImplementation(m, (IMP)hook_popVC); }
 }
