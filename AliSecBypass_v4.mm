@@ -1,37 +1,32 @@
 //
-//  ElyndorTV_NetworkHook.mm
+//  ElyndorTV_VIPHook.mm
 //  TrollStore injectable dylib
-//  Hook NSURLSession to capture gxzmei.com traffic
+//  专攻 meticulous.gxzmei.com /event/response/list 体验会员接口
 //
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <execinfo.h>
+#import <WebKit/WebKit.h>
 
-static NSString *const kTargetDomain = @"gxzmei.com";
+static NSString *const kTargetDomain = @"meticulous.gxzmei.com";
 static NSString *const kLogDirName   = @"ElyndorTV_Logs";
 static NSString *gLogPath = nil;
 
 // ===================== 日志工具 =====================
 static NSString* GetLogPath(void) {
     if (gLogPath) return gLogPath;
-
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *docDir = [paths firstObject];
-    if (!docDir) {
-        docDir = @"/var/mobile/Documents";
-    }
+    NSString *docDir = [paths firstObject] ?: @"/var/mobile/Documents";
     NSString *logDir = [docDir stringByAppendingPathComponent:kLogDirName];
-
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:logDir]) {
         [fm createDirectoryAtPath:logDir withIntermediateDirectories:YES attributes:nil error:nil];
     }
-
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     [df setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
-    NSString *filename = [NSString stringWithFormat:@"network_%@.log", [df stringFromDate:[NSDate date]]];
+    NSString *filename = [NSString stringWithFormat:@"vip_%@.log", [df stringFromDate:[NSDate date]]];
     gLogPath = [logDir stringByAppendingPathComponent:filename];
     return gLogPath;
 }
@@ -41,10 +36,7 @@ static void WriteLog(NSString *fmt, ...) {
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-
-    NSString *ts = [NSString stringWithFormat:@"[%@] %@\n",
-                    [[NSDate date] description], msg];
-
+    NSString *ts = [NSString stringWithFormat:@"[%@] %@\n", [[NSDate date] description], msg];
     NSData *data = [ts dataUsingEncoding:NSUTF8StringEncoding];
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:GetLogPath()];
     if (fh) {
@@ -54,23 +46,7 @@ static void WriteLog(NSString *fmt, ...) {
     } else {
         [data writeToFile:GetLogPath() atomically:YES];
     }
-
-    // 同时输出到控制台
-    NSLog(@"[ElyndorTV] %@", msg);
-}
-
-// ===================== 请求描述 =====================
-static NSString* DescribeRequest(NSURLRequest *req) {
-    if (!req) return @"<nil request>";
-    NSMutableString *s = [NSMutableString string];
-    [s appendFormat:@"\n  URL: %@", req.URL.absoluteString];
-    [s appendFormat:@"\n  Method: %@", req.HTTPMethod ?: @"GET"];
-    [s appendFormat:@"\n  Headers: %@", req.allHTTPHeaderFields ?: @{}];
-    if (req.HTTPBody) {
-        NSString *body = [[NSString alloc] initWithData:req.HTTPBody encoding:NSUTF8StringEncoding];
-        [s appendFormat:@"\n  Body: %@", body ?: @"<binary>"];
-    }
-    return s;
+    NSLog(@"[ElyndorVIP] %@", msg);
 }
 
 static NSString* GetStackTrace(void) {
@@ -90,221 +66,336 @@ static BOOL IsTargetURL(NSString *url) {
     return url && [url rangeOfString:kTargetDomain options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
 
+// ===================== 1. Hook NSURLRequest 初始化 =====================
+@interface NSURLRequest (VIPHook)
+@end
+
+@implementation NSURLRequest (VIPHook)
+
++ (instancetype)vip_requestWithURL:(NSURL *)URL {
+    NSString *url = URL.absoluteString;
+    if (IsTargetURL(url)) {
+        WriteLog(@"[REQ-CREATE] +requestWithURL: %@%@", url, GetStackTrace());
+    }
+    return [self vip_requestWithURL:URL];
+}
+
+- (instancetype)vip_initWithURL:(NSURL *)URL {
+    NSString *url = URL.absoluteString;
+    if (IsTargetURL(url)) {
+        WriteLog(@"[REQ-CREATE] -initWithURL: %@%@", url, GetStackTrace());
+    }
+    return [self vip_initWithURL:URL];
+}
+
+@end
+
+// ===================== 2. Hook NSMutableURLRequest (Headers 在这里设置) =====================
+@interface NSMutableURLRequest (VIPHook)
+@end
+
+@implementation NSMutableURLRequest (VIPHook)
+
+- (void)vip_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    NSURL *url = self.URL;
+    if (url && IsTargetURL(url.absoluteString)) {
+        WriteLog(@"[HEADER] %@: %@", field, value);
+    }
+    [self vip_setValue:value forHTTPHeaderField:field];
+}
+
+- (void)vip_addValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
+    NSURL *url = self.URL;
+    if (url && IsTargetURL(url.absoluteString)) {
+        WriteLog(@"[HEADER-ADD] %@: %@", field, value);
+    }
+    [self vip_addValue:value forHTTPHeaderField:field];
+}
+
+- (instancetype)vip_initWithURL:(NSURL *)URL {
+    NSString *url = URL.absoluteString;
+    if (IsTargetURL(url)) {
+        WriteLog(@"[REQ-CREATE-MUTABLE] -initWithURL: %@%@", url, GetStackTrace());
+    }
+    return [self vip_initWithURL:URL];
+}
+
+@end
+
+// ===================== 3. Hook NSURLSession (请求发出) =====================
+@interface NSURLSession (VIPHook)
+@end
+
+@implementation NSURLSession (VIPHook)
+
+- (NSURLSessionDataTask *)vip_dataTaskWithRequest:(NSURLRequest *)request {
+    NSString *url = request.URL.absoluteString;
+    if (IsTargetURL(url)) {
+        WriteLog(@"[SESSION-DELEGATE] dataTaskWithRequest:");
+        WriteLog(@"  URL: %@", url);
+        WriteLog(@"  Method: %@", request.HTTPMethod ?: @"GET");
+        WriteLog(@"  Headers: %@", request.allHTTPHeaderFields ?: @{});
+        if (request.HTTPBody) {
+            NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+            WriteLog(@"  Body: %@", body ?: @"<binary>");
+        }
+        WriteLog(@"%@", GetStackTrace());
+    }
+    return [self vip_dataTaskWithRequest:request];
+}
+
+- (NSURLSessionDataTask *)vip_dataTaskWithRequest:(NSURLRequest *)request
+                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    NSString *url = request.URL.absoluteString;
+    if (IsTargetURL(url)) {
+        WriteLog(@"[SESSION-BLOCK] dataTaskWithRequest:completionHandler:");
+        WriteLog(@"  URL: %@", url);
+        WriteLog(@"  Method: %@", request.HTTPMethod ?: @"GET");
+        WriteLog(@"  Headers: %@", request.allHTTPHeaderFields ?: @{});
+        if (request.HTTPBody) {
+            NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
+            WriteLog(@"  Body: %@", body ?: @"<binary>");
+        }
+        WriteLog(@"%@", GetStackTrace());
+
+        // 包装 completionHandler 拦截响应
+        void (^wrapped)(NSData *, NSURLResponse *, NSError *) = completionHandler;
+        if (completionHandler) {
+            wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                NSString *dataStr = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"<nil>";
+                WriteLog(@"[RESPONSE] URL: %@ | Status: %ld | Data: %@",
+                         url, (long)httpResp.statusCode,
+                         dataStr.length > 2000 ? [dataStr substringToIndex:2000] : dataStr);
+                completionHandler(data, response, error);
+            };
+        }
+        return [self vip_dataTaskWithRequest:request completionHandler:wrapped];
+    }
+    return [self vip_dataTaskWithRequest:request completionHandler:completionHandler];
+}
+
+@end
+
+// ===================== 4. Hook WKWebView evaluateJavaScript (注入 fetch 拦截) =====================
+@interface WKWebView (VIPHook)
+@end
+
+@implementation WKWebView (VIPHook)
+
+- (void)vip_evaluateJavaScript:(NSString *)javaScriptString completionHandler:(void (^)(id, NSError *))completionHandler {
+    // 如果 JS 代码里包含我们的注入标记，直接放行
+    if ([javaScriptString containsString:@"__frida_hook_injected__"]) {
+        [self vip_evaluateJavaScript:javaScriptString completionHandler:completionHandler];
+        return;
+    }
+
+    // 注入 fetch/XHR 拦截代码
+    NSString *injectCode = @""
+        @"(function(){"
+        @"  if(window.__vip_hooked__)return;"
+        @"  window.__vip_hooked__=true;"
+        @"  var origFetch=window.fetch;"
+        @"  window.fetch=function(url,opts){"
+        @"    var u=(typeof url==='string')?url:(url?url.url:'');"
+        @"    if(u&&u.indexOf('meticulous.gxzmei.com')!==-1){"
+        @"      var m=(opts&&opts.method)?opts.method:'GET';"
+        @"      var b=(opts&&opts.body)?String(opts.body):'';"
+        @"      var h=(opts&&opts.headers)?JSON.stringify(opts.headers):'';"
+        @"      document.title='[VIP_FETCH]'+m+'|'+u+'|'+h+'|'+b;"
+        @"    }"
+        @"    return origFetch.apply(this,arguments);"
+        @"  };"
+        @"  var origOpen=XMLHttpRequest.prototype.open;"
+        @"  XMLHttpRequest.prototype.open=function(m,u){"
+        @"    if(u&&u.indexOf('meticulous.gxzmei.com')!==-1){"
+        @"      this._vip_url=u;this._vip_method=m;"
+        @"      document.title='[VIP_XHR]'+m+'|'+u;"
+        @"    }"
+        @"    return origOpen.apply(this,arguments);"
+        @"  };"
+        @"  var origSend=XMLHttpRequest.prototype.send;"
+        @"  XMLHttpRequest.prototype.send=function(b){"
+        @"    if(this._vip_url){"
+        @"      document.title='[VIP_XHR_SEND]'+this._vip_method+'|'+this._vip_url+'|'+(b||'');"
+        @"    }"
+        @"    return origSend.apply(this,arguments);"
+        @"  };"
+        @"})();";
+
+    [self vip_evaluateJavaScript:injectCode completionHandler:nil];
+    [self vip_evaluateJavaScript:javaScriptString completionHandler:completionHandler];
+}
+
+@end
+
+// ===================== 5. 定时轮询 WebView document.title =====================
+static void StartTitlePolling(void) {
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 0.5 * NSEC_PER_SEC, 0);
+    dispatch_source_set_event_handler(timer, ^{
+        Class wkCls = objc_getClass("WKWebView");
+        if (!wkCls) return;
+        // 遍历所有 WKWebView 实例
+        unsigned int count;
+        id *webViews = (id *)objc_copyClassInstances(wkCls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            id webView = webViews[i];
+            if (!webView) continue;
+            // 使用 performSelector 避免类型检查问题
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            SEL evalSel = NSSelectorFromString(@"evaluateJavaScript:completionHandler:");
+            if ([webView respondsToSelector:evalSel]) {
+                NSString *js = @"document.title";
+                id handler = ^(id result, NSError *error) {
+                    if (error || !result) return;
+                    NSString *title = [result description];
+                    if ([title hasPrefix:@"[VIP_"]) {
+                        WriteLog(@"[WEBVIEW] %@", title);
+                    }
+                };
+                // 使用 NSInvocation 避免类型不匹配
+                NSMethodSignature *sig = [webView methodSignatureForSelector:evalSel];
+                if (sig) {
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setSelector:evalSel];
+                    [inv setTarget:webView];
+                    [inv setArgument:&js atIndex:2];
+                    [inv setArgument:&handler atIndex:3];
+                    [inv invoke];
+                }
+            }
+            #pragma clang diagnostic pop
+        }
+        if (webViews) free(webViews);
+    });
+    dispatch_resume(timer);
+}
+
+// ===================== 6. 自动触发体验会员请求模板 =====================
+/*
+  用法：在插件里调用 [ElyndorTVVIPTrigger triggerVipRequest];
+  注意：authUser / messageComponentTask / asyncColumnFeature 是动态字段，
+        需要从 App 内存中提取（Hook 生成方法）或从抓包中复制最新值。
+ */
+@interface ElyndorTVVIPTrigger : NSObject
++ (void)triggerVipRequest;
+@end
+
+@implementation ElyndorTVVIPTrigger
+
++ (void)triggerVipRequest {
+    // 从抓包中提取的固定参数
+    NSString *stateMemoryClient = @"210390710";
+    NSString *createInsertFlow = @"ios";
+    NSString *historyFavoriteThread = @"1.2.1";
+    NSString *jobHistorySearch = @"ios_leo";
+    NSString *userAgent = @"ElyndorTVCode/1 CFNetwork/1410.0.3 Darwin/22.6.0";
+
+    // 动态字段（需要从运行时提取或抓包复制）
+    NSString *authUser = @"dHDdpyuT54ib+W57JrI1TLeMMtbeZ58lNRNkyHyQaYg=";      // Base64, 会过期
+    NSString *asyncServiceSession = @"57ACB9D2-9710-43DA-A81B-B528962016C4";   // UUID
+    NSString *helperSessionHistory = @"57ACB9D2-9710-43DA-A81B-B528962016C4";  // UUID
+    NSString *messageComponentTask = @"afff7d302d7bfdda476ed4b73ab11c43d4660ccf"; // SHA1-like
+    NSString *asyncColumnFeature = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000]; // 毫秒时间戳
+
+    // Cookie（从抓包复制，会过期）
+    NSString *cookie = @"HWWAFSESID=5da9a76401fa884f0a; HWWAFSESTIME=1787822905636";
+
+    NSString *urlStr = [NSString stringWithFormat:@"https://meticulous.gxzmei.com/event/response/list?stateMemoryClient=%@", stateMemoryClient];
+    NSURL *url = [NSURL URLWithString:urlStr];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    [req setHTTPMethod:@"GET"];
+    [req setValue:@"meticulous.gxzmei.com" forHTTPHeaderField:@"Host"];
+    [req setValue:createInsertFlow forHTTPHeaderField:@"createInsertFlow"];
+    [req setValue:asyncServiceSession forHTTPHeaderField:@"asyncServiceSession"];
+    [req setValue:historyFavoriteThread forHTTPHeaderField:@"historyFavoriteThread"];
+    [req setValue:@"zh-CN,zh-Hans;q=0.9" forHTTPHeaderField:@"Accept-Language"];
+    [req setValue:authUser forHTTPHeaderField:@"authUser"];
+    [req setValue:@"gzip, deflate, br" forHTTPHeaderField:@"Accept-Encoding"];
+    [req setValue:asyncColumnFeature forHTTPHeaderField:@"asyncColumnFeature"];
+    [req setValue:jobHistorySearch forHTTPHeaderField:@"jobHistorySearch"];
+    [req setValue:helperSessionHistory forHTTPHeaderField:@"helperSessionHistory"];
+    [req setValue:userAgent forHTTPHeaderField:@"User-Agent"];
+    [req setValue:@"keep-alive" forHTTPHeaderField:@"Connection"];
+    [req setValue:messageComponentTask forHTTPHeaderField:@"messageComponentTask"];
+    [req setValue:@"*/*" forHTTPHeaderField:@"Accept"];
+    [req setValue:cookie forHTTPHeaderField:@"Cookie"];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            WriteLog(@"[TRIGGER-ERROR] %@", error.localizedDescription);
+        } else {
+            NSString *resp = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            WriteLog(@"[TRIGGER-RESPONSE] %@", resp ?: @"<binary>");
+        }
+    }];
+    [task resume];
+    WriteLog(@"[TRIGGER] VIP request sent to %@", urlStr);
+}
+
+@end
+
 // ===================== Swizzling 工具 =====================
-static void SwizzleMethod(Class cls, SEL origSel, SEL swizSel) {
+static void SwizzleInstanceMethod(Class cls, SEL origSel, SEL swizSel) {
     Method origMethod = class_getInstanceMethod(cls, origSel);
     Method swizMethod = class_getInstanceMethod(cls, swizSel);
     if (!origMethod || !swizMethod) return;
-
-    BOOL didAdd = class_addMethod(cls, origSel,
-                                  method_getImplementation(swizMethod),
-                                  method_getTypeEncoding(swizMethod));
-    if (didAdd) {
-        class_replaceMethod(cls, swizSel,
-                            method_getImplementation(origMethod),
-                            method_getTypeEncoding(origMethod));
+    if (class_addMethod(cls, origSel, method_getImplementation(swizMethod), method_getTypeEncoding(swizMethod))) {
+        class_replaceMethod(cls, swizSel, method_getImplementation(origMethod), method_getTypeEncoding(origMethod));
     } else {
         method_exchangeImplementations(origMethod, swizMethod);
     }
 }
 
-// ===================== NSURLSession Hook =====================
-@interface NSURLSession (ElyndorTVHook)
-@end
-
-@implementation NSURLSession (ElyndorTVHook)
-
-// Hook: dataTaskWithRequest:completionHandler:
-- (NSURLSessionDataTask *)elyndor_dataTaskWithRequest:(NSURLRequest *)request
-                                    completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[BLOCK] dataTaskWithRequest:completionHandler:%@%@",
-                 DescribeRequest(request), GetStackTrace());
-    }
-
-    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = completionHandler;
-    if (IsTargetURL(url) && completionHandler) {
-        wrappedHandler = ^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-            NSString *dataStr = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"<nil>";
-            WriteLog(@"[RESPONSE] URL: %@ | Status: %ld | Data: %@",
-                     url, (long)httpResp.statusCode,
-                     dataStr.length > 2000 ? [dataStr substringToIndex:2000] : dataStr);
-            completionHandler(data, response, error);
-        };
-    }
-
-    return [self elyndor_dataTaskWithRequest:request completionHandler:wrappedHandler];
+static void SwizzleClassMethod(Class cls, SEL origSel, SEL swizSel) {
+    Method origMethod = class_getClassMethod(cls, origSel);
+    Method swizMethod = class_getClassMethod(cls, swizSel);
+    if (!origMethod || !swizMethod) return;
+    method_exchangeImplementations(origMethod, swizMethod);
 }
-
-// Hook: dataTaskWithRequest: (delegate 版本)
-- (NSURLSessionDataTask *)elyndor_dataTaskWithRequest:(NSURLRequest *)request {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[DELEGATE] dataTaskWithRequest:%@%@",
-                 DescribeRequest(request), GetStackTrace());
-    }
-    return [self elyndor_dataTaskWithRequest:request];
-}
-
-// Hook: dataTaskWithURL:completionHandler:
-- (NSURLSessionDataTask *)elyndor_dataTaskWithURL:(NSURL *)url
-                                completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *urlStr = url.absoluteString;
-    if (IsTargetURL(urlStr)) {
-        WriteLog(@"[BLOCK-URL] dataTaskWithURL: %@%@", urlStr, GetStackTrace());
-    }
-    return [self elyndor_dataTaskWithURL:url completionHandler:completionHandler];
-}
-
-// Hook: downloadTaskWithRequest:completionHandler:
-- (NSURLSessionDownloadTask *)elyndor_downloadTaskWithRequest:(NSURLRequest *)request
-                                            completionHandler:(void (^)(NSURL *location, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[DOWNLOAD-BLOCK] downloadTaskWithRequest:completionHandler:%@%@",
-                 DescribeRequest(request), GetStackTrace());
-    }
-    return [self elyndor_downloadTaskWithRequest:request completionHandler:completionHandler];
-}
-
-// Hook: uploadTaskWithRequest:fromData:completionHandler:
-- (NSURLSessionUploadTask *)elyndor_uploadTaskWithRequest:(NSURLRequest *)request
-                                                 fromData:(NSData *)bodyData
-                                        completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[UPLOAD-BLOCK] uploadTaskWithRequest:fromData:completionHandler:%@%@",
-                 DescribeRequest(request), GetStackTrace());
-    }
-    return [self elyndor_uploadTaskWithRequest:request fromData:bodyData completionHandler:completionHandler];
-}
-
-@end
-
-// ===================== NSURLConnection Hook (legacy) =====================
-@interface NSURLConnection (ElyndorTVHook)
-@end
-
-@implementation NSURLConnection (ElyndorTVHook)
-
-+ (NSData *)elyndor_sendSynchronousRequest:(NSURLRequest *)request
-                         returningResponse:(NSURLResponse *__autoreleasing *)response
-                                     error:(NSError *__autoreleasing *)error {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[SYNC] sendSynchronousRequest:%@%@",
-                 DescribeRequest(request), GetStackTrace());
-    }
-    NSData *data = [self elyndor_sendSynchronousRequest:request returningResponse:response error:error];
-    if (IsTargetURL(url) && data) {
-        NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        WriteLog(@"[SYNC-RESPONSE] URL: %@ | Data: %@",
-                 url, respStr.length > 2000 ? [respStr substringToIndex:2000] : respStr);
-    }
-    return data;
-}
-
-@end
-
-// ===================== NSURLRequest Hook (追踪创建) =====================
-@interface NSURLRequest (ElyndorTVHook)
-@end
-
-@implementation NSURLRequest (ElyndorTVHook)
-
-+ (instancetype)elyndor_requestWithURL:(NSURL *)URL {
-    NSString *url = URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[REQ-CREATE] +requestWithURL: %@%@", url, GetStackTrace());
-    }
-    return [self elyndor_requestWithURL:URL];
-}
-
-- (instancetype)elyndor_initWithURL:(NSURL *)URL {
-    NSString *url = URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[REQ-CREATE] -initWithURL: %@%@", url, GetStackTrace());
-    }
-    return [self elyndor_initWithURL:URL];
-}
-
-@end
-
-// ===================== NSURL Hook (追踪 URL 创建) =====================
-@interface NSURL (ElyndorTVHook)
-@end
-
-@implementation NSURL (ElyndorTVHook)
-
-+ (instancetype)elyndor_URLWithString:(NSString *)URLString {
-    if (IsTargetURL(URLString)) {
-        WriteLog(@"[URL-CREATE] +URLWithString: %@%@", URLString, GetStackTrace());
-    }
-    return [self elyndor_URLWithString:URLString];
-}
-
-@end
 
 // ===================== 初始化 =====================
-static __attribute__((constructor)) void ElyndorTVInit(void) {
+static __attribute__((constructor)) void VIPHookInit(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        WriteLog(@"=== ElyndorTV Network Hook Loaded ===");
-        WriteLog(@"Log path: %@", GetLogPath());
-
-        // Swizzle NSURLSession
-        Class sessionCls = objc_getClass("NSURLSession");
-        if (sessionCls) {
-            SwizzleMethod(sessionCls,
-                          @selector(dataTaskWithRequest:completionHandler:),
-                          @selector(elyndor_dataTaskWithRequest:completionHandler:));
-            SwizzleMethod(sessionCls,
-                          @selector(dataTaskWithRequest:),
-                          @selector(elyndor_dataTaskWithRequest:));
-            SwizzleMethod(sessionCls,
-                          @selector(dataTaskWithURL:completionHandler:),
-                          @selector(elyndor_dataTaskWithURL:completionHandler:));
-            SwizzleMethod(sessionCls,
-                          @selector(downloadTaskWithRequest:completionHandler:),
-                          @selector(elyndor_downloadTaskWithRequest:completionHandler:));
-            SwizzleMethod(sessionCls,
-                          @selector(uploadTaskWithRequest:fromData:completionHandler:),
-                          @selector(elyndor_uploadTaskWithRequest:fromData:completionHandler:));
-            WriteLog(@"[+] NSURLSession swizzled");
-        }
-
-        // Swizzle NSURLConnection
-        Class connCls = objc_getClass("NSURLConnection");
-        if (connCls) {
-            Method orig = class_getClassMethod(connCls, @selector(sendSynchronousRequest:returningResponse:error:));
-            Method swiz = class_getClassMethod(connCls, @selector(elyndor_sendSynchronousRequest:returningResponse:error:));
-            if (orig && swiz) method_exchangeImplementations(orig, swiz);
-            WriteLog(@"[+] NSURLConnection swizzled");
-        }
+        WriteLog(@"=== ElyndorTV VIP Hook Loaded ===");
+        WriteLog(@"Log: %@", GetLogPath());
 
         // Swizzle NSURLRequest
         Class reqCls = objc_getClass("NSURLRequest");
         if (reqCls) {
-            Method orig1 = class_getClassMethod(reqCls, @selector(requestWithURL:));
-            Method swiz1 = class_getClassMethod(reqCls, @selector(elyndor_requestWithURL:));
-            if (orig1 && swiz1) method_exchangeImplementations(orig1, swiz1);
-
-            Method orig2 = class_getInstanceMethod(reqCls, @selector(initWithURL:));
-            Method swiz2 = class_getInstanceMethod(reqCls, @selector(elyndor_initWithURL:));
-            if (orig2 && swiz2) method_exchangeImplementations(orig2, swiz2);
+            SwizzleClassMethod(reqCls, @selector(requestWithURL:), @selector(vip_requestWithURL:));
+            SwizzleInstanceMethod(reqCls, @selector(initWithURL:), @selector(vip_initWithURL:));
             WriteLog(@"[+] NSURLRequest swizzled");
         }
 
-        // Swizzle NSURL
-        Class urlCls = objc_getClass("NSURL");
-        if (urlCls) {
-            Method orig = class_getClassMethod(urlCls, @selector(URLWithString:));
-            Method swiz = class_getClassMethod(urlCls, @selector(elyndor_URLWithString:));
-            if (orig && swiz) method_exchangeImplementations(orig, swiz);
-            WriteLog(@"[+] NSURL swizzled");
+        // Swizzle NSMutableURLRequest
+        Class mReqCls = objc_getClass("NSMutableURLRequest");
+        if (mReqCls) {
+            SwizzleInstanceMethod(mReqCls, @selector(setValue:forHTTPHeaderField:), @selector(vip_setValue:forHTTPHeaderField:));
+            SwizzleInstanceMethod(mReqCls, @selector(addValue:forHTTPHeaderField:), @selector(vip_addValue:forHTTPHeaderField:));
+            SwizzleInstanceMethod(mReqCls, @selector(initWithURL:), @selector(vip_initWithURL:));
+            WriteLog(@"[+] NSMutableURLRequest swizzled");
         }
 
-        WriteLog(@"=== Hook setup complete, operate App ===");
+        // Swizzle NSURLSession
+        Class sessionCls = objc_getClass("NSURLSession");
+        if (sessionCls) {
+            SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:), @selector(vip_dataTaskWithRequest:));
+            SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:completionHandler:), @selector(vip_dataTaskWithRequest:completionHandler:));
+            WriteLog(@"[+] NSURLSession swizzled");
+        }
+
+        // Swizzle WKWebView evaluateJavaScript
+        Class wkCls = objc_getClass("WKWebView");
+        if (wkCls) {
+            SwizzleInstanceMethod(wkCls, @selector(evaluateJavaScript:completionHandler:), @selector(vip_evaluateJavaScript:completionHandler:));
+            WriteLog(@"[+] WKWebView swizzled");
+            StartTitlePolling();
+        }
+
+        WriteLog(@"=== Setup complete. Click VIP button and check log ===");
     });
 }
