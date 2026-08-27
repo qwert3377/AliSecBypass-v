@@ -46,21 +46,18 @@ static void WriteLog(NSString *fmt, ...) {
 static void SendVipRequest(void) {
     WriteLog(@"=== 开始发送体验会员请求 ===");
 
-    // 固定参数
     NSString *stateMemoryClient = @"210390710";
     NSString *createInsertFlow = @"ios";
     NSString *historyFavoriteThread = @"1.2.1";
     NSString *jobHistorySearch = @"ios_leo";
     NSString *userAgent = @"ElyndorTVCode/1 CFNetwork/1410.0.3 Darwin/22.6.0";
 
-    // 动态字段（从抓包复制，会过期）
     NSString *authUser = @"dHDdpyuT54ib+W57JrI1TLeMMtbeZ58lNRNkyHyQaYg=";
     NSString *asyncServiceSession = @"57ACB9D2-9710-43DA-A81B-B528962016C4";
     NSString *helperSessionHistory = @"57ACB9D2-9710-43DA-A81B-B528962016C4";
     NSString *messageComponentTask = @"afff7d302d7bfdda476ed4b73ab11c43d4660ccf";
     NSString *cookie = @"HWWAFSESID=5da9a76401fa884f0a; HWWAFSESTIME=1787822905636";
 
-    // 当前毫秒时间戳
     NSString *asyncColumnFeature = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000];
 
     NSString *urlStr = [NSString stringWithFormat:@"https://meticulous.gxzmei.com/event/response/list?stateMemoryClient=%@", stateMemoryClient];
@@ -68,7 +65,6 @@ static void SendVipRequest(void) {
     WriteLog(@"URL: %@", urlStr);
     WriteLog(@"asyncColumnFeature: %@", asyncColumnFeature);
 
-    // 构造请求
     NSURL *url = [NSURL URLWithString:urlStr];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     [req setHTTPMethod:@"GET"];
@@ -88,32 +84,33 @@ static void SendVipRequest(void) {
     [req setValue:@"*/*" forHTTPHeaderField:@"Accept"];
     [req setValue:cookie forHTTPHeaderField:@"Cookie"];
 
-    // 同步发送
-    NSURLResponse *response = nil;
-    NSError *error = nil;
-    NSData *data = [NSURLConnection sendSynchronousRequest:req returningResponse:&response error:&error];
-
-    if (error) {
-        WriteLog(@"[-] Error: %@", error.localizedDescription);
-    } else {
-        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-        WriteLog(@"[+] Status Code: %ld", (long)httpResp.statusCode);
-
-        if (data) {
-            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            if (respStr) {
-                WriteLog(@"[+] Response Body: %@", respStr);
-            } else {
-                NSString *base64 = [data base64EncodedStringWithOptions:0];
-                WriteLog(@"[+] Response (base64): %@", base64);
-            }
+    // 使用 NSURLSession 异步请求（iOS 9+ 推荐）
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            WriteLog(@"[-] Error: %@", error.localizedDescription);
         } else {
-            WriteLog(@"[-] No response data");
-        }
-    }
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            WriteLog(@"[+] Status Code: %ld", (long)httpResp.statusCode);
 
-    WriteLog(@"=== 请求完成 ===");
-    WriteLog(@"Log saved to: %@", GetLogPath());
+            if (data) {
+                NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (respStr) {
+                    WriteLog(@"[+] Response Body: %@", respStr);
+                } else {
+                    NSString *base64 = [data base64EncodedStringWithOptions:0];
+                    WriteLog(@"[+] Response (base64): %@", base64);
+                }
+            } else {
+                WriteLog(@"[-] No response data");
+            }
+        }
+        WriteLog(@"=== 请求完成 ===");
+        WriteLog(@"Log saved to: %@", GetLogPath());
+    }];
+
+    [task resume];
+    WriteLog(@"[+] 请求已发送，等待响应...");
 }
 
 // ===================== 初始化 =====================
