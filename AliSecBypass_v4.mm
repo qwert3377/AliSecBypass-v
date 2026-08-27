@@ -12,117 +12,6 @@ static NSMutableArray *gInstances = nil;
 static UIButton *gFloatBtn = nil;
 static id gFloatTarget = nil;
 static id (*orig_init)(id self, SEL _cmd);
-static BOOL gAutoTriggerPending = NO;
-
-// ============================================================
-// 日志
-// ============================================================
-static void logMsg(NSString *msg) {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *doc = paths[0];
-    NSString *path = [doc stringByAppendingPathComponent:kLogFile];
-    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-    [fmt setDateFormat:@"HH:mm:ss"];
-    NSString *ts = [fmt stringFromDate:[NSDate date]];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!fh) {
-        [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    }
-    if (fh) {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    }
-}
-
-// ============================================================
-// 获取当前 keyWindow
-// ============================================================
-static UIWindow* getKeyWindow(void) {
-    UIWindow *result = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                if (ws.activationState == UISceneActivationStateForegroundActive) {
-                    for (UIWindow *w in ws.windows) {
-                        if (w.isKeyWindow) {
-                            result = w;
-                            break;
-                        }
-                    }
-                    if (result) break;
-                }
-            }
-        }
-        if (!result) {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *ws = (UIWindowScene *)scene;
-                    for (UIWindow *w in ws.windows) {
-                        if (w.isKeyWindow) {
-                            result = w;
-                            break;
-                        }
-                    }
-                    if (result) break;
-                }
-            }
-        }
-    }
-    return result;
-}
-
-// ============================================================
-// 获取当前导航控制器
-// ============================================================
-static UINavigationController* getNavController(void) {
-    UIWindow *kw = getKeyWindow();
-    if (!kw) return nil;
-    UIViewController *root = kw.rootViewController;
-    if ([root isKindOfClass:[UINavigationController class]]) {
-        return (UINavigationController *)root;
-    }
-    if ([root respondsToSelector:@selector(navigationController)]) {
-        return [root navigationController];
-    }
-    return nil;
-}
-
-// ============================================================
-// 自动打开下载页
-// ============================================================
-static void autoOpenDownloadPage(void) {
-    logMsg(@"autoOpen: start");
-
-    UINavigationController *nav = getNavController();
-    if (!nav) {
-        logMsg(@"autoOpen: no nav controller");
-        return;
-    }
-
-    Class downloadClass = NSClassFromString(@"ElyndorTVCode.EDTCAssetAcquireProcessor");
-    if (downloadClass) {
-        id vc = [[downloadClass alloc] init];
-        if (vc) {
-            gAutoTriggerPending = YES;
-            [nav pushViewController:vc animated:NO];
-            logMsg(@"autoOpen: pushed download page");
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (nav.viewControllers.count > 1) {
-                    [nav popViewControllerAnimated:NO];
-                    logMsg(@"autoOpen: popped back");
-                }
-            });
-            return;
-        }
-    }
-
-    logMsg(@"autoOpen: failed");
-}
 
 // ============================================================
 // Hook init - 保存实例到全局数组强引用保活
@@ -134,21 +23,6 @@ static id hook_init(id self, SEL _cmd) {
     }
     [gInstances addObject:result];
     logMsg([NSString stringWithFormat:@"capture instance, count=%lu", (unsigned long)gInstances.count]);
-
-    if (gAutoTriggerPending) {
-        gAutoTriggerPending = NO;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            logMsg(@"auto trigger from init hook");
-            SEL sel = NSSelectorFromString(@"edtc_flowEnhanceAction");
-            if ([result respondsToSelector:sel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [result performSelector:sel];
-#pragma clang diagnostic pop
-                logMsg(@"auto trigger ok");
-            }
-        });
-    }
 
     return result;
 }
@@ -171,8 +45,7 @@ static void doTrigger(void) {
             logMsg(@"no selector");
         }
     } else {
-        logMsg(@"no instance, try auto open download page");
-        autoOpenDownloadPage();
+        logMsg(@"no instance");
     }
 }
 
@@ -242,17 +115,16 @@ static void initPlugin(void) {
                 orig_init = (id (*)(id, SEL))class_getMethodImplementation(superClass, @selector(init));
                 logMsg(@"init hooked (added)");
             }
+
+            // 直接创建实例，hook_init 会自动捕获到 gInstances
+            id ribbon = [[ribbonClass alloc] init];
+            if (ribbon) {
+                logMsg(@"pre-created ribbon instance");
+            }
         } else {
             logMsg(@"class not found");
         }
 
         createFloatButton();
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!gInstances || gInstances.count == 0) {
-                logMsg(@"auto open download page at startup");
-                autoOpenDownloadPage();
-            }
-        });
     });
 }
