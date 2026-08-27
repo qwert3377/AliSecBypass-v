@@ -1,5 +1,5 @@
 // AliSecBypass_v4.mm
-// Ad Kill: zero-flash, intercept at click + present/push layer
+// Ad Kill: zero-flash, intercept at present/push layer only
 // TrollStore injectable, pure ObjC Runtime
 
 #import <Foundation/Foundation.h>
@@ -12,7 +12,6 @@ static NSArray *kAuthKeys = nil;
 static NSArray *kExpireKeys = nil;
 static NSArray *kLevelKeys = nil;
 static NSArray *kUDKeys = nil;
-static NSArray *kAdTargets = nil;
 static NSArray *kAdPrefixes = nil;
 static NSSet *gLevelSet = nil;
 
@@ -185,7 +184,7 @@ static void hook_setText(UILabel *self, SEL sel, NSString *text) {
     orig_setText(self, sel, text);
 }
 
-// ===================== 4. UIControl (广告点击直接吃掉) =====================
+// ===================== 4. UIControl (只处理下载相关，不拦截广告点击) =====================
 static void (*orig_sendActions)(UIControl *self, SEL sel, UIControlEvents events, UIEvent *event);
 static void hook_sendActions(UIControl *self, SEL sel, UIControlEvents events, UIEvent *event) {
     if ([self respondsToSelector:@selector(titleLabel)]) {
@@ -194,11 +193,6 @@ static void hook_sendActions(UIControl *self, SEL sel, UIControlEvents events, U
             NSString *title = tl.text;
             if ([title containsString:@"查看下载"] || [title containsString:@"下载"]) {
                 gVIPFakeEnabled = NO;
-            }
-            for (NSString *t in kAdTargets) {
-                if ([title containsString:t]) {
-                    return;
-                }
             }
         }
     }
@@ -255,7 +249,6 @@ static void init() {
         @"answerHoldGrowth", @"presentIdeaNot"
     ];
     kUDKeys = @[@"kvipStatusStorageKey", @"EDTCActiveDirectAcquireCentral", @"yituanlaunma"];
-    kAdTargets = @[@"立即体验", @"立即领取", @"领取奖励", @"我要加速", @"看视频", @"去浏览", @"体验"];
     kAdPrefixes = @[
         @"gdtsplash", @"gdtbasead", @"gdtreward", @"gdtinterstitial", @"gdtnative",
         @"kssplash", @"ksad", @"ksreward", @"ksinterstitial", @"ksnative",
