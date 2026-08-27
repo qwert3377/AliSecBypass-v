@@ -89,7 +89,7 @@ static BOOL IsTargetURL(NSString *url) {
 
 @end
 
-// ===================== 2. Hook NSMutableURLRequest (Headers 在这里设置) =====================
+// ===================== 2. Hook NSMutableURLRequest (Headers 设置) =====================
 @interface NSMutableURLRequest (VIPHook)
 @end
 
@@ -121,7 +121,7 @@ static BOOL IsTargetURL(NSString *url) {
 
 @end
 
-// ===================== 3. Hook NSURLSession (请求发出) =====================
+// ===================== 3. Hook NSURLSession (请求发出 + 响应) =====================
 @interface NSURLSession (VIPHook)
 @end
 
@@ -175,53 +175,7 @@ static BOOL IsTargetURL(NSString *url) {
 
 @end
 
-// ===================== 4. Hook WKWebView evaluateJavaScript (注入 fetch 拦截) =====================
-@interface WKWebView (VIPHook)
-@end
-
-@implementation WKWebView (VIPHook)
-
-- (void)vip_evaluateJavaScript:(NSString *)javaScriptString completionHandler:(void (^)(id, NSError *))completionHandler {
-    // 注入 fetch/XHR 拦截代码
-    NSString *injectCode = @""
-        @"(function(){"
-        @"  if(window.__vip_hooked__)return;"
-        @"  window.__vip_hooked__=true;"
-        @"  var origFetch=window.fetch;"
-        @"  window.fetch=function(url,opts){"
-        @"    var u=(typeof url==='string')?url:(url?url.url:'');"
-        @"    if(u&&u.indexOf('meticulous.gxzmei.com')!==-1){"
-        @"      var m=(opts&&opts.method)?opts.method:'GET';"
-        @"      var b=(opts&&opts.body)?String(opts.body):'';"
-        @"      var h=(opts&&opts.headers)?JSON.stringify(opts.headers):'';"
-        @"      console.log('[VIP_FETCH]'+m+'|'+u+'|'+h+'|'+b);"
-        @"    }"
-        @"    return origFetch.apply(this,arguments);"
-        @"  };"
-        @"  var origOpen=XMLHttpRequest.prototype.open;"
-        @"  XMLHttpRequest.prototype.open=function(m,u){"
-        @"    if(u&&u.indexOf('meticulous.gxzmei.com')!==-1){"
-        @"      this._vip_url=u;this._vip_method=m;"
-        @"      console.log('[VIP_XHR]'+m+'|'+u);"
-        @"    }"
-        @"    return origOpen.apply(this,arguments);"
-        @"  };"
-        @"  var origSend=XMLHttpRequest.prototype.send;"
-        @"  XMLHttpRequest.prototype.send=function(b){"
-        @"    if(this._vip_url){"
-        @"      console.log('[VIP_XHR_SEND]'+this._vip_method+'|'+this._vip_url+'|'+(b||''));"
-        @"    }"
-        @"    return origSend.apply(this,arguments);"
-        @"  };"
-        @"})();";
-
-    [self vip_evaluateJavaScript:injectCode completionHandler:nil];
-    [self vip_evaluateJavaScript:javaScriptString completionHandler:completionHandler];
-}
-
-@end
-
-// ===================== 5. 自动触发体验会员请求模板 =====================
+// ===================== 4. 自动触发体验会员请求模板 =====================
 @interface ElyndorTVVIPTrigger : NSObject
 + (void)triggerVipRequest;
 @end
@@ -324,12 +278,6 @@ static __attribute__((constructor)) void VIPHookInit(void) {
             SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:), @selector(vip_dataTaskWithRequest:));
             SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:completionHandler:), @selector(vip_dataTaskWithRequest:completionHandler:));
             WriteLog(@"[+] NSURLSession swizzled");
-        }
-
-        Class wkCls = objc_getClass("WKWebView");
-        if (wkCls) {
-            SwizzleInstanceMethod(wkCls, @selector(evaluateJavaScript:completionHandler:), @selector(vip_evaluateJavaScript:completionHandler:));
-            WriteLog(@"[+] WKWebView swizzled");
         }
 
         WriteLog(@"=== Setup complete. Click VIP button and check log ===");
