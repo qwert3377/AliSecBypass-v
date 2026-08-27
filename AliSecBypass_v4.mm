@@ -1,31 +1,26 @@
 //
-//  ElyndorTV_VIPHook.mm
+//  ElyndorTV_AutoSendVip.mm
 //  TrollStore injectable dylib
-//  专攻 meticulous.gxzmei.com /event/response/list 体验会员接口
+//  打开 App 10 秒后自动发送体验会员请求，响应写日志
 //
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <dlfcn.h>
-#import <execinfo.h>
 
-static NSString *const kTargetDomain = @"meticulous.gxzmei.com";
-static NSString *const kLogDirName   = @"ElyndorTV_Logs";
 static NSString *gLogPath = nil;
 
-// ===================== 日志工具 =====================
 static NSString* GetLogPath(void) {
     if (gLogPath) return gLogPath;
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *docDir = [paths firstObject] ?: @"/var/mobile/Documents";
-    NSString *logDir = [docDir stringByAppendingPathComponent:kLogDirName];
+    NSString *logDir = [docDir stringByAppendingPathComponent:@"ElyndorTV_Logs"];
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:logDir]) {
         [fm createDirectoryAtPath:logDir withIntermediateDirectories:YES attributes:nil error:nil];
     }
     NSDateFormatter *df = [[NSDateFormatter alloc] init];
     [df setDateFormat:@"yyyy-MM-dd_HH-mm-ss"];
-    NSString *filename = [NSString stringWithFormat:@"vip_%@.log", [df stringFromDate:[NSDate date]]];
+    NSString *filename = [NSString stringWithFormat:@"vip_send_%@.log", [df stringFromDate:[NSDate date]]];
     gLogPath = [logDir stringByAppendingPathComponent:filename];
     return gLogPath;
 }
@@ -48,157 +43,32 @@ static void WriteLog(NSString *fmt, ...) {
     NSLog(@"[ElyndorVIP] %@", msg);
 }
 
-static NSString* GetStackTrace(void) {
-    void *callstack[32];
-    int frames = backtrace(callstack, 32);
-    char **strs = backtrace_symbols(callstack, frames);
-    NSMutableString *trace = [NSMutableString stringWithString:@"\n--- Stack ---\n"];
-    for (int i = 0; i < frames && i < 20; i++) {
-        NSString *line = strs[i] ? [NSString stringWithUTF8String:strs[i]] : @"<unknown>";
-        [trace appendFormat:@"  %d: %@\n", i, line];
-    }
-    free(strs);
-    return trace;
-}
+static void SendVipRequest(void) {
+    WriteLog(@"=== 开始发送体验会员请求 ===");
 
-static BOOL IsTargetURL(NSString *url) {
-    return url && [url rangeOfString:kTargetDomain options:NSCaseInsensitiveSearch].location != NSNotFound;
-}
-
-// ===================== 1. Hook NSURLRequest 初始化 =====================
-@interface NSURLRequest (VIPHook)
-@end
-
-@implementation NSURLRequest (VIPHook)
-
-+ (instancetype)vip_requestWithURL:(NSURL *)URL {
-    NSString *url = URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[REQ-CREATE] +requestWithURL: %@%@", url, GetStackTrace());
-    }
-    return [self vip_requestWithURL:URL];
-}
-
-- (instancetype)vip_initWithURL:(NSURL *)URL {
-    NSString *url = URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[REQ-CREATE] -initWithURL: %@%@", url, GetStackTrace());
-    }
-    return [self vip_initWithURL:URL];
-}
-
-@end
-
-// ===================== 2. Hook NSMutableURLRequest (Headers 设置) =====================
-@interface NSMutableURLRequest (VIPHook)
-@end
-
-@implementation NSMutableURLRequest (VIPHook)
-
-- (void)vip_setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
-    NSURL *url = self.URL;
-    if (url && IsTargetURL(url.absoluteString)) {
-        WriteLog(@"[HEADER] %@: %@", field, value);
-    }
-    [self vip_setValue:value forHTTPHeaderField:field];
-}
-
-- (void)vip_addValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
-    NSURL *url = self.URL;
-    if (url && IsTargetURL(url.absoluteString)) {
-        WriteLog(@"[HEADER-ADD] %@: %@", field, value);
-    }
-    [self vip_addValue:value forHTTPHeaderField:field];
-}
-
-- (instancetype)vip_initWithURL:(NSURL *)URL {
-    NSString *url = URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[REQ-CREATE-MUTABLE] -initWithURL: %@%@", url, GetStackTrace());
-    }
-    return [self vip_initWithURL:URL];
-}
-
-@end
-
-// ===================== 3. Hook NSURLSession (请求发出 + 响应) =====================
-@interface NSURLSession (VIPHook)
-@end
-
-@implementation NSURLSession (VIPHook)
-
-- (NSURLSessionDataTask *)vip_dataTaskWithRequest:(NSURLRequest *)request {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[SESSION-DELEGATE] dataTaskWithRequest:");
-        WriteLog(@"  URL: %@", url);
-        WriteLog(@"  Method: %@", request.HTTPMethod ?: @"GET");
-        WriteLog(@"  Headers: %@", request.allHTTPHeaderFields ?: @{});
-        if (request.HTTPBody) {
-            NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
-            WriteLog(@"  Body: %@", body ?: @"<binary>");
-        }
-        WriteLog(@"%@", GetStackTrace());
-    }
-    return [self vip_dataTaskWithRequest:request];
-}
-
-- (NSURLSessionDataTask *)vip_dataTaskWithRequest:(NSURLRequest *)request
-                                completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    NSString *url = request.URL.absoluteString;
-    if (IsTargetURL(url)) {
-        WriteLog(@"[SESSION-BLOCK] dataTaskWithRequest:completionHandler:");
-        WriteLog(@"  URL: %@", url);
-        WriteLog(@"  Method: %@", request.HTTPMethod ?: @"GET");
-        WriteLog(@"  Headers: %@", request.allHTTPHeaderFields ?: @{});
-        if (request.HTTPBody) {
-            NSString *body = [[NSString alloc] initWithData:request.HTTPBody encoding:NSUTF8StringEncoding];
-            WriteLog(@"  Body: %@", body ?: @"<binary>");
-        }
-        WriteLog(@"%@", GetStackTrace());
-
-        void (^wrapped)(NSData *, NSURLResponse *, NSError *) = completionHandler;
-        if (completionHandler) {
-            wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
-                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-                NSString *dataStr = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"<nil>";
-                WriteLog(@"[RESPONSE] URL: %@ | Status: %ld | Data: %@",
-                         url, (long)httpResp.statusCode,
-                         dataStr.length > 2000 ? [dataStr substringToIndex:2000] : dataStr);
-                completionHandler(data, response, error);
-            };
-        }
-        return [self vip_dataTaskWithRequest:request completionHandler:wrapped];
-    }
-    return [self vip_dataTaskWithRequest:request completionHandler:completionHandler];
-}
-
-@end
-
-// ===================== 4. 自动触发体验会员请求模板 =====================
-@interface ElyndorTVVIPTrigger : NSObject
-+ (void)triggerVipRequest;
-@end
-
-@implementation ElyndorTVVIPTrigger
-
-+ (void)triggerVipRequest {
+    // 固定参数
     NSString *stateMemoryClient = @"210390710";
     NSString *createInsertFlow = @"ios";
     NSString *historyFavoriteThread = @"1.2.1";
     NSString *jobHistorySearch = @"ios_leo";
     NSString *userAgent = @"ElyndorTVCode/1 CFNetwork/1410.0.3 Darwin/22.6.0";
 
-    // 动态字段（需要从运行时提取或抓包复制，会过期）
+    // 动态字段（从抓包复制，会过期）
     NSString *authUser = @"dHDdpyuT54ib+W57JrI1TLeMMtbeZ58lNRNkyHyQaYg=";
     NSString *asyncServiceSession = @"57ACB9D2-9710-43DA-A81B-B528962016C4";
     NSString *helperSessionHistory = @"57ACB9D2-9710-43DA-A81B-B528962016C4";
     NSString *messageComponentTask = @"afff7d302d7bfdda476ed4b73ab11c43d4660ccf";
-    NSString *asyncColumnFeature = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000];
-
     NSString *cookie = @"HWWAFSESID=5da9a76401fa884f0a; HWWAFSESTIME=1787822905636";
 
+    // 当前毫秒时间戳
+    NSString *asyncColumnFeature = [NSString stringWithFormat:@"%.0f", [[NSDate date] timeIntervalSince1970] * 1000];
+
     NSString *urlStr = [NSString stringWithFormat:@"https://meticulous.gxzmei.com/event/response/list?stateMemoryClient=%@", stateMemoryClient];
+
+    WriteLog(@"URL: %@", urlStr);
+    WriteLog(@"asyncColumnFeature: %@", asyncColumnFeature);
+
+    // 构造请求
     NSURL *url = [NSURL URLWithString:urlStr];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     [req setHTTPMethod:@"GET"];
@@ -218,68 +88,39 @@ static BOOL IsTargetURL(NSString *url) {
     [req setValue:@"*/*" forHTTPHeaderField:@"Accept"];
     [req setValue:cookie forHTTPHeaderField:@"Cookie"];
 
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error) {
-            WriteLog(@"[TRIGGER-ERROR] %@", error.localizedDescription);
-        } else {
-            NSString *resp = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            WriteLog(@"[TRIGGER-RESPONSE] %@", resp ?: @"<binary>");
-        }
-    }];
-    [task resume];
-    WriteLog(@"[TRIGGER] VIP request sent to %@", urlStr);
-}
+    // 同步发送
+    NSURLResponse *response = nil;
+    NSError *error = nil;
+    NSData *data = [NSURLConnection sendSynchronousRequest:req returningResponse:&response error:&error];
 
-@end
-
-// ===================== Swizzling 工具 =====================
-static void SwizzleInstanceMethod(Class cls, SEL origSel, SEL swizSel) {
-    Method origMethod = class_getInstanceMethod(cls, origSel);
-    Method swizMethod = class_getInstanceMethod(cls, swizSel);
-    if (!origMethod || !swizMethod) return;
-    if (class_addMethod(cls, origSel, method_getImplementation(swizMethod), method_getTypeEncoding(swizMethod))) {
-        class_replaceMethod(cls, swizSel, method_getImplementation(origMethod), method_getTypeEncoding(origMethod));
+    if (error) {
+        WriteLog(@"[-] Error: %@", error.localizedDescription);
     } else {
-        method_exchangeImplementations(origMethod, swizMethod);
-    }
-}
+        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+        WriteLog(@"[+] Status Code: %ld", (long)httpResp.statusCode);
 
-static void SwizzleClassMethod(Class cls, SEL origSel, SEL swizSel) {
-    Method origMethod = class_getClassMethod(cls, origSel);
-    Method swizMethod = class_getClassMethod(cls, swizSel);
-    if (!origMethod || !swizMethod) return;
-    method_exchangeImplementations(origMethod, swizMethod);
+        if (data) {
+            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (respStr) {
+                WriteLog(@"[+] Response Body: %@", respStr);
+            } else {
+                NSString *base64 = [data base64EncodedStringWithOptions:0];
+                WriteLog(@"[+] Response (base64): %@", base64);
+            }
+        } else {
+            WriteLog(@"[-] No response data");
+        }
+    }
+
+    WriteLog(@"=== 请求完成 ===");
+    WriteLog(@"Log saved to: %@", GetLogPath());
 }
 
 // ===================== 初始化 =====================
-static __attribute__((constructor)) void VIPHookInit(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        WriteLog(@"=== ElyndorTV VIP Hook Loaded ===");
+static __attribute__((constructor)) void AutoSendInit(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        WriteLog(@"=== ElyndorTV AutoSend Loaded ===");
         WriteLog(@"Log: %@", GetLogPath());
-
-        Class reqCls = objc_getClass("NSURLRequest");
-        if (reqCls) {
-            SwizzleClassMethod(reqCls, @selector(requestWithURL:), @selector(vip_requestWithURL:));
-            SwizzleInstanceMethod(reqCls, @selector(initWithURL:), @selector(vip_initWithURL:));
-            WriteLog(@"[+] NSURLRequest swizzled");
-        }
-
-        Class mReqCls = objc_getClass("NSMutableURLRequest");
-        if (mReqCls) {
-            SwizzleInstanceMethod(mReqCls, @selector(setValue:forHTTPHeaderField:), @selector(vip_setValue:forHTTPHeaderField:));
-            SwizzleInstanceMethod(mReqCls, @selector(addValue:forHTTPHeaderField:), @selector(vip_addValue:forHTTPHeaderField:));
-            SwizzleInstanceMethod(mReqCls, @selector(initWithURL:), @selector(vip_initWithURL:));
-            WriteLog(@"[+] NSMutableURLRequest swizzled");
-        }
-
-        Class sessionCls = objc_getClass("NSURLSession");
-        if (sessionCls) {
-            SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:), @selector(vip_dataTaskWithRequest:));
-            SwizzleInstanceMethod(sessionCls, @selector(dataTaskWithRequest:completionHandler:), @selector(vip_dataTaskWithRequest:completionHandler:));
-            WriteLog(@"[+] NSURLSession swizzled");
-        }
-
-        WriteLog(@"=== Setup complete. Click VIP button and check log ===");
+        SendVipRequest();
     });
 }
