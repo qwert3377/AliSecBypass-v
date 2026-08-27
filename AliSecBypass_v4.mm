@@ -1,4 +1,4 @@
-// ElyndorTV_VIP_v6.1.mm
+// AliSecBypass_v4.mm
 // Ad Kill: zero-flash, intercept at click + present/push layer
 // TrollStore injectable, pure ObjC Runtime
 
@@ -14,6 +14,7 @@ static NSArray *kLevelKeys = nil;
 static NSArray *kUDKeys = nil;
 static NSArray *kAdTargets = nil;
 static NSArray *kAdPrefixes = nil;
+static NSSet *gLevelSet = nil;
 
 static BOOL keyMatch(NSString *key, NSArray *list) {
     NSString *kl = [key lowercaseString];
@@ -97,7 +98,7 @@ static NSDictionary *patchDictionary(NSDictionary *dict) {
                 if (iv >= 0 && iv < 8) m[key] = @8;
             } else if ([v isKindOfClass:[NSString class]]) {
                 NSString *s = (NSString *)v;
-                if ([@[@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:s]) {
+                if ([gLevelSet containsObject:s]) {
                     m[key] = @"8";
                 }
             }
@@ -148,7 +149,7 @@ static NSString *hook_stringForKey(NSUserDefaults *self, SEL sel, NSString *key)
         if ([k isEqualToString:key]) { hit = YES; break; }
     }
     if (!hit && keyMatch(key, kLevelKeys)) hit = YES;
-    if (hit && [@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:result) return @"8";
+    if (hit && [gLevelSet containsObject:result]) return @"8";
     return result;
 }
 
@@ -167,7 +168,7 @@ static id hook_objectForKey(NSUserDefaults *self, SEL sel, NSString *key) {
         if (iv >= 0 && iv < 8) return @8;
     } else if ([result isKindOfClass:[NSString class]]) {
         NSString *s = (NSString *)result;
-        if ([@[@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:s]) return @"8";
+        if ([gLevelSet containsObject:s]) return @"8";
     }
     return result;
 }
@@ -196,7 +197,6 @@ static void hook_sendActions(UIControl *self, SEL sel, UIControlEvents events, U
             }
             for (NSString *t in kAdTargets) {
                 if ([title containsString:t]) {
-                    // 广告按钮点击直接吃掉，不调原始方法，广告连触发的机会都没有
                     return;
                 }
             }
@@ -210,7 +210,6 @@ static void (*orig_presentVC)(UIViewController *self, SEL sel, UIViewController 
 static void hook_presentVC(UIViewController *self, SEL sel, UIViewController *viewControllerToPresent, BOOL animated, dispatch_block_t completion) {
     NSString *cn = NSStringFromClass([viewControllerToPresent class]);
     if (isAdClass(cn)) {
-        // 广告VC直接拒收，连闪一下都不给
         return;
     }
     orig_presentVC(self, sel, viewControllerToPresent, animated, completion);
@@ -221,7 +220,6 @@ static void (*orig_pushVC)(UINavigationController *self, SEL sel, UIViewControll
 static void hook_pushVC(UINavigationController *self, SEL sel, UIViewController *viewController, BOOL animated) {
     NSString *cn = NSStringFromClass([viewController class]);
     if (isAdClass(cn)) {
-        // 广告VC直接拒收，连闪一下都不给
         return;
     }
     orig_pushVC(self, sel, viewController, animated);
@@ -267,6 +265,7 @@ static void init() {
         @"tradplus", @"splash", @"interstitial", @"reward", @"nativeexpress",
         @"adviewcontroller", @"adview", @"adsplash"
     ];
+    gLevelSet = [NSSet setWithObjects:@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7", nil];
 
     Method m;
     m = class_getClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:));
