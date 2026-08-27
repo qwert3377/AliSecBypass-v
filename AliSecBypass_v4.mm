@@ -9,6 +9,7 @@
 static NSString *const kLogFile = @"trigger.log";
 static NSMutableArray *gInstances = nil;
 static UIButton *gFloatBtn = nil;
+static id gFloatTarget = nil;  // 强引用保活 target，防止 ARC 释放
 static id (*orig_init)(id self, SEL _cmd);
 
 // ============================================================
@@ -35,12 +36,11 @@ static void logMsg(NSString *msg) {
 }
 
 // ============================================================
-// 获取当前 keyWindow - 完全不用 deprecated API
+// 获取当前 keyWindow
 // ============================================================
 static UIWindow* getKeyWindow(void) {
     UIWindow *result = nil;
     if (@available(iOS 13.0, *)) {
-        // 先找前台 active scene
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
                 UIWindowScene *ws = (UIWindowScene *)scene;
@@ -55,7 +55,6 @@ static UIWindow* getKeyWindow(void) {
                 }
             }
         }
-        // 如果没找到，遍历所有 scene
         if (!result) {
             for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if ([scene isKindOfClass:[UIWindowScene class]]) {
@@ -139,11 +138,17 @@ static void createFloatButton(void) {
     [btn setTitle:@"VIP" forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     btn.titleLabel.font = [UIFont boldSystemFontOfSize:13.0];
+    btn.userInteractionEnabled = YES;  // 确保可交互
+
+    // 创建 target 并保存到全局变量保活
     FloatTarget *target = [[FloatTarget alloc] init];
+    gFloatTarget = target;  // 强引用，防止 ARC 释放
     [btn addTarget:target action:@selector(onTap:) forControlEvents:UIControlEventTouchUpInside];
+
     UIWindow *kw = getKeyWindow();
     if (kw) {
         [kw addSubview:btn];
+        [kw bringSubviewToFront:btn];  // 确保在最上层
         gFloatBtn = btn;
         logMsg(@"button created");
     } else {
