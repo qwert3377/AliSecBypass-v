@@ -1,7 +1,7 @@
 //
 //  BaiduPan_ExperienceTrigger.mm
 //  TrollStore inject plugin
-//  v5 - 自动预创建实例，无需进下载页
+//  v6 - 自动打开下载页创建实例，无需手动操作
 //
 
 #import <UIKit/UIKit.h>
@@ -12,6 +12,7 @@ static NSMutableArray *gInstances = nil;
 static UIButton *gFloatBtn = nil;
 static id gFloatTarget = nil;
 static id (*orig_init)(id self, SEL _cmd);
+static BOOL gAutoTriggerPending = NO;  // 实例创建后是否自动触发
 
 // ============================================================
 // 日志
@@ -75,6 +76,22 @@ static UIWindow* getKeyWindow(void) {
 }
 
 // ============================================================
+// 获取当前导航控制器
+// ============================================================
+static UINavigationController* getNavController(void) {
+    UIWindow *kw = getKeyWindow();
+    if (!kw) return nil;
+    UIViewController *root = kw.rootViewController;
+    if ([root isKindOfClass:[UINavigationController class]]) {
+        return (UINavigationController *)root;
+    }
+    if ([root respondsToSelector:@selector(navigationController)]) {
+        return [root navigationController];
+    }
+    return nil;
+}
+
+// ============================================================
 // Hook init - 保存实例到全局数组强引用保活
 // ============================================================
 static id hook_init(id self, SEL _cmd) {
@@ -84,6 +101,23 @@ static id hook_init(id self, SEL _cmd) {
     }
     [gInstances addObject:result];
     logMsg([NSString stringWithFormat:@"capture instance, count=%lu", (unsigned long)gInstances.count]);
+
+    // 如果正在等待自动触发，实例创建后立即触发
+    if (gAutoTriggerPending) {
+        gAutoTriggerPending = NO;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            logMsg(@"auto trigger from init hook");
+            SEL sel = NSSelectorFromString(@"edtc_flowEnhanceAction");
+            if ([result respondsToSelector:sel]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [result performSelector:sel];
+#pragma clang diagnostic pop
+                logMsg(@"auto trigger ok");
+            }
+        });
+    }
+
     return result;
 }
 
@@ -105,8 +139,44 @@ static void doTrigger(void) {
             logMsg(@"no selector");
         }
     } else {
-        logMsg(@"no instance");
+        logMsg(@"no instance, try auto open download page");
+        autoOpenDownloadPage();
     }
+}
+
+// ============================================================
+// 自动打开下载页
+// ============================================================
+static void autoOpenDownloadPage(void) {
+    logMsg(@"autoOpen: start");
+
+    UINavigationController *nav = getNavController();
+    if (!nav) {
+        logMsg(@"autoOpen: no nav controller");
+        return;
+    }
+
+    // 方式1: alloc/init 下载页 VC 并 push
+    Class downloadClass = NSClassFromString(@"ElyndorTVCode.EDTCAssetAcquireProcessor");
+    if (downloadClass) {
+        id vc = [[downloadClass alloc] init];
+        if (vc) {
+            gAutoTriggerPending = YES;  // 标记：实例创建后自动触发
+            [nav pushViewController:vc animated:NO];
+            logMsg(@"autoOpen: pushed download page");
+
+            // 3秒后自动 pop 回来
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (nav.viewControllers.count > 1) {
+                    [nav popViewControllerAnimated:NO];
+                    logMsg(@"autoOpen: popped back");
+                }
+            });
+            return;
+        }
+    }
+
+    logMsg(@"autoOpen: failed");
 }
 
 // ============================================================
@@ -157,39 +227,6 @@ static void createFloatButton(void) {
 }
 
 // ============================================================
-// 预创建实例 - 无需进下载页
-// ============================================================
-static void precreateInstance(void) {
-    Class ribbonClass = NSClassFromString(@"ElyndorTVCode.EDTCGuildFeatureRibbon");
-    if (!ribbonClass) {
-        logMsg(@"precreate: class not found");
-        return;
-    }
-
-    if (!gInstances) {
-        gInstances = [[NSMutableArray alloc] init];
-    }
-
-    // 方法1: 直接 alloc/init
-    id inst = [[ribbonClass alloc] init];
-    if (inst) {
-        [gInstances addObject:inst];
-        logMsg([NSString stringWithFormat:@"precreate: alloc/init ok, count=%lu", (unsigned long)gInstances.count]);
-
-        // 测试一下是否有效
-        SEL sel = NSSelectorFromString(@"edtc_flowEnhanceAction");
-        if ([inst respondsToSelector:sel]) {
-            logMsg(@"precreate: has selector");
-        } else {
-            logMsg(@"precreate: no selector");
-        }
-        return;
-    }
-
-    logMsg(@"precreate: alloc/init failed");
-}
-
-// ============================================================
 // 注入入口
 // ============================================================
 __attribute__((constructor))
@@ -212,9 +249,14 @@ static void initPlugin(void) {
             logMsg(@"class not found");
         }
 
-        // 预创建实例（无需进下载页）
-        precreateInstance();
-
         createFloatButton();
+
+        // 启动后自动打开下载页一次（静默创建实例）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!gInstances || gInstances.count == 0) {
+                logMsg(@"auto open download page at startup");
+                autoOpenDownloadPage();
+            }
+        });
     });
 }
