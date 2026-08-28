@@ -336,27 +336,30 @@ static void autoOpenDownloadPage(void) {
                 }
             }
 
-            // 确认拿到实例后，在下载页直接触发，然后再 pop
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // 确认拿到实例后，先 pop 回主页，等 5s 再触发第一次
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (gInstances && gInstances.count > 0) {
-                    logMsg([NSString stringWithFormat:@"autoOpen: confirmed instance count=%lu, trigger now", (unsigned long)gInstances.count]);
+                    logMsg([NSString stringWithFormat:@"autoOpen: confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
 
-                    // 在下载页直接触发
-                    doTrigger();
-
-                    // 触发后 pop 回主页
+                    // 先 pop 回主页
                     if (nav.viewControllers.count > 1) {
                         [nav popViewControllerAnimated:NO];
-                        logMsg(@"autoOpen: popped back after trigger");
+                        logMsg(@"autoOpen: popped back");
                     }
 
-                    // 启动 59s 定时器
-                    if (!gAutoTimer) {
-                        gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:61.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                            doTrigger();
-                        }];
-                        logMsg(@"auto timer started (61s)");
-                    }
+                    // 回主页后等 5s 触发第一次
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        logMsg(@"first trigger after 5s on home");
+                        doTrigger();
+
+                        // 启动 60s 定时器
+                        if (!gAutoTimer) {
+                            gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                                doTrigger();
+                            }];
+                            logMsg(@"auto timer started (60s)");
+                        }
+                    });
                 } else {
                     logMsg(@"autoOpen: no instance captured, retrying...");
                     if (ribbonClass) {
@@ -365,20 +368,23 @@ static void autoOpenDownloadPage(void) {
                             logMsg(@"autoOpen: retry created ribbon instance");
                         }
                     }
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         if (gInstances && gInstances.count > 0) {
-                            logMsg([NSString stringWithFormat:@"autoOpen: retry confirmed instance count=%lu, trigger now", (unsigned long)gInstances.count]);
-                            doTrigger();
+                            logMsg([NSString stringWithFormat:@"autoOpen: retry confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
                             if (nav.viewControllers.count > 1) {
                                 [nav popViewControllerAnimated:NO];
-                                logMsg(@"autoOpen: popped back after trigger (retry)");
+                                logMsg(@"autoOpen: popped back (retry)");
                             }
-                            if (!gAutoTimer) {
-                                gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:61.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                                    doTrigger();
-                                }];
-                                logMsg(@"auto timer started (61s)");
-                            }
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                logMsg(@"first trigger after 5s on home (retry)");
+                                doTrigger();
+                                if (!gAutoTimer) {
+                                    gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                                        doTrigger();
+                                    }];
+                                    logMsg(@"auto timer started (60s)");
+                                }
+                            });
                         } else {
                             logMsg(@"autoOpen: still no instance, giving up");
                             if (nav.viewControllers.count > 1) {
