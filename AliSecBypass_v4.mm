@@ -24,7 +24,6 @@ static NSString *const kLogFile = @"trigger.log";
 static NSMutableArray *gInstances = nil;
 static id (*orig_init)(id self, SEL _cmd);
 static NSTimer *gAutoTimer = nil;
-static id gTimerTarget = nil;
 
 // ============================================================
 // Forward Declarations
@@ -337,28 +336,63 @@ static void autoOpenDownloadPage(void) {
                 }
             }
 
-            // 马上 pop 回主页
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (nav.viewControllers.count > 1) {
-                    [nav popViewControllerAnimated:NO];
-                    logMsg(@"autoOpen: popped back");
-                }
+            // 确认拿到实例后才 pop 回主页
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (gInstances && gInstances.count > 0) {
+                    logMsg([NSString stringWithFormat:@"autoOpen: confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
 
-                // 回到主页后触发一次
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    logMsg(@"first trigger after pop");
-                    doTrigger();
-
-                    // 启动 59s 定时器
-                    if (!gAutoTimer) {
-                        gTimerTarget = [[NSObject alloc] init];
-                        // 使用 block-based timer 避免 target 方法问题
-                        gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:59.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                            doTrigger();
-                        }];
-                        logMsg(@"auto timer started (59s)");
+                    if (nav.viewControllers.count > 1) {
+                        [nav popViewControllerAnimated:NO];
+                        logMsg(@"autoOpen: popped back");
                     }
-                });
+
+                    // 回到主页后触发一次
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        logMsg(@"first trigger after pop");
+                        doTrigger();
+
+                        // 启动 59s 定时器
+                        if (!gAutoTimer) {
+                            gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:59.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                                doTrigger();
+                            }];
+                            logMsg(@"auto timer started (59s)");
+                        }
+                    });
+                } else {
+                    logMsg(@"autoOpen: no instance captured, retrying...");
+                    // 重试一次
+                    if (ribbonClass) {
+                        id ribbon = [[ribbonClass alloc] init];
+                        if (ribbon) {
+                            logMsg(@"autoOpen: retry created ribbon instance");
+                        }
+                    }
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (gInstances && gInstances.count > 0) {
+                            logMsg([NSString stringWithFormat:@"autoOpen: retry confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
+                            if (nav.viewControllers.count > 1) {
+                                [nav popViewControllerAnimated:NO];
+                                logMsg(@"autoOpen: popped back (retry)");
+                            }
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                logMsg(@"first trigger after pop (retry)");
+                                doTrigger();
+                                if (!gAutoTimer) {
+                                    gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:59.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                                        doTrigger();
+                                    }];
+                                    logMsg(@"auto timer started (59s)");
+                                }
+                            });
+                        } else {
+                            logMsg(@"autoOpen: still no instance, giving up");
+                            if (nav.viewControllers.count > 1) {
+                                [nav popViewControllerAnimated:NO];
+                            }
+                        }
+                    });
+                }
             });
             return;
         }
