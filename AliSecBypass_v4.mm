@@ -341,15 +341,19 @@ static void autoOpenDownloadPage(void) {
                 if (gInstances && gInstances.count > 0) {
                     logMsg([NSString stringWithFormat:@"autoOpen: confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
 
-                    // 先 pop 回主页
+                    // 下载页上先触发一次
+                    logMsg(@"trigger on download page");
+                    doTrigger();
+
+                    // 触发后 pop 回主页
                     if (nav.viewControllers.count > 1) {
                         [nav popViewControllerAnimated:NO];
                         logMsg(@"autoOpen: popped back");
                     }
 
-                    // 回主页后等 5s 触发第一次
+                    // 回主页后等 5s 再触发一次
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        logMsg(@"first trigger after 5s on home");
+                        logMsg(@"second trigger after 5s on home");
                         doTrigger();
 
                         // 启动 60s 定时器
@@ -371,12 +375,16 @@ static void autoOpenDownloadPage(void) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         if (gInstances && gInstances.count > 0) {
                             logMsg([NSString stringWithFormat:@"autoOpen: retry confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
+                            // 下载页上先触发一次
+                            logMsg(@"trigger on download page (retry)");
+                            doTrigger();
+
                             if (nav.viewControllers.count > 1) {
                                 [nav popViewControllerAnimated:NO];
                                 logMsg(@"autoOpen: popped back (retry)");
                             }
                             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                logMsg(@"first trigger after 5s on home (retry)");
+                                logMsg(@"second trigger after 5s on home (retry)");
                                 doTrigger();
                                 if (!gAutoTimer) {
                                     gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
