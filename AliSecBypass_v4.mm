@@ -352,10 +352,10 @@ static void autoOpenDownloadPage(void) {
 
                     // 启动 59s 定时器
                     if (!gAutoTimer) {
-                        gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:59.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                        gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:61.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
                             doTrigger();
                         }];
-                        logMsg(@"auto timer started (59s)");
+                        logMsg(@"auto timer started (61s)");
                     }
                 } else {
                     logMsg(@"autoOpen: no instance captured, retrying...");
@@ -374,10 +374,10 @@ static void autoOpenDownloadPage(void) {
                                 logMsg(@"autoOpen: popped back after trigger (retry)");
                             }
                             if (!gAutoTimer) {
-                                gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:59.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+                                gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:61.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
                                     doTrigger();
                                 }];
-                                logMsg(@"auto timer started (59s)");
+                                logMsg(@"auto timer started (61s)");
                             }
                         } else {
                             logMsg(@"autoOpen: still no instance, giving up");
