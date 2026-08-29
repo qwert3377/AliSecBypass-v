@@ -1,490 +1,245 @@
 //
-//  BaiduPan_VIP_ExperienceTrigger.mm
-//  TrollStore inject plugin
-//  v8 - VIP Core + Experience Trigger merged
-//  No float button | Auto push download page | Auto trigger every 59s
+//  KuwoVIPCrack.mm
+//  酷我音乐VIP破解 - TrollStore注入版
+//  用法: 编译为dylib注入到com.yeelion.kwplayer
 //
 
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ============================================================
-// VIP Core - Static Variables
-// ============================================================
-static NSArray *kAuthKeys = nil;
-static NSArray *kExpireKeys = nil;
-static NSArray *kLevelKeys = nil;
-static NSArray *kUDKeys = nil;
+#pragma mark - 配置
 
-// ============================================================
-// Experience Trigger - Static Variables
-// ============================================================
-static NSString *const kLogFile = @"trigger.log";
-static NSMutableArray *gInstances = nil;
-static id (*orig_init)(id self, SEL _cmd);
-static NSTimer *gAutoTimer = nil;
+static NSString * const kFakeVIPJSON = @"{\"ctime\":9999999999999,\"data\":{\"luxuryIcon\":\"https://img1.kuwo.cn/v2/20220901/tech_common/de688c240ccbc48a30d0bb2902ee4a51.png\",\"uid\":\"503481971\",\"svipAutoPayUser\":\"1\",\"chezaiIcon\":\"https://img1.kuwo.cn/v2/20220901/tech_common/873a93c717c7f3da7996eaa2fdc600fd.png\",\"vipSpeakerExpire\":\"9999999999999\",\"vipOverSeasExpire\":\"9999999999999\",\"isYearUser\":\"1\",\"isNewUser\":\"0\",\"luxVipDays\":\"9999\",\"cheZaiDays\":\"9999\",\"svipIcon\":\"https://img1.kuwo.cn/v2/20220901/tech_common/ef034da7a993e80cc3fbde1082a462c0.png\",\"openBtnText\":\"已开通\",\"iconJumpUrl\":\"https://h5app.kuwo.cn/pay/vip2/vipcenter.html\",\"chezaiExpire\":\"9999999999999\",\"vipTag\":\"SVIP\",\"iconConf\":\"{\\\"jumpType\\\":1,\\\"iconUrl\\\":\\\"https://h5app.kuwo.cn/pay/vip2/vipcenter.html\\\"}\",\"biedAlbum\":\"1\",\"vipmDays\":\"9999\",\"userVipType\":\"3\",\"linQiPrice\":\"\",\"vipExpire\":\"9999999999999\",\"vipmAutoPayUser\":\"1\",\"growthValue\":\"99999\",\"vipWatch1Expire\":\"9999999999999\",\"vipmIcon\":\"https://img1.kuwo.cn/v2/20220901/tech_common/c2f83eb842be0cbc04cf3652e32b7fd5.png\",\"vipAdIcon\":\"\",\"lwPrice\":\"2\",\"experienceExpire\":\"9999999999999\",\"linQiType\":\"1\",\"svipExpire\":\"9999999999999\",\"vipSpeakerIcon\":\"https://h5s.kuwo.cn/upload/pictures/20250814/3139462f1fc5f70670ce7abeb1f8360f.png\",\"biedSong\":\"1\",\"userType\":\"3\",\"vipmExpire\":\"9999999999999\",\"vipAdAutoPayUser\":\"1\",\"cheZaiAutoPayUser\":\"1\",\"luxAutoPayUser\":\"1\",\"time\":\"9999999999999\",\"vipAdExpire\":\"9999999999999\",\"vipIcon\":\"https://h5s.kuwo.cn/upload/pictures/20250306/d4d17ba5489034431f291075ef189c63.png\",\"svipDays\":\"9999\",\"vipLuxuryExpire\":\"9999999999999\"},\"meta\":{\"desc\":\"成功\",\"code\":200}}";
 
-// ============================================================
-// Forward Declarations
-// ============================================================
-static NSDictionary *patchDictionary(NSDictionary *dict);
-static void doTrigger(void);
+#pragma mark - 防递归保护
 
-// ============================================================
-// 1. Log
-// ============================================================
-static void logMsg(NSString *msg) {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *doc = paths[0];
-    NSString *path = [doc stringByAppendingPathComponent:kLogFile];
-    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-    [fmt setDateFormat:@"HH:mm:ss"];
-    NSString *ts = [fmt stringFromDate:[NSDate date]];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!fh) {
-        [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    }
-    if (fh) {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    }
+static __thread BOOL gInHook = NO;
+
+#define HOOK_GUARD_BEGIN \
+    if (gInHook) return; \
+    gInHook = YES;
+
+#define HOOK_GUARD_END \
+    gInHook = NO;
+
+#pragma mark - 工具函数
+
+static BOOL isVIPDefaultsKey(NSString *key) {
+    if (!key) return NO;
+    return [key rangeOfString:@"VIP_INFO"].location != NSNotFound ||
+           [key rangeOfString:@"vip_info"].location != NSNotFound;
 }
 
-// ============================================================
-// 2. Get Key Window
-// ============================================================
-static UIWindow* getKeyWindow(void) {
-    UIWindow *result = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                if (ws.activationState == UISceneActivationStateForegroundActive) {
-                    for (UIWindow *w in ws.windows) {
-                        if (w.isKeyWindow) { result = w; break; }
-                    }
-                    if (result) break;
-                }
-            }
-        }
-        if (!result) {
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    UIWindowScene *ws = (UIWindowScene *)scene;
-                    for (UIWindow *w in ws.windows) {
-                        if (w.isKeyWindow) { result = w; break; }
-                    }
-                    if (result) break;
-                }
-            }
-        }
+static BOOL isVIPURL(NSString *url) {
+    if (!url) return NO;
+    NSString *low = [url lowercaseString];
+    return [low rangeOfString:@"isvip=0"].location != NSNotFound;
+}
+
+static id fakeVIPDict(void) {
+    NSData *data = [kFakeVIPJSON dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) return nil;
+    NSError *err = nil;
+    id dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
+    return dict;
+}
+
+#pragma mark - NSUserDefaults Hook
+
+typedef id (*orig_objectForKey_t)(id self, SEL _cmd, id key);
+static orig_objectForKey_t orig_NSUserDefaults_objectForKey = NULL;
+
+static id hook_NSUserDefaults_objectForKey(id self, SEL _cmd, id key) {
+    HOOK_GUARD_BEGIN
+    id result = orig_NSUserDefaults_objectForKey(self, _cmd, key);
+    if (isVIPDefaultsKey(key)) {
+        NSLog(@"[KuwoVIP] objectForKey:%@ -> fake", key);
+        HOOK_GUARD_END
+        return [kFakeVIPJSON copy];
     }
+    HOOK_GUARD_END
     return result;
 }
 
-// ============================================================
-// 3. Get Navigation Controller
-// ============================================================
-static UINavigationController* getNavController(void) {
-    UIWindow *kw = getKeyWindow();
-    if (!kw) return nil;
-    UIViewController *root = kw.rootViewController;
-    if ([root isKindOfClass:[UINavigationController class]]) {
-        return (UINavigationController *)root;
-    }
-    if ([root respondsToSelector:@selector(navigationController)]) {
-        return [root navigationController];
-    }
-    return nil;
-}
+typedef id (*orig_stringForKey_t)(id self, SEL _cmd, NSString *key);
+static orig_stringForKey_t orig_NSUserDefaults_stringForKey = NULL;
 
-// ============================================================
-// 4. VIP - Key Match
-// ============================================================
-static BOOL keyMatch(NSString *key, NSArray *list) {
-    NSString *kl = [key lowercaseString];
-    for (NSString *v in list) {
-        NSString *vl = [v lowercaseString];
-        if ([kl isEqualToString:vl] || [kl containsString:vl]) return YES;
+static id hook_NSUserDefaults_stringForKey(id self, SEL _cmd, NSString *key) {
+    HOOK_GUARD_BEGIN
+    id result = orig_NSUserDefaults_stringForKey(self, _cmd, key);
+    if (isVIPDefaultsKey(key)) {
+        NSLog(@"[KuwoVIP] stringForKey:%@ -> fake", key);
+        HOOK_GUARD_END
+        return [kFakeVIPJSON copy];
     }
-    return NO;
-}
-
-// ============================================================
-// 5. VIP - Patch Recursively
-// ============================================================
-static id patchRecursively(id obj) {
-    if (!obj) return nil;
-    NSDictionary *patched = patchDictionary(obj);
-    if (patched) return patched;
-    if ([obj isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *d = (NSDictionary *)obj;
-        NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:d];
-        BOOL modified = NO;
-        for (NSString *key in d.allKeys) {
-            id v = d[key];
-            id nv = patchRecursively(v);
-            if (nv) { m[key] = nv; modified = YES; }
-        }
-        return modified ? m : nil;
-    } else if ([obj isKindOfClass:[NSArray class]]) {
-        NSArray *arr = (NSArray *)obj;
-        NSMutableArray *m = [NSMutableArray arrayWithArray:arr];
-        BOOL modified = NO;
-        for (NSUInteger i = 0; i < m.count; i++) {
-            id np = patchRecursively(m[i]);
-            if (np) { m[i] = np; modified = YES; }
-        }
-        return modified ? m : nil;
-    }
-    return nil;
-}
-
-// ============================================================
-// 6. VIP - Patch Dictionary
-// ============================================================
-static NSDictionary *patchDictionary(NSDictionary *dict) {
-    if (!dict || ![dict isKindOfClass:[NSDictionary class]]) return nil;
-    BOOL need = NO;
-    for (NSString *key in dict.allKeys) {
-        NSString *kl = [key lowercaseString];
-        id v = dict[key];
-        if (!v) continue;
-        if ((keyMatch(kl, kAuthKeys) && [v isKindOfClass:[NSNumber class]] && [v intValue] == 0) ||
-            (keyMatch(kl, kExpireKeys) && ([v isKindOfClass:[NSString class]] || [v isKindOfClass:[NSNumber class]])) ||
-            (keyMatch(kl, kLevelKeys) && [v isKindOfClass:[NSNumber class]] && [v intValue] >= 0 && [v intValue] < 8))
-            need = YES;
-    }
-    if (!need) return nil;
-    NSMutableDictionary *m = [NSMutableDictionary dictionaryWithDictionary:dict];
-    for (NSString *key in dict.allKeys) {
-        NSString *kl = [key lowercaseString];
-        id v = dict[key];
-        if (!v) continue;
-        if (keyMatch(kl, kAuthKeys)) {
-            if ([v isKindOfClass:[NSNumber class]] && [v intValue] == 0) {
-                m[key] = @1;
-            } else if ([v isKindOfClass:[NSString class]] && [v isEqualToString:@"0"]) {
-                m[key] = @"1";
-            }
-        } else if (keyMatch(kl, kExpireKeys)) {
-            if ([v isKindOfClass:[NSString class]]) {
-                m[key] = @"2099-12-31";
-            } else if ([v isKindOfClass:[NSNumber class]]) {
-                m[key] = @(4102444799000LL);
-            }
-        } else if (keyMatch(kl, kLevelKeys)) {
-            if ([v isKindOfClass:[NSNumber class]]) {
-                int iv = [v intValue];
-                if (iv >= 0 && iv < 8) m[key] = @8;
-            } else if ([v isKindOfClass:[NSString class]]) {
-                NSString *s = (NSString *)v;
-                if ([@[@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:s]) {
-                    m[key] = @"8";
-                }
-            }
-        }
-    }
-    return m;
-}
-
-// ============================================================
-// 7. VIP Hook - NSJSONSerialization
-// ============================================================
-static id (*orig_JSONObjectWithData)(Class cls, SEL sel, NSData *data, NSJSONReadingOptions opt, NSError **error);
-static id hook_JSONObjectWithData(Class cls, SEL sel, NSData *data, NSJSONReadingOptions opt, NSError **error) {
-    id result = orig_JSONObjectWithData(cls, sel, data, opt, error);
-    if (!result || ![result isKindOfClass:[NSDictionary class]]) return result;
-    id patched = patchRecursively(result);
-    return patched ? patched : result;
-}
-
-// ============================================================
-// 8. VIP Hook - NSUserDefaults
-// ============================================================
-static BOOL (*orig_boolForKey)(NSUserDefaults *self, SEL sel, NSString *key);
-static BOOL hook_boolForKey(NSUserDefaults *self, SEL sel, NSString *key) {
-    for (NSString *k in kUDKeys) {
-        if ([k isEqualToString:key]) return YES;
-    }
-    return orig_boolForKey(self, sel, key);
-}
-
-static NSInteger (*orig_integerForKey)(NSUserDefaults *self, SEL sel, NSString *key);
-static NSInteger hook_integerForKey(NSUserDefaults *self, SEL sel, NSString *key) {
-    NSInteger result = orig_integerForKey(self, sel, key);
-    BOOL hit = NO;
-    for (NSString *k in kUDKeys) {
-        if ([k isEqualToString:key]) { hit = YES; break; }
-    }
-    if (!hit && keyMatch(key, kLevelKeys)) hit = YES;
-    if (hit && result >= 0 && result < 8) return 8;
+    HOOK_GUARD_END
     return result;
 }
 
-static NSString *(*orig_stringForKey)(NSUserDefaults *self, SEL sel, NSString *key);
-static NSString *hook_stringForKey(NSUserDefaults *self, SEL sel, NSString *key) {
-    NSString *result = orig_stringForKey(self, sel, key);
-    if (!result) return result;
-    BOOL hit = NO;
-    for (NSString *k in kUDKeys) {
-        if ([k isEqualToString:key]) { hit = YES; break; }
+typedef id (*orig_dictionaryForKey_t)(id self, SEL _cmd, NSString *key);
+static orig_dictionaryForKey_t orig_NSUserDefaults_dictionaryForKey = NULL;
+
+static id hook_NSUserDefaults_dictionaryForKey(id self, SEL _cmd, NSString *key) {
+    HOOK_GUARD_BEGIN
+    id result = orig_NSUserDefaults_dictionaryForKey(self, _cmd, key);
+    if (isVIPDefaultsKey(key)) {
+        NSLog(@"[KuwoVIP] dictionaryForKey:%@ -> fake", key);
+        id fake = fakeVIPDict();
+        HOOK_GUARD_END
+        return fake ?: result;
     }
-    if (!hit && keyMatch(key, kLevelKeys)) hit = YES;
-    if (hit && [@[@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:result]) return @"8";
+    HOOK_GUARD_END
     return result;
 }
 
-static id (*orig_objectForKey)(NSUserDefaults *self, SEL sel, NSString *key);
-static id hook_objectForKey(NSUserDefaults *self, SEL sel, NSString *key) {
-    id result = orig_objectForKey(self, sel, key);
-    if (!result) return result;
-    BOOL hit = NO;
-    for (NSString *k in kUDKeys) {
-        if ([k isEqualToString:key]) { hit = YES; break; }
-    }
-    if (!hit && keyMatch(key, kLevelKeys)) hit = YES;
-    if (!hit) return result;
-    if ([result isKindOfClass:[NSNumber class]]) {
-        int iv = [(NSNumber *)result intValue];
-        if (iv >= 0 && iv < 8) return @8;
-    } else if ([result isKindOfClass:[NSString class]]) {
-        NSString *s = (NSString *)result;
-        if ([@[@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7"] containsObject:s]) return @"8";
-    }
-    return result;
-}
+typedef void (*orig_setObject_t)(id self, SEL _cmd, id obj, id key);
+static orig_setObject_t orig_NSUserDefaults_setObject = NULL;
 
-// ============================================================
-// 9. VIP Hook - UILabel
-// ============================================================
-static void (*orig_setText)(UILabel *self, SEL sel, NSString *text);
-static void hook_setText(UILabel *self, SEL sel, NSString *text) {
-    if (text) {
-        if ([text containsString:@"立即开通"] || [text containsString:@"尚未开通"] ||
-            [text containsString:@"未开通"] || [text containsString:@"非会员"]) {
-            text = @"VIP会员已开通";
-        }
-    }
-    orig_setText(self, sel, text);
-}
-
-// ============================================================
-// 10. Experience Trigger - Hook init
-// ============================================================
-static id hook_init(id self, SEL _cmd) {
-    id result = orig_init(self, _cmd);
-    if (!gInstances) {
-        gInstances = [[NSMutableArray alloc] init];
-    }
-    [gInstances addObject:result];
-    logMsg([NSString stringWithFormat:@"capture instance, count=%lu", (unsigned long)gInstances.count]);
-    return result;
-}
-
-// ============================================================
-// 11. Experience Trigger - Do Trigger
-// ============================================================
-static void doTrigger(void) {
-    id inst = gInstances.lastObject;
-    if (inst) {
-        logMsg(@"trigger start");
-        SEL sel = NSSelectorFromString(@"edtc_flowEnhanceAction");
-        if ([inst respondsToSelector:sel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [inst performSelector:sel];
-#pragma clang diagnostic pop
-            logMsg(@"trigger ok");
-        } else {
-            logMsg(@"no selector");
-        }
-    } else {
-        logMsg(@"no instance");
-    }
-}
-
-// ============================================================
-// 12. Experience Trigger - Auto Open Download Page
-// ============================================================
-static void autoOpenDownloadPage(void) {
-    logMsg(@"autoOpen: start");
-
-    UINavigationController *nav = getNavController();
-    if (!nav) {
-        logMsg(@"autoOpen: no nav controller");
+static void hook_NSUserDefaults_setObject(id self, SEL _cmd, id obj, id key) {
+    HOOK_GUARD_BEGIN
+    if (isVIPDefaultsKey(key)) {
+        NSLog(@"[KuwoVIP] BLOCK setObject:%@", key);
+        HOOK_GUARD_END
         return;
     }
-
-    Class downloadClass = NSClassFromString(@"ElyndorTVCode.EDTCAssetAcquireProcessor");
-    if (downloadClass) {
-        id vc = [[downloadClass alloc] init];
-        if (vc) {
-            [nav pushViewController:vc animated:NO];
-            logMsg(@"autoOpen: pushed download page");
-
-            // 创建 ribbon 实例，触发 hook_init 捕获
-            Class ribbonClass = NSClassFromString(@"ElyndorTVCode.EDTCGuildFeatureRibbon");
-            if (ribbonClass) {
-                id ribbon = [[ribbonClass alloc] init];
-                if (ribbon) {
-                    logMsg(@"autoOpen: created ribbon instance");
-                }
-            }
-
-            // 确认拿到实例后，先 pop 回主页，等 5s 再触发第一次
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (gInstances && gInstances.count > 0) {
-                    logMsg([NSString stringWithFormat:@"autoOpen: confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
-
-                    // 下载页上先触发一次
-                    logMsg(@"trigger on download page");
-                    doTrigger();
-
-                    // 触发后 pop 回主页
-                    if (nav.viewControllers.count > 1) {
-                        [nav popViewControllerAnimated:NO];
-                        logMsg(@"autoOpen: popped back");
-                    }
-
-                    // 回主页后等 5s 再触发一次
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        logMsg(@"second trigger after 5s on home");
-                        doTrigger();
-
-                        // 启动 60s 定时器
-                        if (!gAutoTimer) {
-                            gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                                doTrigger();
-                            }];
-                            logMsg(@"auto timer started (60s)");
-                        }
-                    });
-                } else {
-                    logMsg(@"autoOpen: no instance captured, retrying...");
-                    if (ribbonClass) {
-                        id ribbon = [[ribbonClass alloc] init];
-                        if (ribbon) {
-                            logMsg(@"autoOpen: retry created ribbon instance");
-                        }
-                    }
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        if (gInstances && gInstances.count > 0) {
-                            logMsg([NSString stringWithFormat:@"autoOpen: retry confirmed instance count=%lu, popping back", (unsigned long)gInstances.count]);
-                            // 下载页上先触发一次
-                            logMsg(@"trigger on download page (retry)");
-                            doTrigger();
-
-                            if (nav.viewControllers.count > 1) {
-                                [nav popViewControllerAnimated:NO];
-                                logMsg(@"autoOpen: popped back (retry)");
-                            }
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                logMsg(@"second trigger after 5s on home (retry)");
-                                doTrigger();
-                                if (!gAutoTimer) {
-                                    gAutoTimer = [NSTimer scheduledTimerWithTimeInterval:60.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-                                        doTrigger();
-                                    }];
-                                    logMsg(@"auto timer started (60s)");
-                                }
-                            });
-                        } else {
-                            logMsg(@"autoOpen: still no instance, giving up");
-                            if (nav.viewControllers.count > 1) {
-                                [nav popViewControllerAnimated:NO];
-                            }
-                        }
-                    });
-                }
-            });
-            return;
-        }
-    }
-
-    logMsg(@"autoOpen: failed");
+    orig_NSUserDefaults_setObject(self, _cmd, obj, key);
+    HOOK_GUARD_END
 }
 
-// ============================================================
-// 13. Constructor - Entry Point
-// ============================================================
-__attribute__((constructor))
-static void initPlugin(void) {
-    // ===== VIP Hooks (immediate) =====
-    kAuthKeys = @[@"authcode", @"auth_code", @"status"];
-    kExpireKeys = @[@"expire", @"endtime", @"end_time", @"is_expired"];
-    kLevelKeys = @[
-        @"participantvoteterm", @"edtcactivedirectacquirecentral",
-        @"k9mnpq7xzv2r8w4t", @"kgdtdeviceav1forceresetdowngradeversionkey",
-        @"vip_level", @"viplevel", @"member_level", @"user_level", @"level", @"grade",
-        @"vipLevel", @"memberLevel", @"userLevel", @"vip_grade", @"vipGrade",
-        @"increaseSeekSomebody", @"duringBehaviorDirection", @"radioExecutiveEach",
-        @"runMilitaryResponse", @"chancePublicAll", @"serveFaceWay",
-        @"todayRealityLearn", @"glassHundredPeace", @"yardOptionTask",
-        @"placePassUsually", @"sortLearnMore", @"partnerCourtYou",
-        @"answerHoldGrowth", @"presentIdeaNot"
-    ];
-    kUDKeys = @[@"kvipStatusStorageKey", @"EDTCActiveDirectAcquireCentral", @"yituanlaunma"];
+#pragma mark - NSJSONSerialization Hook
 
-    Method m;
-    m = class_getClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:));
-    if (m) {
-        orig_JSONObjectWithData = (id (*)(Class,SEL,NSData*,NSJSONReadingOptions,NSError**))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_JSONObjectWithData);
-    }
+typedef id (*orig_JSONObject_t)(Class cls, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err);
+static orig_JSONObject_t orig_NSJSONSerialization_JSONObject = NULL;
 
-    Class ud = [NSUserDefaults class];
-    m = class_getInstanceMethod(ud, @selector(boolForKey:));
-    if (m) {
-        orig_boolForKey = (BOOL (*)(NSUserDefaults*,SEL,NSString*))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_boolForKey);
-    }
-    m = class_getInstanceMethod(ud, @selector(integerForKey:));
-    if (m) {
-        orig_integerForKey = (NSInteger (*)(NSUserDefaults*,SEL,NSString*))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_integerForKey);
-    }
-    m = class_getInstanceMethod(ud, @selector(stringForKey:));
-    if (m) {
-        orig_stringForKey = (NSString *(*)(NSUserDefaults*,SEL,NSString*))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_stringForKey);
-    }
-    m = class_getInstanceMethod(ud, @selector(objectForKey:));
-    if (m) {
-        orig_objectForKey = (id (*)(NSUserDefaults*,SEL,NSString*))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_objectForKey);
-    }
+static id hook_NSJSONSerialization_JSONObject(Class cls, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **err) {
+    id result = orig_NSJSONSerialization_JSONObject(cls, _cmd, data, opt, err);
+    if (![result isKindOfClass:[NSDictionary class]]) return result;
 
-    Class lbl = [UILabel class];
-    m = class_getInstanceMethod(lbl, @selector(setText:));
-    if (m) {
-        orig_setText = (void (*)(UILabel*,SEL,NSString*))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hook_setText);
-    }
+    NSDictionary *dict = (NSDictionary *)result;
+    id expire = dict[@"expireTime"];
+    id level = dict[@"level"];
+    id dataObj = dict[@"data"];
 
-    // ===== Experience Trigger (delayed) =====
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        logMsg(@"plugin loaded");
+    if (!expire && !level && !dataObj) return result;
+    if (dataObj && ![dataObj isKindOfClass:[NSDictionary class]]) return result;
 
-        Class ribbonClass = NSClassFromString(@"ElyndorTVCode.EDTCGuildFeatureRibbon");
-        if (ribbonClass) {
-            IMP origImp = class_replaceMethod(ribbonClass, @selector(init), (IMP)hook_init, "@@:");
-            if (origImp) {
-                orig_init = (id (*)(id, SEL))origImp;
-                logMsg(@"init hooked (replaced)");
-            } else {
-                Class superClass = class_getSuperclass(ribbonClass);
-                orig_init = (id (*)(id, SEL))class_getMethodImplementation(superClass, @selector(init));
-                logMsg(@"init hooked (added)");
-            }
+    NSDictionary *dataDict = dataObj ? (NSDictionary *)dataObj : dict;
+    id vipExpire = dataDict[@"vipExpire"];
+    id svipExpire = dataDict[@"svipExpire"];
+    if (!vipExpire && !svipExpire && !expire && !level) return result;
+
+    NSLog(@"[KuwoVIP] NSJSONSerialization VIP JSON patched");
+
+    NSMutableDictionary *newDict = [NSMutableDictionary dictionaryWithDictionary:dict];
+    NSMutableDictionary *newData = dataObj ? [NSMutableDictionary dictionaryWithDictionary:dataDict] : newDict;
+
+    NSArray *numKeys = @[@"expireTime", @"vipExpire", @"svipExpire", @"vipmExpire", @"level",
+                         @"curVipValue", @"starvipLevel", @"starvipType", @"cloakingStatus",
+                         @"status", @"isSign", @"isGift", @"isLook", @"isYearUser",
+                         @"isNewUser", @"userType", @"biedAlbum", @"biedSong"];
+
+    for (NSString *k in numKeys) {
+        id val = newData[k];
+        if (!val) continue;
+        int num = [val intValue];
+        int fake = 0;
+        if ([k isEqualToString:@"expireTime"] || [k isEqualToString:@"vipExpire"] ||
+            [k isEqualToString:@"svipExpire"] || [k isEqualToString:@"vipmExpire"]) {
+            if (num < 9999999999) fake = 9999999999;
+        } else if ([k isEqualToString:@"level"] || [k isEqualToString:@"curVipValue"] ||
+                   [k isEqualToString:@"starvipLevel"]) {
+            if (num < 10) fake = 10;
+        } else if ([k isEqualToString:@"starvipType"]) {
+            if (num < 3) fake = 3;
+        } else if ([k isEqualToString:@"userType"]) {
+            if (num == 0 || num == 2) fake = 3;
         } else {
-            logMsg(@"ribbon class not found");
+            if (num == 0) fake = 1;
         }
+        if (fake > 0) {
+            newData[k] = @(fake);
+            NSLog(@"[KuwoVIP] %@: %d -> %d", k, num, fake);
+        }
+    }
 
-        autoOpenDownloadPage();
-    });
+    NSString *tag = newData[@"vipTag"];
+    if ([tag isKindOfClass:[NSString class]] && [tag rangeOfString:@"VIP"].location != NSNotFound
+        && [tag rangeOfString:@"SVIP"].location == NSNotFound) {
+        newData[@"vipTag"] = @"SVIP";
+    }
+
+    if (dataObj) {
+        newDict[@"data"] = newData;
+    }
+
+    return newDict;
+}
+
+#pragma mark - NSURLSession Hook
+
+typedef id (*orig_dataTask_t)(id self, SEL _cmd, NSURLRequest *req);
+static orig_dataTask_t orig_NSURLSession_dataTask = NULL;
+
+static id hook_NSURLSession_dataTask(id self, SEL _cmd, NSURLRequest *req) {
+    NSURL *url = req.URL;
+    NSString *urlStr = url.absoluteString;
+    if (isVIPURL(urlStr)) {
+        NSString *newUrl = [urlStr stringByReplacingOccurrencesOfString:@"isVip=0" withString:@"isVip=1"];
+        NSMutableURLRequest *newReq = [req mutableCopy];
+        newReq.URL = [NSURL URLWithString:newUrl];
+        NSLog(@"[KuwoVIP] NET: isVip=0 -> 1");
+        return orig_NSURLSession_dataTask(self, _cmd, newReq);
+    }
+    return orig_NSURLSession_dataTask(self, _cmd, req);
+}
+
+#pragma mark - 初始化
+
+static void hookClassMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+    Method m = class_getClassMethod(cls, sel);
+    if (!m) return;
+    *origImp = method_setImplementation(m, newImp);
+}
+
+static void hookInstanceMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    *origImp = method_setImplementation(m, newImp);
+}
+
+__attribute__((constructor))
+static void kuwo_vip_init(void) {
+    NSLog(@"[KuwoVIP] === VIP破解加载 ===");
+
+    // 1. 预注入NSUserDefaults
+    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
+    NSDictionary *all = [defs dictionaryRepresentation];
+    for (NSString *key in all.allKeys) {
+        if (isVIPDefaultsKey(key)) {
+            NSLog(@"[KuwoVIP] INJECT: %@", key);
+            [defs setObject:kFakeVIPJSON forKey:key];
+        }
+    }
+    [defs synchronize];
+    NSLog(@"[KuwoVIP] NSUserDefaults已预注入");
+
+    // 2. Hook NSUserDefaults
+    Class udCls = [NSUserDefaults class];
+    hookInstanceMethod(udCls, @selector(objectForKey:), (IMP)hook_NSUserDefaults_objectForKey, (IMP *)&orig_NSUserDefaults_objectForKey);
+    hookInstanceMethod(udCls, @selector(stringForKey:), (IMP)hook_NSUserDefaults_stringForKey, (IMP *)&orig_NSUserDefaults_stringForKey);
+    hookInstanceMethod(udCls, @selector(dictionaryForKey:), (IMP)hook_NSUserDefaults_dictionaryForKey, (IMP *)&orig_NSUserDefaults_dictionaryForKey);
+    hookInstanceMethod(udCls, @selector(setObject:forKey:), (IMP)hook_NSUserDefaults_setObject, (IMP *)&orig_NSUserDefaults_setObject);
+    NSLog(@"[KuwoVIP] NSUserDefaults Hook完成");
+
+    // 3. Hook NSJSONSerialization
+    hookClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:),
+                    (IMP)hook_NSJSONSerialization_JSONObject, (IMP *)&orig_NSJSONSerialization_JSONObject);
+    NSLog(@"[KuwoVIP] NSJSONSerialization Hook完成");
+
+    // 4. Hook NSURLSession
+    hookInstanceMethod([NSURLSession class], @selector(dataTaskWithRequest:),
+                       (IMP)hook_NSURLSession_dataTask, (IMP *)&orig_NSURLSession_dataTask);
+    NSLog(@"[KuwoVIP] NSURLSession Hook完成");
+
+    NSLog(@"[KuwoVIP] === 加载完成 ===");
 }
