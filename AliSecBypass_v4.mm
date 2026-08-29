@@ -16,11 +16,9 @@ static dispatch_queue_t gLogQueue = nil;
 static void initLogSystem(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        // 获取App Documents目录
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *docDir = paths.firstObject;
         if (!docDir) {
-            // fallback: 使用Library/Caches
             paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
             docDir = paths.firstObject;
         }
@@ -30,7 +28,6 @@ static void initLogSystem(void) {
 
         gLogPath = [docDir stringByAppendingPathComponent:@"kuwo_vip_crack.log"];
 
-        // 创建或清空日志文件
         NSFileManager *fm = [NSFileManager defaultManager];
         if (![fm fileExistsAtPath:gLogPath]) {
             [@"=== KuwoVIP Crack Log ===\n" writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -62,7 +59,6 @@ static void vipLog(NSString *fmt, ...) {
         }
     });
 
-    // 同时输出到系统日志(调试用)
     NSLog(@"[KuwoVIP] %@", msg);
 }
 
@@ -208,11 +204,11 @@ static id hook_NSJSONSerialization_JSONObject(Class cls, SEL _cmd, NSData *data,
     for (NSString *k in numKeys) {
         id val = newData[k];
         if (!val) continue;
-        int num = [val intValue];
-        int fake = 0;
+        long long num = [val longLongValue];
+        long long fake = 0;
         if ([k isEqualToString:@"expireTime"] || [k isEqualToString:@"vipExpire"] ||
             [k isEqualToString:@"svipExpire"] || [k isEqualToString:@"vipmExpire"]) {
-            if (num < 9999999999) fake = 9999999999;
+            if (num < 9999999999LL) fake = 9999999999LL;
         } else if ([k isEqualToString:@"level"] || [k isEqualToString:@"curVipValue"] ||
                    [k isEqualToString:@"starvipLevel"]) {
             if (num < 10) fake = 10;
@@ -225,7 +221,7 @@ static id hook_NSJSONSerialization_JSONObject(Class cls, SEL _cmd, NSData *data,
         }
         if (fake > 0) {
             newData[k] = @(fake);
-            vipLog(@"[PATCH] %@: %d -> %d", k, num, fake);
+            vipLog(@"[PATCH] %@: %lld -> %lld", k, num, fake);
         }
     }
 
