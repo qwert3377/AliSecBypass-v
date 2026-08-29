@@ -1,11 +1,70 @@
 //
 //  KuwoVIPCrack.mm
 //  酷我音乐VIP破解 - TrollStore注入版
-//  用法: 编译为dylib注入到com.yeelion.kwplayer
+//  日志写入App Documents目录
 //
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+
+#pragma mark - 日志系统 (写入App Documents)
+
+static NSString *gLogPath = nil;
+static NSFileHandle *gLogFile = nil;
+static dispatch_queue_t gLogQueue = nil;
+
+static void initLogSystem(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // 获取App Documents目录
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        if (!docDir) {
+            // fallback: 使用Library/Caches
+            paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+            docDir = paths.firstObject;
+        }
+        if (!docDir) {
+            docDir = NSHomeDirectory();
+        }
+
+        gLogPath = [docDir stringByAppendingPathComponent:@"kuwo_vip_crack.log"];
+
+        // 创建或清空日志文件
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:gLogPath]) {
+            [@"=== KuwoVIP Crack Log ===\n" writeToFile:gLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+
+        gLogFile = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
+        [gLogFile seekToEndOfFile];
+
+        gLogQueue = dispatch_queue_create("com.kuwo.vip.log", DISPATCH_QUEUE_SERIAL);
+    });
+}
+
+static void vipLog(NSString *fmt, ...) {
+    initLogSystem();
+
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n",
+                      [NSDate date], msg];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+
+    dispatch_async(gLogQueue, ^{
+        if (gLogFile && data) {
+            [gLogFile writeData:data];
+            [gLogFile synchronizeFile];
+        }
+    });
+
+    // 同时输出到系统日志(调试用)
+    NSLog(@"[KuwoVIP] %@", msg);
+}
 
 #pragma mark - 配置
 
@@ -16,6 +75,10 @@ static NSString * const kFakeVIPJSON = @"{\"ctime\":9999999999999,\"data\":{\"lu
 static __thread BOOL gInHook = NO;
 
 #define HOOK_GUARD_BEGIN \
+    if (gInHook) return nil; \
+    gInHook = YES;
+
+#define HOOK_GUARD_BEGIN_VOID \
     if (gInHook) return; \
     gInHook = YES;
 
@@ -37,11 +100,15 @@ static BOOL isVIPURL(NSString *url) {
 }
 
 static id fakeVIPDict(void) {
-    NSData *data = [kFakeVIPJSON dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data) return nil;
-    NSError *err = nil;
-    id dict = [NSJSONSerialization JSONObjectWithData:data options:0 error:&err];
-    return dict;
+    static id sFakeDict = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = [kFakeVIPJSON dataUsingEncoding:NSUTF8StringEncoding];
+        if (data) {
+            sFakeDict = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        }
+    });
+    return sFakeDict;
 }
 
 #pragma mark - NSUserDefaults Hook
@@ -53,7 +120,7 @@ static id hook_NSUserDefaults_objectForKey(id self, SEL _cmd, id key) {
     HOOK_GUARD_BEGIN
     id result = orig_NSUserDefaults_objectForKey(self, _cmd, key);
     if (isVIPDefaultsKey(key)) {
-        NSLog(@"[KuwoVIP] objectForKey:%@ -> fake", key);
+        vipLog(@"[NSUserDefaults] objectForKey:%@ -> FAKE", key);
         HOOK_GUARD_END
         return [kFakeVIPJSON copy];
     }
@@ -68,7 +135,7 @@ static id hook_NSUserDefaults_stringForKey(id self, SEL _cmd, NSString *key) {
     HOOK_GUARD_BEGIN
     id result = orig_NSUserDefaults_stringForKey(self, _cmd, key);
     if (isVIPDefaultsKey(key)) {
-        NSLog(@"[KuwoVIP] stringForKey:%@ -> fake", key);
+        vipLog(@"[NSUserDefaults] stringForKey:%@ -> FAKE", key);
         HOOK_GUARD_END
         return [kFakeVIPJSON copy];
     }
@@ -83,7 +150,7 @@ static id hook_NSUserDefaults_dictionaryForKey(id self, SEL _cmd, NSString *key)
     HOOK_GUARD_BEGIN
     id result = orig_NSUserDefaults_dictionaryForKey(self, _cmd, key);
     if (isVIPDefaultsKey(key)) {
-        NSLog(@"[KuwoVIP] dictionaryForKey:%@ -> fake", key);
+        vipLog(@"[NSUserDefaults] dictionaryForKey:%@ -> FAKE", key);
         id fake = fakeVIPDict();
         HOOK_GUARD_END
         return fake ?: result;
@@ -96,9 +163,9 @@ typedef void (*orig_setObject_t)(id self, SEL _cmd, id obj, id key);
 static orig_setObject_t orig_NSUserDefaults_setObject = NULL;
 
 static void hook_NSUserDefaults_setObject(id self, SEL _cmd, id obj, id key) {
-    HOOK_GUARD_BEGIN
+    HOOK_GUARD_BEGIN_VOID
     if (isVIPDefaultsKey(key)) {
-        NSLog(@"[KuwoVIP] BLOCK setObject:%@", key);
+        vipLog(@"[NSUserDefaults] BLOCK setObject:%@", key);
         HOOK_GUARD_END
         return;
     }
@@ -128,7 +195,7 @@ static id hook_NSJSONSerialization_JSONObject(Class cls, SEL _cmd, NSData *data,
     id svipExpire = dataDict[@"svipExpire"];
     if (!vipExpire && !svipExpire && !expire && !level) return result;
 
-    NSLog(@"[KuwoVIP] NSJSONSerialization VIP JSON patched");
+    vipLog(@"[NSJSONSerialization] VIP JSON detected, patching...");
 
     NSMutableDictionary *newDict = [NSMutableDictionary dictionaryWithDictionary:dict];
     NSMutableDictionary *newData = dataObj ? [NSMutableDictionary dictionaryWithDictionary:dataDict] : newDict;
@@ -158,7 +225,7 @@ static id hook_NSJSONSerialization_JSONObject(Class cls, SEL _cmd, NSData *data,
         }
         if (fake > 0) {
             newData[k] = @(fake);
-            NSLog(@"[KuwoVIP] %@: %d -> %d", k, num, fake);
+            vipLog(@"[PATCH] %@: %d -> %d", k, num, fake);
         }
     }
 
@@ -166,12 +233,14 @@ static id hook_NSJSONSerialization_JSONObject(Class cls, SEL _cmd, NSData *data,
     if ([tag isKindOfClass:[NSString class]] && [tag rangeOfString:@"VIP"].location != NSNotFound
         && [tag rangeOfString:@"SVIP"].location == NSNotFound) {
         newData[@"vipTag"] = @"SVIP";
+        vipLog(@"[PATCH] vipTag: %@ -> SVIP", tag);
     }
 
     if (dataObj) {
         newDict[@"data"] = newData;
     }
 
+    vipLog(@"[NSJSONSerialization] Patched OK");
     return newDict;
 }
 
@@ -187,7 +256,7 @@ static id hook_NSURLSession_dataTask(id self, SEL _cmd, NSURLRequest *req) {
         NSString *newUrl = [urlStr stringByReplacingOccurrencesOfString:@"isVip=0" withString:@"isVip=1"];
         NSMutableURLRequest *newReq = [req mutableCopy];
         newReq.URL = [NSURL URLWithString:newUrl];
-        NSLog(@"[KuwoVIP] NET: isVip=0 -> 1");
+        vipLog(@"[NET] isVip=0 -> 1 | %@", [newUrl substringToIndex:MIN(80, newUrl.length)]);
         return orig_NSURLSession_dataTask(self, _cmd, newReq);
     }
     return orig_NSURLSession_dataTask(self, _cmd, req);
@@ -197,31 +266,39 @@ static id hook_NSURLSession_dataTask(id self, SEL _cmd, NSURLRequest *req) {
 
 static void hookClassMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
     Method m = class_getClassMethod(cls, sel);
-    if (!m) return;
+    if (!m) {
+        vipLog(@"[WARN] Class method not found: %@ %@", NSStringFromClass(cls), NSStringFromSelector(sel));
+        return;
+    }
     *origImp = method_setImplementation(m, newImp);
 }
 
 static void hookInstanceMethod(Class cls, SEL sel, IMP newImp, IMP *origImp) {
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
+    if (!m) {
+        vipLog(@"[WARN] Instance method not found: %@ %@", NSStringFromClass(cls), NSStringFromSelector(sel));
+        return;
+    }
     *origImp = method_setImplementation(m, newImp);
 }
 
 __attribute__((constructor))
 static void kuwo_vip_init(void) {
-    NSLog(@"[KuwoVIP] === VIP破解加载 ===");
+    vipLog(@"=== KuwoVIP Crack Loading ===");
 
     // 1. 预注入NSUserDefaults
     NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
     NSDictionary *all = [defs dictionaryRepresentation];
+    int injectCount = 0;
     for (NSString *key in all.allKeys) {
         if (isVIPDefaultsKey(key)) {
-            NSLog(@"[KuwoVIP] INJECT: %@", key);
+            vipLog(@"[INJECT] NSUserDefaults: %@", key);
             [defs setObject:kFakeVIPJSON forKey:key];
+            injectCount++;
         }
     }
     [defs synchronize];
-    NSLog(@"[KuwoVIP] NSUserDefaults已预注入");
+    vipLog(@"[OK] NSUserDefaults pre-injected: %d keys", injectCount);
 
     // 2. Hook NSUserDefaults
     Class udCls = [NSUserDefaults class];
@@ -229,17 +306,22 @@ static void kuwo_vip_init(void) {
     hookInstanceMethod(udCls, @selector(stringForKey:), (IMP)hook_NSUserDefaults_stringForKey, (IMP *)&orig_NSUserDefaults_stringForKey);
     hookInstanceMethod(udCls, @selector(dictionaryForKey:), (IMP)hook_NSUserDefaults_dictionaryForKey, (IMP *)&orig_NSUserDefaults_dictionaryForKey);
     hookInstanceMethod(udCls, @selector(setObject:forKey:), (IMP)hook_NSUserDefaults_setObject, (IMP *)&orig_NSUserDefaults_setObject);
-    NSLog(@"[KuwoVIP] NSUserDefaults Hook完成");
+    vipLog(@"[OK] NSUserDefaults hooked");
 
     // 3. Hook NSJSONSerialization
     hookClassMethod([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:),
                     (IMP)hook_NSJSONSerialization_JSONObject, (IMP *)&orig_NSJSONSerialization_JSONObject);
-    NSLog(@"[KuwoVIP] NSJSONSerialization Hook完成");
+    vipLog(@"[OK] NSJSONSerialization hooked");
 
     // 4. Hook NSURLSession
     hookInstanceMethod([NSURLSession class], @selector(dataTaskWithRequest:),
                        (IMP)hook_NSURLSession_dataTask, (IMP *)&orig_NSURLSession_dataTask);
-    NSLog(@"[KuwoVIP] NSURLSession Hook完成");
+    vipLog(@"[OK] NSURLSession hooked");
 
-    NSLog(@"[KuwoVIP] === 加载完成 ===");
+    // 5. 记录日志路径
+    if (gLogPath) {
+        vipLog(@"[INFO] Log file: %@", gLogPath);
+    }
+
+    vipLog(@"=== KuwoVIP Crack Loaded ===");
 }
