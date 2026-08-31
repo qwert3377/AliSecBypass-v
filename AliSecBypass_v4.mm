@@ -1,11 +1,9 @@
 // kiosker.mm - Kiosker TrollStore Plugin
-// Theos .mm file for TrollStore injection
-// Compile with Theos: make package
+// Compile: make package FINALPACKAGE=1
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <substrate.h>
 
 #define STATE_SUBSCRIBED 2
 
@@ -31,8 +29,6 @@ static uint8_t readState(id inst) {
 
 static void triggerTimerTick(id inst) {
     if (!inst) return;
-    Class cls = NSClassFromString(@"Kiosker.SubscriptionHandler");
-    if (!cls) return;
     SEL sel = NSSelectorFromString(@"timerTick");
     if (!sel) return;
     #pragma clang diagnostic push
@@ -69,48 +65,57 @@ static void scanAllWindows() {
     @try {
         UIApplication *app = [UIApplication sharedApplication];
         if (!app) return;
-        NSArray *windows = [app windows];
+
+        // iOS 15+ compatible
+        NSArray *windows = nil;
+        if (@available(iOS 15.0, *)) {
+            NSSet *scenes = [app connectedScenes];
+            for (UIScene *scene in scenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *windowScene = (UIWindowScene *)scene;
+                    windows = [windowScene windows];
+                    break;
+                }
+            }
+        }
+        if (!windows) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            windows = [app windows];
+            #pragma clang diagnostic pop
+        }
+
         for (UIWindow *win in windows) {
             scanViewForSwitches(win, 0);
         }
     } @catch (NSException *e) {}
 }
 
-// ========== Hook helpers ==========
-static void hookClassMethod(const char *clsName, const char *selName, IMP newImp, IMP *origImp) {
-    Class cls = objc_getClass(clsName);
-    if (!cls) return;
-    SEL sel = sel_getUid(selName);
-    if (!sel) return;
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
-    if (origImp) {
-        *origImp = method_getImplementation(m);
-        method_setImplementation(m, newImp);
-    } else {
-        MSHookMessageEx(cls, sel, newImp, NULL);
-    }
-}
+// ========== Original IMPs ==========
+static IMP orig_SH_init = NULL;
+static IMP orig_SH_timerTick = NULL;
+static IMP orig_SH_rcCallback = NULL;
+static IMP orig_RC_entitlements = NULL;
+static IMP orig_RC_activeSubscriptions = NULL;
+static IMP orig_RCEntitlement_isActive = NULL;
+static IMP orig_VC_viewDidAppear = NULL;
+static IMP orig_Control_sendAction = NULL;
 
 // ========== SubscriptionHandler hooks ==========
-static IMP orig_SH_init = NULL;
 id hook_SH_init(id self, SEL _cmd) {
     id result = ((id (*)(id, SEL))orig_SH_init)(self, _cmd);
     forceState(result);
     return result;
 }
 
-static IMP orig_SH_timerTick = NULL;
 void hook_SH_timerTick(id self, SEL _cmd) {
     forceState(self);
     ((void (*)(id, SEL))orig_SH_timerTick)(self, _cmd);
-    // onLeave: check again
     if (readState(self) != STATE_SUBSCRIBED) {
         forceState(self);
     }
 }
 
-static IMP orig_SH_rcCallback = NULL;
 void hook_SH_rcCallback(id self, SEL _cmd, id purchases, id customerInfo) {
     forceState(self);
     ((void (*)(id, SEL, id, id))orig_SH_rcCallback)(self, _cmd, purchases, customerInfo);
@@ -119,25 +124,21 @@ void hook_SH_rcCallback(id self, SEL _cmd, id purchases, id customerInfo) {
 }
 
 // ========== RevenueCat hooks ==========
-static IMP orig_RC_entitlements = NULL;
 id hook_RC_entitlements(id self, SEL _cmd) {
     NSMutableDictionary *fake = [NSMutableDictionary dictionary];
     [fake setObject:@"pro" forKey:@"premium"];
     return fake;
 }
 
-static IMP orig_RC_activeSubscriptions = NULL;
 id hook_RC_activeSubscriptions(id self, SEL _cmd) {
     return [NSSet setWithObject:@"premium_monthly"];
 }
 
-static IMP orig_RCEntitlement_isActive = NULL;
 BOOL hook_RCEntitlement_isActive(id self, SEL _cmd) {
     return YES;
 }
 
 // ========== UIViewController viewDidAppear ==========
-static IMP orig_VC_viewDidAppear = NULL;
 void hook_VC_viewDidAppear(id self, SEL _cmd, BOOL animated) {
     ((void (*)(id, SEL, BOOL))orig_VC_viewDidAppear)(self, _cmd, animated);
 
@@ -146,19 +147,11 @@ void hook_VC_viewDidAppear(id self, SEL _cmd, BOOL animated) {
         [clsName rangeOfString:@"HostingView"].location != NSNotFound) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             scanAllWindows();
-            // Also fix SubscriptionHandler state
-            Class shClass = NSClassFromString(@"Kiosker.SubscriptionHandler");
-            if (shClass) {
-                unsigned int count = 0;
-                id *instances = (id *)objc_copyClassInstances((__bridge Class _Nonnull)(shClass), &count);
-                // Note: objc_copyClassInstances is not public API, use alternative
-            }
         });
     }
 }
 
 // ========== UIControl sendAction ==========
-static IMP orig_Control_sendAction = NULL;
 void hook_Control_sendAction(id self, SEL _cmd, SEL action, id target, UIEvent *event) {
     ((void (*)(id, SEL, SEL, id, UIEvent *))orig_Control_sendAction)(self, _cmd, action, target, event);
     if ([self isKindOfClass:[UISwitch class]]) {
@@ -171,7 +164,7 @@ void hook_Control_sendAction(id self, SEL _cmd, SEL action, id target, UIEvent *
 // ========== Constructor ==========
 __attribute__((constructor))
 static void kioskerInit() {
-    NSLog(@"[KIOSKER] Plugin loading...");
+    NSLog(@"[KIOSKER] Loading...");
 
     // Hook SubscriptionHandler
     Class shClass = NSClassFromString(@"Kiosker.SubscriptionHandler");
@@ -193,13 +186,6 @@ static void kioskerInit() {
             orig_SH_rcCallback = method_getImplementation(mRC);
             method_setImplementation(mRC, (IMP)hook_SH_rcCallback);
         }
-
-        // Fix existing instance
-        @try {
-            id existing = nil;
-            // Try to find existing instance via notification center or shared instance
-            // If not available, timerTick will catch it
-        } @catch (NSException *e) {}
     }
 
     // Hook RevenueCat
@@ -243,5 +229,5 @@ static void kioskerInit() {
         method_setImplementation(mSend, (IMP)hook_Control_sendAction);
     }
 
-    NSLog(@"[KIOSKER] Plugin loaded.");
+    NSLog(@"[KIOSKER] Loaded.");
 }
