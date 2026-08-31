@@ -1,6 +1,6 @@
 //
-//  kiosker_premium_reliable.mm
-//  Kiosker Premium Unlock - RevenueCat JSON Injection
+//  kiosker_premium_network.mm
+//  Kiosker Premium Unlock - Network Layer Interception
 //  Target: com.c-konsult.kiosker-sub
 //
 
@@ -30,112 +30,96 @@ static void klog(NSString *msg) {
     }
 }
 
-#pragma mark - Fake RevenueCat JSON
+#pragma mark - Fake RevenueCat Data
 
-static NSString *fakeRCJson(void) {
-    return @"{"
-        @"\"request_date\":\"2026-08-31T00:00:00Z\","
-        @"\"request_date_ms\":1756588800000,"
-        @"\"subscriber\":{"
-            @"\"entitlements\":{"
-                @"\"premium\":{"
-                    @"\"expires_date\":\"2099-12-31T23:59:59Z\","
-                    @"\"product_identifier\":\"com.c-konsult.kiosker-sub.premium\","
-                    @"\"purchase_date\":\"2026-08-01T00:00:00Z\""
-                @"}"
-            @"},"
-            @"\"first_seen\":\"2026-08-01T00:00:00Z\","
-            @"\"original_app_user_id\":\"kiosker_user\","
-            @"\"original_application_version\":\"281\","
-            @"\"other_purchases\":{},"
-            @"\"subscriptions\":{"
-                @"\"com.c-konsult.kiosker-sub.premium\":{""
-                    @"\"billing_issues_detected_at\":null,"
-                    @"\"expires_date\":\"2099-12-31T23:59:59Z\","
-                    @"\"grace_period_expires_date\":null,"
-                    @"\"is_sandbox\":false,"
-                    @"\"original_purchase_date\":\"2026-08-01T00:00:00Z\","
-                    @"\"period_type\":\"normal\","
-                    @"\"purchase_date\":\"2026-08-01T00:00:00Z\","
-                    @"\"store\":\"app_store\","
-                    @"\"unsubscribe_detected_at\":null"
-                @"}"
-            @"}"
-        @"}"
-    @"}";
+static NSData *fakeRCData(void) {
+    NSDictionary *premiumEntitlement = @{
+        @"expires_date": @"2099-12-31T23:59:59Z",
+        @"product_identifier": @"com.c-konsult.kiosker-sub.premium",
+        @"purchase_date": @"2026-08-01T00:00:00Z"
+    };
+
+    NSDictionary *entitlements = @{
+        @"premium": premiumEntitlement
+    };
+
+    NSDictionary *subscription = @{
+        @"billing_issues_detected_at": [NSNull null],
+        @"expires_date": @"2099-12-31T23:59:59Z",
+        @"grace_period_expires_date": [NSNull null],
+        @"is_sandbox": @NO,
+        @"original_purchase_date": @"2026-08-01T00:00:00Z",
+        @"period_type": @"normal",
+        @"purchase_date": @"2026-08-01T00:00:00Z",
+        @"store": @"app_store",
+        @"unsubscribe_detected_at": [NSNull null]
+    };
+
+    NSDictionary *subscriber = @{
+        @"entitlements": entitlements,
+        @"first_seen": @"2026-08-01T00:00:00Z",
+        @"original_app_user_id": @"kiosker_user",
+        @"original_application_version": @"281",
+        @"other_purchases": @{},
+        @"subscriptions": @{
+            @"com.c-konsult.kiosker-sub.premium": subscription
+        }
+    };
+
+    NSDictionary *root = @{
+        @"request_date": @"2026-08-31T00:00:00Z",
+        @"request_date_ms": @1756588800000,
+        @"subscriber": subscriber
+    };
+
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:&err];
+    if (err) {
+        klog([NSString stringWithFormat:@"[ERR] JSON serialize error: %@", err]);
+    }
+    return data;
 }
 
 #pragma mark - Original IMPs
 
-static IMP orig_jsonParse = NULL;
-static IMP orig_timerTick = NULL;
-static IMP orig_init = NULL;
+static IMP orig_dataTask = NULL;
 static IMP orig_presentVC = NULL;
 static IMP orig_addPayment = NULL;
-static IMP orig_rcIsActive = NULL;
 
 #pragma mark - Hooked Methods
 
-// Hook NSJSONSerialization +JSONObjectWithData:options:error:
-// Intercept RevenueCat subscriber JSON and inject fake premium data
-static id hooked_jsonParse(Class cls, SEL _cmd, NSData *data, NSJSONReadingOptions opt, NSError **error) {
-    if (!data || data.length == 0) {
-        if (orig_jsonParse) {
-            return ((id (*)(Class, SEL, NSData*, NSJSONReadingOptions, NSError**))orig_jsonParse)(cls, _cmd, data, opt, error);
+// Hook NSURLSession -dataTaskWithRequest:completionHandler:
+static NSURLSessionDataTask *hooked_dataTask(id self, SEL _cmd, NSURLRequest *request, void (^completionHandler)(NSData*, NSURLResponse*, NSError*)) {
+    NSString *urlStr = request.URL.absoluteString;
+
+    // Detect RevenueCat API calls
+    if ([urlStr containsString:@"api.revenuecat.com"] ||
+        [urlStr containsString:@"revenuecat"] ||
+        [urlStr containsString:@"purchases.revenuecat"]) {
+
+        klog([NSString stringWithFormat:@"[NET] Intercepted RevenueCat API: %@", urlStr]);
+
+        // Return fake data immediately
+        NSData *fakeData = fakeRCData();
+        NSHTTPURLResponse *fakeResponse = [[NSHTTPURLResponse alloc] initWithURL:request.URL
+                                                                        statusCode:200
+                                                                       HTTPVersion:@"HTTP/1.1"
+                                                                      headerFields:@{@"Content-Type": @"application/json"}];
+
+        if (completionHandler) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completionHandler(fakeData, fakeResponse, nil);
+            });
         }
-        return nil;
+
+        // Return a dummy task
+        return [[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:@"about:blank"]];
     }
 
-    NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!str) {
-        if (orig_jsonParse) {
-            return ((id (*)(Class, SEL, NSData*, NSJSONReadingOptions, NSError**))orig_jsonParse)(cls, _cmd, data, opt, error);
-        }
-        return nil;
-    }
-
-    // Detect RevenueCat subscriber response
-    BOOL isRC = ([str containsString:@"subscriber"] && [str containsString:@"original_app_user_id"]) ||
-                ([str containsString:@"entitlements"] && [str containsString:@"request_date"]);
-
-    if (isRC) {
-        klog(@"[JSON] Intercepted RevenueCat data, injecting fake premium...");
-        NSString *fake = fakeRCJson();
-        NSData *fakeData = [fake dataUsingEncoding:NSUTF8StringEncoding];
-        if (orig_jsonParse) {
-            id result = ((id (*)(Class, SEL, NSData*, NSJSONReadingOptions, NSError**))orig_jsonParse)(cls, _cmd, fakeData, opt, error);
-            klog(@"[JSON] Fake data injected successfully");
-            return result;
-        }
-    }
-
-    if (orig_jsonParse) {
-        return ((id (*)(Class, SEL, NSData*, NSJSONReadingOptions, NSError**))orig_jsonParse)(cls, _cmd, data, opt, error);
+    if (orig_dataTask) {
+        return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest*, void (^)(NSData*, NSURLResponse*, NSError*)))orig_dataTask)(self, _cmd, request, completionHandler);
     }
     return nil;
-}
-
-// Hook RCEntitlementInfo -isActive
-static BOOL hooked_rcIsActive(id self, SEL _cmd) {
-    klog(@"[RC] isActive => forced YES");
-    return YES;
-}
-
-// Hook SubscriptionHandler -timerTick
-static void hooked_timerTick(id self, SEL _cmd) {
-    if (orig_timerTick) {
-        ((void (*)(id, SEL))orig_timerTick)(self, _cmd);
-    }
-}
-
-// Hook SubscriptionHandler -init
-static id hooked_init(id self, SEL _cmd) {
-    id result = self;
-    if (orig_init) {
-        result = ((id (*)(id, SEL))orig_init)(self, _cmd);
-    }
-    klog(@"[SH] init called");
-    return result;
 }
 
 // Hook UIViewController -presentViewController:animated:completion:
@@ -161,48 +145,19 @@ static void hooked_addPayment(id self, SEL _cmd, id payment) {
 #pragma mark - Installation
 
 static void install_hooks(void) {
-    klog(@"=== Kiosker Premium Reliable v2.0 ===");
+    klog(@"=== Kiosker Premium Network v3.0 ===");
 
-    // 1. Hook NSJSONSerialization - intercept RevenueCat API responses
-    Class jsonClass = [NSJSONSerialization class];
-    Method mJson = class_getClassMethod(jsonClass, @selector(JSONObjectWithData:options:error:));
-    if (mJson) {
-        orig_jsonParse = method_setImplementation(mJson, (IMP)hooked_jsonParse);
-        klog(@"[HOOK] NSJSONSerialization JSONObjectWithData: hooked");
+    // 1. Hook NSURLSession dataTaskWithRequest:completionHandler:
+    Class sessClass = [NSURLSession class];
+    Method mTask = class_getInstanceMethod(sessClass, @selector(dataTaskWithRequest:completionHandler:));
+    if (mTask) {
+        orig_dataTask = method_setImplementation(mTask, (IMP)hooked_dataTask);
+        klog(@"[HOOK] NSURLSession dataTaskWithRequest: hooked");
     } else {
-        klog(@"[ERR] NSJSONSerialization method not found");
+        klog(@"[ERR] NSURLSession dataTaskWithRequest: not found");
     }
 
-    // 2. Hook RCEntitlementInfo -isActive
-    Class rcClass = NSClassFromString(@"RCEntitlementInfo");
-    if (rcClass) {
-        Method mActive = class_getInstanceMethod(rcClass, @selector(isActive));
-        if (mActive) {
-            orig_rcIsActive = method_setImplementation(mActive, (IMP)hooked_rcIsActive);
-            klog(@"[HOOK] RCEntitlementInfo isActive hooked");
-        }
-    } else {
-        klog(@"[WARN] RCEntitlementInfo not found (may load later)");
-    }
-
-    // 3. Hook SubscriptionHandler
-    Class shClass = NSClassFromString(@"Kiosker.SubscriptionHandler");
-    if (shClass) {
-        Method mTick = class_getInstanceMethod(shClass, @selector(timerTick));
-        if (mTick) {
-            orig_timerTick = method_setImplementation(mTick, (IMP)hooked_timerTick);
-            klog(@"[HOOK] SubscriptionHandler timerTick hooked");
-        }
-        Method mInit = class_getInstanceMethod(shClass, @selector(init));
-        if (mInit) {
-            orig_init = method_setImplementation(mInit, (IMP)hooked_init);
-            klog(@"[HOOK] SubscriptionHandler init hooked");
-        }
-    } else {
-        klog(@"[WARN] Kiosker.SubscriptionHandler not found (may load later)");
-    }
-
-    // 4. Hook UIViewController presentViewController
+    // 2. Hook UIViewController presentViewController
     Class vcClass = [UIViewController class];
     Method mPresent = class_getInstanceMethod(vcClass, @selector(presentViewController:animated:completion:));
     if (mPresent) {
@@ -210,7 +165,7 @@ static void install_hooks(void) {
         klog(@"[HOOK] UIViewController presentViewController: hooked");
     }
 
-    // 5. Hook SKPaymentQueue
+    // 3. Hook SKPaymentQueue
     Class skClass = NSClassFromString(@"SKPaymentQueue");
     if (skClass) {
         Method mAdd = class_getInstanceMethod(skClass, @selector(addPayment:));
@@ -227,7 +182,6 @@ static void install_hooks(void) {
 
 __attribute__((constructor))
 static void constructor(void) {
-    // Delay to ensure classes are loaded
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         install_hooks();
