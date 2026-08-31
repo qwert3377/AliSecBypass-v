@@ -1,197 +1,196 @@
-// ZeroTier One 汉化插件 —— 纯 Runtime 实现，无 %hook 语法
-// 编译：theos 单文件 .mm，TrollStore 注入
-// 架构：arm64 / arm64e
+//
+//  kiosker_premium.mm
+//  Kiosker Premium Unlock - TrollStore Injection
+//  Target: com.c-konsult.kiosker-sub
+//
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static NSDictionary *gDict = nil;
+#pragma mark - Constants
 
-static NSString *translate(NSString *str) {
-    if (!str || ![str isKindOfClass:[NSString class]]) return str;
-    NSString *cn = gDict[str];
-    if (cn) return cn;
-    NSString *trimmed = [str stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    cn = gDict[trimmed];
-    if (cn) return cn;
-    return str;
-}
+#define KIOSKER_STATE_SUBSCRIBED    2
+#define KIOSKER_STATE_OFFSET        32  // @Published<SubscriptionState> enum value offset
 
-// ========== 通用 Swizzle 工具 ==========
+#pragma mark - Logging
 
-static void swizzleInstanceMethod(Class cls, SEL origSel, SEL newSel) {
-    Method origMethod = class_getInstanceMethod(cls, origSel);
-    Method newMethod = class_getInstanceMethod(cls, newSel);
-    if (!origMethod || !newMethod) return;
+static void kiosker_log(NSString *msg) {
+    @autoreleasepool {
+        NSString *docPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        if (!docPath) return;
+        NSString *logPath = [docPath stringByAppendingPathComponent:@"kiosker_premium.log"];
+        NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], msg];
 
-    BOOL didAdd = class_addMethod(cls, origSel,
-        method_getImplementation(newMethod),
-        method_getTypeEncoding(newMethod));
-
-    if (didAdd) {
-        class_replaceMethod(cls, newSel,
-            method_getImplementation(origMethod),
-            method_getTypeEncoding(origMethod));
-    } else {
-        method_exchangeImplementations(origMethod, newMethod);
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:logPath]) {
+            [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } else {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+            if (fh) {
+                [fh seekToEndOfFile];
+                [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+                [fh closeFile];
+            }
+        }
     }
 }
 
-static void swizzleClassMethod(Class cls, SEL origSel, SEL newSel) {
-    Method origMethod = class_getClassMethod(cls, origSel);
-    Method newMethod = class_getClassMethod(cls, newSel);
-    if (!origMethod || !newMethod) return;
-    method_exchangeImplementations(origMethod, newMethod);
+#pragma mark - State Patching
+
+static inline void force_subscribed_state(id instance) {
+    if (!instance) return;
+    uint8_t *ptr = (uint8_t *)instance;
+    // _state is @Published<SubscriptionState>, enum value at offset 32
+    // 0=free, 1=trial, 2=subscribed
+    ptr[KIOSKER_STATE_OFFSET] = KIOSKER_STATE_SUBSCRIBED;
 }
 
-// ========== 1. UILabel setText: ==========
-
-@interface UILabel (I18N)
-- (void)zt_setText:(NSString *)text;
-@end
-
-@implementation UILabel (I18N)
-- (void)zt_setText:(NSString *)text {
-    NSString *cn = translate(text);
-    [self zt_setText:cn];
+static inline uint8_t read_state(id instance) {
+    if (!instance) return 0xFF;
+    uint8_t *ptr = (uint8_t *)instance;
+    return ptr[KIOSKER_STATE_OFFSET];
 }
-@end
 
-// ========== 2. UIButton setTitle:forState: ==========
+#pragma mark - Original IMPs
 
-@interface UIButton (I18N)
-- (void)zt_setTitle:(NSString *)title forState:(UIControlState)state;
-@end
+static IMP orig_timerTick = NULL;
+static IMP orig_init = NULL;
+static IMP orig_customerInfo = NULL;
+static IMP orig_presentVC = NULL;
+static IMP orig_addPayment = NULL;
 
-@implementation UIButton (I18N)
-- (void)zt_setTitle:(NSString *)title forState:(UIControlState)state {
-    NSString *cn = translate(title);
-    [self zt_setTitle:cn forState:state];
+#pragma mark - Hooked Methods
+
+// Hook SubscriptionHandler -timerTick
+// Force _state=2 BEFORE timerTick executes, so timerTick reads subscribed and does not reset
+static void hooked_timerTick(id self, SEL _cmd) {
+    uint8_t old = read_state(self);
+    if (old != KIOSKER_STATE_SUBSCRIBED) {
+        force_subscribed_state(self);
+        kiosker_log([NSString stringWithFormat:@"timerTick pre-fix: %d => %d", old, KIOSKER_STATE_SUBSCRIBED]);
+    }
+
+    if (orig_timerTick) {
+        ((void (*)(id, SEL))orig_timerTick)(self, _cmd);
+    }
+
+    // Double-check after execution
+    uint8_t after = read_state(self);
+    if (after != KIOSKER_STATE_SUBSCRIBED) {
+        force_subscribed_state(self);
+        kiosker_log([NSString stringWithFormat:@"timerTick post-fix: %d => %d", after, KIOSKER_STATE_SUBSCRIBED]);
+    }
 }
-@end
 
-// ========== 3. UINavigationItem setTitle: ==========
-
-@interface UINavigationItem (I18N)
-- (void)zt_setTitle:(NSString *)title;
-@end
-
-@implementation UINavigationItem (I18N)
-- (void)zt_setTitle:(NSString *)title {
-    NSString *cn = translate(title);
-    [self zt_setTitle:cn];
+// Hook SubscriptionHandler -init
+static id hooked_init(id self, SEL _cmd) {
+    id result = self;
+    if (orig_init) {
+        result = ((id (*)(id, SEL))orig_init)(self, _cmd);
+    }
+    if (result) {
+        force_subscribed_state(result);
+        kiosker_log(@"init: _state => 2");
+    }
+    return result;
 }
-@end
 
-// ========== 4. UIViewController setTitle: ==========
-
-@interface UIViewController (I18N)
-- (void)zt_setTitle:(NSString *)title;
-@end
-
-@implementation UIViewController (I18N)
-- (void)zt_setTitle:(NSString *)title {
-    NSString *cn = translate(title);
-    [self zt_setTitle:cn];
+// Hook SubscriptionHandler -purchases:receivedUpdatedCustomerInfo:
+static void hooked_customerInfo(id self, SEL _cmd, id purchases, id customerInfo) {
+    if (orig_customerInfo) {
+        ((void (*)(id, SEL, id, id))orig_customerInfo)(self, _cmd, purchases, customerInfo);
+    }
+    // Force state back after RevenueCat callback
+    force_subscribed_state(self);
+    kiosker_log(@"customerInfo callback: _state => 2");
 }
-@end
 
-// ========== 5. NSBundle localizedStringForKey:value:table: ==========
-
-@interface NSBundle (I18N)
-- (NSString *)zt_localizedStringForKey:(NSString *)key value:(NSString *)value table:(NSString *)table;
-@end
-
-@implementation NSBundle (I18N)
-- (NSString *)zt_localizedStringForKey:(NSString *)key value:(NSString *)value table:(NSString *)table {
-    NSString *result = [self zt_localizedStringForKey:key value:value table:table];
-    return translate(result);
+// Hook UIViewController -presentViewController:animated:completion:
+static void hooked_presentVC(id self, SEL _cmd, UIViewController *viewControllerToPresent, BOOL animated, id completion) {
+    NSString *clsName = NSStringFromClass([viewControllerToPresent class]);
+    if ([clsName containsString:@"PresentationHostingController"] ||
+        [clsName containsString:@"UIHostingController"] ||
+        [clsName containsString:@"SKStore"] ||
+        [clsName containsString:@"Paywall"]) {
+        kiosker_log([NSString stringWithFormat:@"Blocked present: %@", clsName]);
+        return;
+    }
+    if (orig_presentVC) {
+        ((void (*)(id, SEL, UIViewController*, BOOL, id))orig_presentVC)(self, _cmd, viewControllerToPresent, animated, completion);
+    }
 }
-@end
 
-// ========== 6. UITextField setPlaceholder: ==========
-
-@interface UITextField (I18N)
-- (void)zt_setPlaceholder:(NSString *)placeholder;
-@end
-
-@implementation UITextField (I18N)
-- (void)zt_setPlaceholder:(NSString *)placeholder {
-    NSString *cn = translate(placeholder);
-    [self zt_setPlaceholder:cn];
+// Hook SKPaymentQueue -addPayment:
+static void hooked_addPayment(id self, SEL _cmd, id payment) {
+    kiosker_log(@"Blocked SKPaymentQueue addPayment");
+    // Do nothing - silently drop the payment
 }
-@end
 
-// ========== 7. UITableViewCell setText: ==========
+#pragma mark - Hook Installation
 
-@interface UITableViewCell (I18N)
-- (void)zt_setText:(NSString *)text;
-@end
+static void install_hooks(void) {
+    kiosker_log(@"=== Kiosker Premium Plugin v1.0 ===");
 
-@implementation UITableViewCell (I18N)
-- (void)zt_setText:(NSString *)text {
-    NSString *cn = translate(text);
-    [self zt_setText:cn];
+    // 1. Hook Kiosker.SubscriptionHandler
+    Class shClass = NSClassFromString(@"Kiosker.SubscriptionHandler");
+    if (shClass) {
+        kiosker_log(@"Found Kiosker.SubscriptionHandler");
+
+        // Hook timerTick
+        Method mTick = class_getInstanceMethod(shClass, @selector(timerTick));
+        if (mTick) {
+            orig_timerTick = method_setImplementation(mTick, (IMP)hooked_timerTick);
+            kiosker_log(@"Hooked timerTick");
+        } else {
+            kiosker_log(@"timerTick not found");
+        }
+
+        // Hook init
+        Method mInit = class_getInstanceMethod(shClass, @selector(init));
+        if (mInit) {
+            orig_init = method_setImplementation(mInit, (IMP)hooked_init);
+            kiosker_log(@"Hooked init");
+        }
+
+        // Hook purchases:receivedUpdatedCustomerInfo:
+        Method mInfo = class_getInstanceMethod(shClass, @selector(purchases:receivedUpdatedCustomerInfo:));
+        if (mInfo) {
+            orig_customerInfo = method_setImplementation(mInfo, (IMP)hooked_customerInfo);
+            kiosker_log(@"Hooked purchases:receivedUpdatedCustomerInfo:");
+        }
+    } else {
+        kiosker_log(@"Kiosker.SubscriptionHandler NOT FOUND");
+    }
+
+    // 2. Hook UIViewController presentViewController
+    Class vcClass = [UIViewController class];
+    Method mPresent = class_getInstanceMethod(vcClass, @selector(presentViewController:animated:completion:));
+    if (mPresent) {
+        orig_presentVC = method_setImplementation(mPresent, (IMP)hooked_presentVC);
+        kiosker_log(@"Hooked presentViewController");
+    }
+
+    // 3. Hook SKPaymentQueue addPayment (prevent real purchase)
+    Class skClass = NSClassFromString(@"SKPaymentQueue");
+    if (skClass) {
+        Method mAdd = class_getInstanceMethod(skClass, @selector(addPayment:));
+        if (mAdd) {
+            orig_addPayment = method_setImplementation(mAdd, (IMP)hooked_addPayment);
+            kiosker_log(@"Hooked SKPaymentQueue addPayment:");
+        }
+    }
+
+    kiosker_log(@"All hooks installed.");
 }
-@end
 
-// ========== 8. UIAlertController alertControllerWithTitle:message:preferredStyle: ==========
-
-@interface UIAlertController (I18N)
-+ (instancetype)zt_alertControllerWithTitle:(NSString *)title message:(NSString *)message preferredStyle:(UIAlertControllerStyle)style;
-@end
-
-@implementation UIAlertController (I18N)
-+ (instancetype)zt_alertControllerWithTitle:(NSString *)title message:(NSString *)message preferredStyle:(UIAlertControllerStyle)style {
-    NSString *cnTitle = translate(title);
-    NSString *cnMsg = translate(message);
-    return [self zt_alertControllerWithTitle:cnTitle message:cnMsg preferredStyle:style];
-}
-@end
-
-// ========== 初始化 ==========
+#pragma mark - Constructor
 
 __attribute__((constructor))
-static void zt_i18n_init(void) {
-    gDict = @{
-        @"Add Network": @"添加网络",
-        @"Network ID": @"网络ID",
-        @"Enable Default Route": @"启用默认路由",
-        @"Enable On Demand (beta)": @"启用按需连接（测试版）",
-        @"Status": @"状态",
-        @"Access Control": @"访问控制",
-        @"MAC": @"MAC地址",
-        @"MTU": @"MTU",
-        @"Broadcast": @"广播",
-        @"Bridging": @"桥接",
-        @"Managed IPs": @"管理IP",
-        @"DNS Search Domain": @"DNS搜索域",
-        @"DNS Servers": @"DNS服务器",
-        @"None": @"无",
-        @"Private": @"私有",
-        @"OK": @"正常",
-        @"YES": @"是",
-        @"NO": @"否",
-        @"Share this QR code to add members to this network": @"分享此二维码以添加成员到该网络",
-        @"This Network must be restarted for this change to take effect": @"此网络必须重启才能使更改生效",
-        @"No DNS Configuration": @"无DNS配置",
-        @"DNS Configuration managed by the Network Controller": @"DNS配置由网络控制器管理",
-        @"No DNS": @"无DNS",
-        @"Network DNS": @"网络DNS",
-        @"Custom DNS": @"自定义DNS",
-        @"Done": @"完成",
-        @"Edit": @"编辑",
-        @"Add": @"添加",
-        @"ZeroTier One": @"ZeroTier One"
-    };
-
-    swizzleInstanceMethod([UILabel class], @selector(setText:), @selector(zt_setText:));
-    swizzleInstanceMethod([UIButton class], @selector(setTitle:forState:), @selector(zt_setTitle:forState:));
-    swizzleInstanceMethod([UINavigationItem class], @selector(setTitle:), @selector(zt_setTitle:));
-    swizzleInstanceMethod([UIViewController class], @selector(setTitle:), @selector(zt_setTitle:));
-    swizzleInstanceMethod([NSBundle class], @selector(localizedStringForKey:value:table:), @selector(zt_localizedStringForKey:value:table:));
-    swizzleInstanceMethod([UITextField class], @selector(setPlaceholder:), @selector(zt_setPlaceholder:));
-    swizzleInstanceMethod([UITableViewCell class], @selector(setText:), @selector(zt_setText:));
-    swizzleClassMethod([UIAlertController class], @selector(alertControllerWithTitle:message:preferredStyle:), @selector(zt_alertControllerWithTitle:message:preferredStyle:));
+static void kiosker_premium_constructor(void) {
+    // Delay 2 seconds to ensure App classes are loaded
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        install_hooks();
+    });
 }
