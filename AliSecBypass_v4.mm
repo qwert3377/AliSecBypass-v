@@ -1,140 +1,197 @@
-//
-//  KuwoVIPCrack.mm
-//  酷我音乐VIP破解 - TrollStore注入版
-//  注入已验证生效
-//
+// ZeroTier One 汉化插件 —— 纯 Runtime 实现，无 %hook 语法
+// 编译：theos 单文件 .mm，TrollStore 注入
+// 架构：arm64 / arm64e
 
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-#pragma mark - 配置
+static NSDictionary *gDict = nil;
 
-static NSString *kFake = @"{\"ctime\":2000000000,\"data\":{\"uid\":\"0\",\"vipExpire\":\"2000000000\",\"svipExpire\":\"2000000000\",\"vipmExpire\":\"2000000000\",\"level\":\"10\",\"curVipValue\":\"99999\",\"starvipLevel\":\"10\",\"starvipType\":\"3\",\"userType\":\"3\",\"isYearUser\":\"1\",\"isNewUser\":\"0\",\"vipTag\":\"SVIP\",\"cloakingStatus\":\"1\",\"status\":\"1\",\"isSign\":\"1\",\"isGift\":\"1\",\"isLook\":\"1\",\"biedAlbum\":\"1\",\"biedSong\":\"1\",\"luxVipDays\":\"9999\",\"cheZaiDays\":\"9999\",\"vipmDays\":\"9999\",\"svipDays\":\"9999\"},\"meta\":{\"code\":200}}";
-
-static BOOL isVIPKey(NSString *k) {
-    return k && ([k rangeOfString:@"VIP_INFO"].location != NSNotFound || [k rangeOfString:@"vip_info"].location != NSNotFound);
+static NSString *translate(NSString *str) {
+    if (!str || ![str isKindOfClass:[NSString class]]) return str;
+    NSString *cn = gDict[str];
+    if (cn) return cn;
+    NSString *trimmed = [str stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    cn = gDict[trimmed];
+    if (cn) return cn;
+    return str;
 }
 
-static BOOL isVIPUrl(NSString *u) {
-    return u && [u rangeOfString:@"isVip=0" options:NSCaseInsensitiveSearch].location != NSNotFound;
-}
+// ========== 通用 Swizzle 工具 ==========
 
-static id fakeDict() {
-    static id d = nil;
-    static dispatch_once_t o;
-    dispatch_once(&o, ^{
-        NSData *data = [kFake dataUsingEncoding:NSUTF8StringEncoding];
-        d = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    });
-    return d;
-}
+static void swizzleInstanceMethod(Class cls, SEL origSel, SEL newSel) {
+    Method origMethod = class_getInstanceMethod(cls, origSel);
+    Method newMethod = class_getInstanceMethod(cls, newSel);
+    if (!origMethod || !newMethod) return;
 
-#pragma mark - Hook
+    BOOL didAdd = class_addMethod(cls, origSel,
+        method_getImplementation(newMethod),
+        method_getTypeEncoding(newMethod));
 
-static __thread BOOL gIn = NO;
-#define GB if(gIn)return nil;gIn=YES;
-#define GBV if(gIn)return;gIn=YES;
-#define GE gIn=NO;
-
-// NSUserDefaults objectForKey:
-typedef id (*ofk_t)(id,SEL,id); static ofk_t o_ofk = NULL;
-static id h_ofk(id s, SEL c, id k) {
-    GB id r = o_ofk(s,c,k); if(isVIPKey(k)){GE return [kFake copy];} GE return r;
-}
-
-// NSUserDefaults stringForKey:
-typedef id (*sfk_t)(id,SEL,NSString*); static sfk_t o_sfk = NULL;
-static id h_sfk(id s, SEL c, NSString *k) {
-    GB id r = o_sfk(s,c,k); if(isVIPKey(k)){GE return [kFake copy];} GE return r;
-}
-
-// NSUserDefaults dictionaryForKey:
-typedef id (*dfk_t)(id,SEL,NSString*); static dfk_t o_dfk = NULL;
-static id h_dfk(id s, SEL c, NSString *k) {
-    GB id r = o_dfk(s,c,k); if(isVIPKey(k)){GE return fakeDict()?:r;} GE return r;
-}
-
-// NSUserDefaults setObject:forKey:
-typedef void (*sok_t)(id,SEL,id,id); static sok_t o_sok = NULL;
-static void h_sok(id s, SEL c, id o, id k) {
-    GBV if(isVIPKey(k)){GE return;} o_sok(s,c,o,k); GE
-}
-
-// NSJSONSerialization
-typedef id (*js_t)(Class,SEL,NSData*,NSJSONReadingOptions,NSError**); static js_t o_js = NULL;
-static id h_js(Class cls, SEL c, NSData *d, NSJSONReadingOptions opt, NSError **e) {
-    id r = o_js(cls,c,d,opt,e);
-    if (![r isKindOfClass:[NSDictionary class]]) return r;
-    NSDictionary *dict = r;
-    id dataObj = dict[@"data"];
-    NSDictionary *dd = dataObj && [dataObj isKindOfClass:[NSDictionary class]] ? dataObj : dict;
-    if (!dd[@"vipExpire"] && !dd[@"expireTime"] && !dd[@"level"]) return r;
-
-    NSMutableDictionary *nd = [NSMutableDictionary dictionaryWithDictionary:dict];
-    NSMutableDictionary *ndd = dataObj ? [NSMutableDictionary dictionaryWithDictionary:dd] : nd;
-
-    NSArray *tk = @[@"expireTime",@"vipExpire",@"svipExpire",@"vipmExpire",@"chezaiExpire",@"experienceExpire",@"vipWatch1Expire",@"vipAdExpire",@"vipLuxuryExpire",@"vipSpeakerExpire",@"vipOverSeasExpire",@"time"];
-    for (NSString *k in tk) { id v=ndd[k]; if(!v)continue; int n=[v intValue]; if(n>0&&n<2000000000){ndd[k]=@2000000000;} }
-
-    NSArray *dk = @[@"luxVipDays",@"cheZaiDays",@"vipmDays",@"svipDays"];
-    for (NSString *k in dk) { id v=ndd[k]; if(!v)continue; int n=[v intValue]; if(n<9999){ndd[k]=@9999;} }
-
-    NSArray *lk = @[@"level",@"curVipValue",@"starvipLevel"];
-    for (NSString *k in lk) { id v=ndd[k]; if(!v)continue; int n=[v intValue]; if(n<10){ndd[k]=@10;} }
-
-    id st=ndd[@"starvipType"]; if(st&&[st intValue]<3){ndd[@"starvipType"]=@3;}
-    id ut=ndd[@"userType"]; if(ut){int n=[ut intValue]; if(n==0||n==2){ndd[@"userType"]=@3;}}
-
-    NSArray *fk = @[@"cloakingStatus",@"status",@"isSign",@"isGift",@"isLook",@"isYearUser",@"isNewUser",@"biedAlbum",@"biedSong"];
-    for (NSString *k in fk) { id v=ndd[k]; if(!v)continue; if([v intValue]==0){ndd[k]=@1;} }
-
-    NSString *tag=ndd[@"vipTag"];
-    if([tag isKindOfClass:[NSString class]]&&[tag rangeOfString:@"VIP"].location!=NSNotFound&&[tag rangeOfString:@"SVIP"].location==NSNotFound){ndd[@"vipTag"]=@"SVIP";}
-
-    if(dataObj) nd[@"data"]=ndd;
-    return nd;
-}
-
-// NSURLSession
-typedef id (*dt_t)(id,SEL,NSURLRequest*); static dt_t o_dt = NULL;
-static id h_dt(id s, SEL c, NSURLRequest *req) {
-    NSString *u = req.URL.absoluteString;
-    if (isVIPUrl(u)) {
-        NSString *nu = [u stringByReplacingOccurrencesOfString:@"isVip=0" withString:@"isVip=1" options:NSCaseInsensitiveSearch range:NSMakeRange(0,u.length)];
-        NSMutableURLRequest *nr = [req mutableCopy]; nr.URL = [NSURL URLWithString:nu];
-        return o_dt(s,c,nr);
+    if (didAdd) {
+        class_replaceMethod(cls, newSel,
+            method_getImplementation(origMethod),
+            method_getTypeEncoding(origMethod));
+    } else {
+        method_exchangeImplementations(origMethod, newMethod);
     }
-    return o_dt(s,c,req);
 }
 
-#pragma mark - 工具
-
-static void hIM(Class c, SEL s, IMP n, IMP *o) {
-    Method m = class_getInstanceMethod(c, s);
-    if (m) *o = method_setImplementation(m, n);
-}
-static void hCM(Class c, SEL s, IMP n, IMP *o) {
-    Method m = class_getClassMethod(c, s);
-    if (m) *o = method_setImplementation(m, n);
+static void swizzleClassMethod(Class cls, SEL origSel, SEL newSel) {
+    Method origMethod = class_getClassMethod(cls, origSel);
+    Method newMethod = class_getClassMethod(cls, newSel);
+    if (!origMethod || !newMethod) return;
+    method_exchangeImplementations(origMethod, newMethod);
 }
 
-#pragma mark - 入口
+// ========== 1. UILabel setText: ==========
+
+@interface UILabel (I18N)
+- (void)zt_setText:(NSString *)text;
+@end
+
+@implementation UILabel (I18N)
+- (void)zt_setText:(NSString *)text {
+    NSString *cn = translate(text);
+    [self zt_setText:cn];
+}
+@end
+
+// ========== 2. UIButton setTitle:forState: ==========
+
+@interface UIButton (I18N)
+- (void)zt_setTitle:(NSString *)title forState:(UIControlState)state;
+@end
+
+@implementation UIButton (I18N)
+- (void)zt_setTitle:(NSString *)title forState:(UIControlState)state {
+    NSString *cn = translate(title);
+    [self zt_setTitle:cn forState:state];
+}
+@end
+
+// ========== 3. UINavigationItem setTitle: ==========
+
+@interface UINavigationItem (I18N)
+- (void)zt_setTitle:(NSString *)title;
+@end
+
+@implementation UINavigationItem (I18N)
+- (void)zt_setTitle:(NSString *)title {
+    NSString *cn = translate(title);
+    [self zt_setTitle:cn];
+}
+@end
+
+// ========== 4. UIViewController setTitle: ==========
+
+@interface UIViewController (I18N)
+- (void)zt_setTitle:(NSString *)title;
+@end
+
+@implementation UIViewController (I18N)
+- (void)zt_setTitle:(NSString *)title {
+    NSString *cn = translate(title);
+    [self zt_setTitle:cn];
+}
+@end
+
+// ========== 5. NSBundle localizedStringForKey:value:table: ==========
+
+@interface NSBundle (I18N)
+- (NSString *)zt_localizedStringForKey:(NSString *)key value:(NSString *)value table:(NSString *)table;
+@end
+
+@implementation NSBundle (I18N)
+- (NSString *)zt_localizedStringForKey:(NSString *)key value:(NSString *)value table:(NSString *)table {
+    NSString *result = [self zt_localizedStringForKey:key value:value table:table];
+    return translate(result);
+}
+@end
+
+// ========== 6. UITextField setPlaceholder: ==========
+
+@interface UITextField (I18N)
+- (void)zt_setPlaceholder:(NSString *)placeholder;
+@end
+
+@implementation UITextField (I18N)
+- (void)zt_setPlaceholder:(NSString *)placeholder {
+    NSString *cn = translate(placeholder);
+    [self zt_setPlaceholder:cn];
+}
+@end
+
+// ========== 7. UITableViewCell setText: ==========
+
+@interface UITableViewCell (I18N)
+- (void)zt_setText:(NSString *)text;
+@end
+
+@implementation UITableViewCell (I18N)
+- (void)zt_setText:(NSString *)text {
+    NSString *cn = translate(text);
+    [self zt_setText:cn];
+}
+@end
+
+// ========== 8. UIAlertController alertControllerWithTitle:message:preferredStyle: ==========
+
+@interface UIAlertController (I18N)
++ (instancetype)zt_alertControllerWithTitle:(NSString *)title message:(NSString *)message preferredStyle:(UIAlertControllerStyle)style;
+@end
+
+@implementation UIAlertController (I18N)
++ (instancetype)zt_alertControllerWithTitle:(NSString *)title message:(NSString *)message preferredStyle:(UIAlertControllerStyle)style {
+    NSString *cnTitle = translate(title);
+    NSString *cnMsg = translate(message);
+    return [self zt_alertControllerWithTitle:cnTitle message:cnMsg preferredStyle:style];
+}
+@end
+
+// ========== 初始化 ==========
 
 __attribute__((constructor))
-static void init(void) {
-    // 预注入NSUserDefaults
-    NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-    for (NSString *k in [defs dictionaryRepresentation].allKeys) {
-        if (isVIPKey(k)) { [defs setObject:kFake forKey:k]; }
-    }
-    [defs synchronize];
+static void zt_i18n_init(void) {
+    gDict = @{
+        @"Add Network": @"添加网络",
+        @"Network ID": @"网络ID",
+        @"Enable Default Route": @"启用默认路由",
+        @"Enable On Demand (beta)": @"启用按需连接（测试版）",
+        @"Status": @"状态",
+        @"Access Control": @"访问控制",
+        @"MAC": @"MAC地址",
+        @"MTU": @"MTU",
+        @"Broadcast": @"广播",
+        @"Bridging": @"桥接",
+        @"Managed IPs": @"管理IP",
+        @"DNS Search Domain": @"DNS搜索域",
+        @"DNS Servers": @"DNS服务器",
+        @"None": @"无",
+        @"Private": @"私有",
+        @"OK": @"正常",
+        @"YES": @"是",
+        @"NO": @"否",
+        @"Share this QR code to add members to this network": @"分享此二维码以添加成员到该网络",
+        @"This Network must be restarted for this change to take effect": @"此网络必须重启才能使更改生效",
+        @"No DNS Configuration": @"无DNS配置",
+        @"DNS Configuration managed by the Network Controller": @"DNS配置由网络控制器管理",
+        @"No DNS": @"无DNS",
+        @"Network DNS": @"网络DNS",
+        @"Custom DNS": @"自定义DNS",
+        @"Done": @"完成",
+        @"Edit": @"编辑",
+        @"Add": @"添加",
+        @"ZeroTier One": @"ZeroTier One"
+    };
 
-    // Hook
-    Class ud = [NSUserDefaults class];
-    hIM(ud, @selector(objectForKey:), (IMP)h_ofk, (IMP*)&o_ofk);
-    hIM(ud, @selector(stringForKey:), (IMP)h_sfk, (IMP*)&o_sfk);
-    hIM(ud, @selector(dictionaryForKey:), (IMP)h_dfk, (IMP*)&o_dfk);
-    hIM(ud, @selector(setObject:forKey:), (IMP)h_sok, (IMP*)&o_sok);
-    hCM([NSJSONSerialization class], @selector(JSONObjectWithData:options:error:), (IMP)h_js, (IMP*)&o_js);
-    hIM([NSURLSession class], @selector(dataTaskWithRequest:), (IMP)h_dt, (IMP*)&o_dt);
+    swizzleInstanceMethod([UILabel class], @selector(setText:), @selector(zt_setText:));
+    swizzleInstanceMethod([UIButton class], @selector(setTitle:forState:), @selector(zt_setTitle:forState:));
+    swizzleInstanceMethod([UINavigationItem class], @selector(setTitle:), @selector(zt_setTitle:));
+    swizzleInstanceMethod([UIViewController class], @selector(setTitle:), @selector(zt_setTitle:));
+    swizzleInstanceMethod([NSBundle class], @selector(localizedStringForKey:value:table:), @selector(zt_localizedStringForKey:value:table:));
+    swizzleInstanceMethod([UITextField class], @selector(setPlaceholder:), @selector(zt_setPlaceholder:));
+    swizzleInstanceMethod([UITableViewCell class], @selector(setText:), @selector(zt_setText:));
+    swizzleClassMethod([UIAlertController class], @selector(alertControllerWithTitle:message:preferredStyle:), @selector(zt_alertControllerWithTitle:message:preferredStyle:));
 }
