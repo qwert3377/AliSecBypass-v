@@ -46,7 +46,13 @@ static BOOL shouldPatchJson(NSString *str) {
     return [str containsString:@"\"point\""] ||
            [str containsString:@"\"adFreeEndtime\""] ||
            [str containsString:@"余额不足"] ||
-           [str containsString:@"success":false"];
+           [str containsString:@"\"success\":false"];
+}
+
+// Use C-string to avoid ObjC literal escaping hell
+static NSRegularExpression *makeRe(const char *pattern) {
+    NSString *nsPattern = [NSString stringWithUTF8String:pattern];
+    return [NSRegularExpression regularExpressionWithPattern:nsPattern options:0 error:nil];
 }
 
 static NSString *patchJsonString(NSString *jsonStr, BOOL *outModified) {
@@ -54,9 +60,7 @@ static NSString *patchJsonString(NSString *jsonStr, BOOL *outModified) {
     NSMutableString *result = [jsonStr mutableCopy];
 
     // 1. Patch point: "point":1 -> "point":999
-    NSRegularExpression *pointRe = [NSRegularExpression
-        regularExpressionWithPattern:@"\"point\"\s*:\s*([0-9]+)"
-        options:0 error:nil];
+    NSRegularExpression *pointRe = makeRe("\\\"point\\\"\\s*:\\s*([0-9]+)");
     NSArray *pointMatches = [pointRe matchesInString:result
         options:0 range:NSMakeRange(0, result.length)];
     for (NSTextCheckingResult *match in [pointMatches reverseObjectEnumerator]) {
@@ -70,9 +74,7 @@ static NSString *patchJsonString(NSString *jsonStr, BOOL *outModified) {
     }
 
     // 2. Patch adFreeEndtime: "adFreeEndtime":0 -> "adFreeEndtime":4102444800
-    NSRegularExpression *adFreeRe = [NSRegularExpression
-        regularExpressionWithPattern:@"\"adFreeEndtime\"\s*:\s*([0-9]+)"
-        options:0 error:nil];
+    NSRegularExpression *adFreeRe = makeRe("\\\"adFreeEndtime\\\"\\s*:\\s*([0-9]+)");
     NSArray *adFreeMatches = [adFreeRe matchesInString:result
         options:0 range:NSMakeRange(0, result.length)];
     for (NSTextCheckingResult *match in [adFreeMatches reverseObjectEnumerator]) {
@@ -86,9 +88,7 @@ static NSString *patchJsonString(NSString *jsonStr, BOOL *outModified) {
     }
 
     // 3. Patch code != "200"
-    NSRegularExpression *codeRe = [NSRegularExpression
-        regularExpressionWithPattern:@"\"code\"\s*:\s*\"([^\"]+)\""
-        options:0 error:nil];
+    NSRegularExpression *codeRe = makeRe("\\\"code\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
     NSArray *codeMatches = [codeRe matchesInString:result
         options:0 range:NSMakeRange(0, result.length)];
     for (NSTextCheckingResult *match in [codeMatches reverseObjectEnumerator]) {
@@ -111,9 +111,7 @@ static NSString *patchJsonString(NSString *jsonStr, BOOL *outModified) {
 
     // 5. Patch msg: 余额不足 -> success
     if ([result containsString:@"余额不足"]) {
-        NSRegularExpression *msgRe = [NSRegularExpression
-            regularExpressionWithPattern:@"\"msg\"\s*:\s*\"[^\"]*\""
-            options:0 error:nil];
+        NSRegularExpression *msgRe = makeRe("\\\"msg\\\"\\s*:\\s*\\\"[^\\\"]*\\\"");
         NSArray *msgMatches = [msgRe matchesInString:result
             options:0 range:NSMakeRange(0, result.length)];
         for (NSTextCheckingResult *match in [msgMatches reverseObjectEnumerator]) {
