@@ -1,193 +1,285 @@
 //
-//  Kiosker_Premium_Unlock.mm
-//  TrollStore Injection Plugin for Kiosker 26.4.2
-//  Logs to app Documents directory
-//  Blocks purchase popups by intercepting view controller presentation
+//  WSCTPlugin.mm
+//  WildSafeCareTech (李白浏览器) TrollStore Injection Plugin
+//  Pure ObjC Runtime, no Logos / %hook
 //
 
-#import <objc/runtime.h>
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <pthread.h>
 
-static id (*orig_init)(id, SEL) = NULL;
-static NSString *logPath = nil;
+static NSString *const LOG_TAG = @"[WSCT]";
 
-static void fileLog(NSString *fmt, ...) {
-    if (!logPath) {
-        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *docDir = [paths firstObject];
-        logPath = [docDir stringByAppendingPathComponent:@"kiosker_premium.log"];
-    }
+// ============================================================================
+// Recursion Guard (thread-local)
+// ============================================================================
+static pthread_key_t g_inHook;
+
+static void setupRecursionGuard(void) {
+    pthread_key_create(&g_inHook, NULL);
+}
+
+static BOOL isInHook(void) {
+    return (BOOL)(uintptr_t)pthread_getspecific(g_inHook);
+}
+
+static void setInHook(BOOL val) {
+    pthread_setspecific(g_inHook, (void *)(uintptr_t)val);
+}
+
+// ============================================================================
+// Logging
+// ============================================================================
+static void wsct_log(NSString *fmt, ...) {
     va_list args;
     va_start(args, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
     va_end(args);
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", [NSDate date], msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
-    if (!fh) {
-        [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    } else {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    }
-    NSLog(@"[KioskerPremium] %@", msg);
+    NSLog(@"%@ %@", LOG_TAG, msg);
 }
 
-// ==================== 1. SubscriptionHandler init patch ====================
-
-static id kiosker_init(id self, SEL _cmd) {
-    fileLog(@"init called self=%p", self);
-    self = orig_init(self, _cmd);
-    if (self) {
-        uint8_t *base = (uint8_t *)(__bridge void *)self;
-        uint8_t old = base[24];
-        base[24] = 1;
-        fileLog(@"PATCHED _state %d->1 offset=+24", old);
-    }
-    return self;
+// ============================================================================
+// JSON Patch Helpers
+// ============================================================================
+static BOOL shouldPatchJson(NSString *str) {
+    if (!str || str.length < 20) return NO;
+    return [str containsString:@"\"point\""] ||
+           [str containsString:@"\"adFreeEndtime\""] ||
+           [str containsString:@"余额不足"] ||
+           [str containsString:@"success":false"];
 }
 
-// ==================== 2. Block purchase popups ====================
+static NSString *patchJsonString(NSString *jsonStr, BOOL *outModified) {
+    *outModified = NO;
+    NSMutableString *result = [jsonStr mutableCopy];
 
-// Hook UIViewController presentViewController to block purchase sheets
-static void (*orig_present)(id, SEL, id, BOOL, id) = NULL;
-static void hook_present(id self, SEL _cmd, UIViewController *vc, BOOL animated, id completion) {
-    NSString *className = NSStringFromClass([vc class]);
-    fileLog(@"presentViewController: %@", className);
-
-    // Block known purchase/subscription view controllers
-    NSArray *blocked = @[@"SKStoreProductViewController",
-                         @"RCPaywallViewController",
-                         @"PaywallViewController",
-                         @"SubscriptionViewController",
-                         @"PurchaseViewController",
-                         @"UIAlertController"];
-
-    for (NSString *blockedClass in blocked) {
-        if ([className isEqualToString:blockedClass] || [vc isKindOfClass:NSClassFromString(blockedClass)]) {
-            fileLog(@"BLOCKED popup: %@", className);
-            if (completion) {
-                void (^block)(void) = completion;
-                block();
-            }
-            return;
+    // 1. Patch point: "point":1 -> "point":999
+    NSRegularExpression *pointRe = [NSRegularExpression
+        regularExpressionWithPattern:@"\"point\"\s*:\s*([0-9]+)"
+        options:0 error:nil];
+    NSArray *pointMatches = [pointRe matchesInString:result
+        options:0 range:NSMakeRange(0, result.length)];
+    for (NSTextCheckingResult *match in [pointMatches reverseObjectEnumerator]) {
+        NSRange valRange = [match rangeAtIndex:1];
+        NSString *val = [result substringWithRange:valRange];
+        if (![val isEqualToString:@"999"]) {
+            wsct_log(@"PATCH point: %@ -> 999", val);
+            [result replaceCharactersInRange:valRange withString:@"999"];
+            *outModified = YES;
         }
     }
 
-    // Also block if title contains purchase keywords
-    if ([vc respondsToSelector:@selector(title)]) {
-        NSString *title = [(UIViewController *)vc title];
-        if (title && ([title rangeOfString:@"订阅"].location != NSNotFound ||
-                      [title rangeOfString:@"Premium"].location != NSNotFound ||
-                      [title rangeOfString:@"购买"].location != NSNotFound ||
-                      [title rangeOfString:@"Upgrade"].location != NSNotFound)) {
-            fileLog(@"BLOCKED popup by title: %@", title);
-            if (completion) {
-                void (^block)(void) = completion;
-                block();
-            }
-            return;
+    // 2. Patch adFreeEndtime: "adFreeEndtime":0 -> "adFreeEndtime":4102444800
+    NSRegularExpression *adFreeRe = [NSRegularExpression
+        regularExpressionWithPattern:@"\"adFreeEndtime\"\s*:\s*([0-9]+)"
+        options:0 error:nil];
+    NSArray *adFreeMatches = [adFreeRe matchesInString:result
+        options:0 range:NSMakeRange(0, result.length)];
+    for (NSTextCheckingResult *match in [adFreeMatches reverseObjectEnumerator]) {
+        NSRange valRange = [match rangeAtIndex:1];
+        NSString *val = [result substringWithRange:valRange];
+        if (![val isEqualToString:@"4102444800"]) {
+            wsct_log(@"PATCH adFreeEndtime: %@ -> 4102444800", val);
+            [result replaceCharactersInRange:valRange withString:@"4102444800"];
+            *outModified = YES;
         }
     }
 
-    orig_present(self, _cmd, vc, animated, completion);
+    // 3. Patch code != "200"
+    NSRegularExpression *codeRe = [NSRegularExpression
+        regularExpressionWithPattern:@"\"code\"\s*:\s*\"([^\"]+)\""
+        options:0 error:nil];
+    NSArray *codeMatches = [codeRe matchesInString:result
+        options:0 range:NSMakeRange(0, result.length)];
+    for (NSTextCheckingResult *match in [codeMatches reverseObjectEnumerator]) {
+        NSRange valRange = [match rangeAtIndex:1];
+        NSString *val = [result substringWithRange:valRange];
+        if (![val isEqualToString:@"200"]) {
+            wsct_log(@"PATCH code: %@ -> \"200\"", val);
+            [result replaceCharactersInRange:valRange withString:@"200"];
+            *outModified = YES;
+        }
+    }
+
+    // 4. Patch success:false -> success:true
+    NSRange sfRange = [result rangeOfString:@"\"success\":false"];
+    if (sfRange.location != NSNotFound) {
+        wsct_log(@"PATCH success: false -> true");
+        [result replaceCharactersInRange:sfRange withString:@"\"success\":true"];
+        *outModified = YES;
+    }
+
+    // 5. Patch msg: 余额不足 -> success
+    if ([result containsString:@"余额不足"]) {
+        NSRegularExpression *msgRe = [NSRegularExpression
+            regularExpressionWithPattern:@"\"msg\"\s*:\s*\"[^\"]*\""
+            options:0 error:nil];
+        NSArray *msgMatches = [msgRe matchesInString:result
+            options:0 range:NSMakeRange(0, result.length)];
+        for (NSTextCheckingResult *match in [msgMatches reverseObjectEnumerator]) {
+            wsct_log(@"PATCH msg -> success");
+            [result replaceCharactersInRange:match.range withString:@"\"msg\":\"success\""];
+            *outModified = YES;
+        }
+    }
+
+    return result;
 }
 
-// ==================== 3. Hook RevenueCat purchases ====================
+// ============================================================================
+// 1. Hook NSJSONSerialization +JSONObjectWithData:options:error:
+// ============================================================================
+static id (*orig_JSONObjectWithData)(Class, SEL, NSData *, NSJSONReadingOptions, NSError **);
 
-static void (*orig_purchase)(id, SEL, id, id) = NULL;
-static void hook_purchase(id self, SEL _cmd, id product, id completion) {
-    fileLog(@"BLOCKED RevenueCat purchase: %@", product);
-    if (completion) {
-        // Return fake success
-        void (^block)(id, id, id, BOOL) = completion;
-        block(nil, nil, nil, YES);
-    }
-}
+static id replaced_JSONObjectWithData(Class self, SEL _cmd, NSData *data,
+                                       NSJSONReadingOptions opt, NSError **error) {
+    id result = orig_JSONObjectWithData(self, _cmd, data, opt, error);
+    if (!result) return result;
+    if (isInHook()) return result;
 
-// ==================== 4. Hook SKPaymentQueue ====================
+    setInHook(YES);
+    @try {
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result
+                                                           options:0 error:nil];
+        if (!jsonData) { setInHook(NO); return result; }
 
-static void (*orig_addPayment)(id, SEL, id) = NULL;
-static void hook_addPayment(id self, SEL _cmd, id payment) {
-    fileLog(@"BLOCKED SKPaymentQueue addPayment");
-}
+        NSString *jsonStr = [[NSString alloc] initWithData:jsonData
+                                                  encoding:NSUTF8StringEncoding];
+        if (!jsonStr || jsonStr.length < 20) { setInHook(NO); return result; }
 
-// ==================== Constructor ====================
+        if (!shouldPatchJson(jsonStr)) { setInHook(NO); return result; }
 
-static void doHook() {
-    // Hook SubscriptionHandler init
-    Class subCls = NSClassFromString(@"_TtC7Kiosker19SubscriptionHandler");
-    if (subCls) {
-        Method m = class_getInstanceMethod(subCls, @selector(init));
-        if (m) {
-            IMP cur = method_getImplementation(m);
-            if (cur != (IMP)kiosker_init) {
-                orig_init = (id (*)(id, SEL))cur;
-                method_setImplementation(m, (IMP)kiosker_init);
-                fileLog(@"HOOKED SubscriptionHandler.init");
-            }
-        }
-    } else {
-        fileLog(@"SubscriptionHandler not found yet");
-    }
+        wsct_log(@"Intercepted JSON (len=%lu)", (unsigned long)jsonStr.length);
+        NSUInteger previewLen = jsonStr.length > 300 ? 300 : jsonStr.length;
+        wsct_log(@"RAW: %@", [jsonStr substringToIndex:previewLen]);
 
-    // Hook UIViewController presentViewController
-    Class vcCls = [UIViewController class];
-    Method pm = class_getInstanceMethod(vcCls, @selector(presentViewController:animated:completion:));
-    if (pm) {
-        IMP cur = method_getImplementation(pm);
-        if (cur != (IMP)hook_present) {
-            orig_present = (void (*)(id, SEL, id, BOOL, id))cur;
-            method_setImplementation(pm, (IMP)hook_present);
-            fileLog(@"HOOKED UIViewController.presentViewController");
-        }
-    }
+        BOOL modified = NO;
+        NSString *patchedStr = patchJsonString(jsonStr, &modified);
 
-    // Hook RCPurchases purchase methods
-    Class rcCls = NSClassFromString(@"RCPurchases");
-    if (rcCls) {
-        Method pm1 = class_getInstanceMethod(rcCls, NSSelectorFromString(@"purchaseProduct:withCompletion:"));
-        if (pm1) {
-            IMP cur = method_getImplementation(pm1);
-            if (cur != (IMP)hook_purchase) {
-                orig_purchase = (void (*)(id, SEL, id, id))cur;
-                method_setImplementation(pm1, (IMP)hook_purchase);
-                fileLog(@"HOOKED RCPurchases.purchaseProduct");
-            }
-        }
-    }
+        if (modified) {
+            NSUInteger patchedPreviewLen = patchedStr.length > 300 ? 300 : patchedStr.length;
+            wsct_log(@"PATCHED: %@", [patchedStr substringToIndex:patchedPreviewLen]);
 
-    // Hook SKPaymentQueue addPayment
-    Class skCls = NSClassFromString(@"SKPaymentQueue");
-    if (skCls) {
-        Method am = class_getInstanceMethod(skCls, @selector(addPayment:));
-        if (am) {
-            IMP cur = method_getImplementation(am);
-            if (cur != (IMP)hook_addPayment) {
-                orig_addPayment = (void (*)(id, SEL, id))cur;
-                method_setImplementation(am, (IMP)hook_addPayment);
-                fileLog(@"HOOKED SKPaymentQueue.addPayment");
-            }
-        }
-    }
-}
-
-__attribute__((constructor))
-static void constructor() {
-    @autoreleasepool {
-        fileLog(@"=== constructor ===");
-        doHook();
-
-        // Retry if class not loaded yet
-        if (!NSClassFromString(@"_TtC7Kiosker19SubscriptionHandler")) {
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                for (int i = 0; i < 20; i++) {
-                    [NSThread sleepForTimeInterval:0.5];
-                    doHook();
-                    if (NSClassFromString(@"_TtC7Kiosker19SubscriptionHandler")) break;
+            NSData *patchedData = [patchedStr dataUsingEncoding:NSUTF8StringEncoding];
+            if (patchedData) {
+                id patchedObj = orig_JSONObjectWithData(self, _cmd, patchedData, opt, nil);
+                if (patchedObj) {
+                    wsct_log(@"Replaced JSON retval");
+                    setInHook(NO);
+                    return patchedObj;
                 }
-            });
+            }
+        }
+    } @catch (NSException *e) {
+        wsct_log(@"Exception in JSON hook: %@", e);
+    }
+    setInHook(NO);
+    return result;
+}
+
+// ============================================================================
+// 2. Hook NSString -initWithData:encoding: (fallback)
+// ============================================================================
+static id (*orig_initWithData)(id, SEL, NSData *, NSStringEncoding);
+
+static id replaced_initWithData(id self, SEL _cmd, NSData *data, NSStringEncoding encoding) {
+    id result = orig_initWithData(self, _cmd, data, encoding);
+    if (!result || ![result isKindOfClass:[NSString class]]) return result;
+    if (isInHook()) return result;
+
+    NSString *str = (NSString *)result;
+    if (str.length < 30) return result;
+    if (!shouldPatchJson(str)) return result;
+
+    setInHook(YES);
+    @try {
+        wsct_log(@"Intercepted NSString (len=%lu)", (unsigned long)str.length);
+        BOOL modified = NO;
+        NSString *patchedStr = patchJsonString(str, &modified);
+        if (modified) {
+            wsct_log(@"Replaced NSString retval");
+            setInHook(NO);
+            return [NSString stringWithString:patchedStr];
+        }
+    } @catch (NSException *e) {
+        wsct_log(@"Exception in NSString hook: %@", e);
+    }
+    setInHook(NO);
+    return result;
+}
+
+// ============================================================================
+// 3. Hook NSURLSession -dataTaskWithRequest: (logging only)
+// ============================================================================
+static NSURLSessionDataTask *(*orig_dataTaskWithRequest)(id, SEL, NSURLRequest *);
+
+static NSURLSessionDataTask *replaced_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    @try {
+        NSURL *url = request.URL;
+        if (!url) return orig_dataTaskWithRequest(self, _cmd, request);
+
+        NSString *urlStr = url.absoluteString;
+        NSString *method = request.HTTPMethod ?: @"GET";
+
+        if ([urlStr containsString:@"yiys07.com"] ||
+            [urlStr containsString:@"exchange"] ||
+            [urlStr containsString:@"convert"] ||
+            [urlStr containsString:@"point"] ||
+            [urlStr containsString:@"order"]) {
+            wsct_log(@"TARGET [%@] %@", method, urlStr);
+            if ([method isEqualToString:@"POST"] && request.HTTPBody) {
+                NSString *body = [[NSString alloc] initWithData:request.HTTPBody
+                                                       encoding:NSUTF8StringEncoding];
+                if (body) wsct_log(@"BODY: %@", body);
+            }
+        }
+    } @catch (NSException *e) {}
+    return orig_dataTaskWithRequest(self, _cmd, request);
+}
+
+// ============================================================================
+// Constructor - runs when dylib is loaded
+// ============================================================================
+__attribute__((constructor))
+static void init_plugin(void) {
+    setupRecursionGuard();
+    wsct_log(@"Plugin loaded");
+
+    // 1. Hook NSJSONSerialization class method
+    Class jsonCls = objc_getClass("NSJSONSerialization");
+    if (jsonCls) {
+        Method m = class_getClassMethod(jsonCls, @selector(JSONObjectWithData:options:error:));
+        if (m) {
+            orig_JSONObjectWithData = (id (*)(Class, SEL, NSData *, NSJSONReadingOptions, NSError **))
+                method_getImplementation(m);
+            method_setImplementation(m, (IMP)replaced_JSONObjectWithData);
+            wsct_log(@"Hooked NSJSONSerialization.JSONObjectWithData");
         }
     }
+
+    // 2. Hook NSString instance method
+    Class strCls = objc_getClass("NSString");
+    if (strCls) {
+        Method m = class_getInstanceMethod(strCls, @selector(initWithData:encoding:));
+        if (m) {
+            orig_initWithData = (id (*)(id, SEL, NSData *, NSStringEncoding))
+                method_getImplementation(m);
+            method_setImplementation(m, (IMP)replaced_initWithData);
+            wsct_log(@"Hooked NSString.initWithData:encoding:");
+        }
+    }
+
+    // 3. Hook NSURLSession instance method
+    Class sessionCls = objc_getClass("NSURLSession");
+    if (sessionCls) {
+        Method m = class_getInstanceMethod(sessionCls, @selector(dataTaskWithRequest:));
+        if (m) {
+            orig_dataTaskWithRequest = (NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))
+                method_getImplementation(m);
+            method_setImplementation(m, (IMP)replaced_dataTaskWithRequest);
+            wsct_log(@"Hooked NSURLSession.dataTaskWithRequest:");
+        }
+    }
+
+    wsct_log(@"All hooks installed");
 }
