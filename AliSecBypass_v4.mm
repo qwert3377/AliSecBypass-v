@@ -6,18 +6,29 @@
 #import <UIKit/UIKit.h>
 #include <objc/runtime.h>
 
-static NSString *(*)(id, SEL, NSString *, NSString *, NSString *) orig_NSBundle_localizedStringForKey;
-static void (*)(id, SEL, NSString *) orig_UILabel_setText;
-static void (*)(id, SEL, NSAttributedString *) orig_UILabel_setAttributedText;
-static void (*)(id, SEL, NSString *, UIControlState) orig_UIButton_setTitle;
-static void (*)(id, SEL, NSAttributedString *, UIControlState) orig_UIButton_setAttributedTitle;
-static void (*)(id, SEL, NSString *) orig_UINavigationItem_setTitle;
-static void (*)(id, SEL, NSString *) orig_UIViewController_setTitle;
-static void (*)(id, SEL, NSString *) orig_UITabBarItem_setTitle;
-static void (*)(id, SEL, NSString *, NSUInteger) orig_UISegmentedControl_setTitle;
-static void (*)(id, SEL, NSString *) orig_UITextField_setPlaceholder;
-static void (*)(id, SEL, NSString *) orig_UISearchBar_setPlaceholder;
-static void (*)(id, SEL, NSString *) orig_UIBarButtonItem_setTitle;
+static NSString *(*orig_NSBundle_localizedStringForKey)(id, SEL, NSString *, NSString *, NSString *);
+
+static void (*orig_UILabel_setText)(id, SEL, NSString *);
+
+static void (*orig_UILabel_setAttributedText)(id, SEL, NSAttributedString *);
+
+static void (*orig_UIButton_setTitle)(id, SEL, NSString *, UIControlState);
+
+static void (*orig_UIButton_setAttributedTitle)(id, SEL, NSAttributedString *, UIControlState);
+
+static void (*orig_UINavigationItem_setTitle)(id, SEL, NSString *);
+
+static void (*orig_UIViewController_setTitle)(id, SEL, NSString *);
+
+static void (*orig_UITabBarItem_setTitle)(id, SEL, NSString *);
+
+static void (*orig_UISegmentedControl_setTitle)(id, SEL, NSString *, NSUInteger);
+
+static void (*orig_UITextField_setPlaceholder)(id, SEL, NSString *);
+
+static void (*orig_UISearchBar_setPlaceholder)(id, SEL, NSString *);
+
+static void (*orig_UIBarButtonItem_setTitle)(id, SEL, NSString *);
 
 static NSString *translateString(NSString *text) {
     if (!text || ![text isKindOfClass:[NSString class]] || [text length] == 0) return text;
