@@ -341,20 +341,13 @@ static void scanViewController(UIViewController *vc) {
 static void scanAllViews(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app) return;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in app.connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                UIWindowScene *windowScene = (UIWindowScene *)scene;
-                for (UIWindow *window in windowScene.windows) {
-                    scanView(window);
-                    if (window.rootViewController) scanViewController(window.rootViewController);
-                }
+    for (UIScene *scene in app.connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            for (UIWindow *window in windowScene.windows) {
+                scanView(window);
+                if (window.rootViewController) scanViewController(window.rootViewController);
             }
-        }
-    } else {
-        for (UIWindow *window in app.windows) {
-            scanView(window);
-            if (window.rootViewController) scanViewController(window.rootViewController);
         }
     }
 }
