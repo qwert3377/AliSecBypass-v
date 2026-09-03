@@ -6,18 +6,18 @@
 #import <UIKit/UIKit.h>
 #include <objc/runtime.h>
 
-static NSString *(*orig_NSBundle_localizedStringForKey)(id, SEL, NSString *, NSString *, NSString *);
-static void (*orig_UILabel_setText)(id, SEL, NSString *);
-static void (*orig_UILabel_setAttributedText)(id, SEL, NSAttributedString *);
-static void (*orig_UIButton_setTitle)(id, SEL, NSString *, UIControlState);
-static void (*orig_UIButton_setAttributedTitle)(id, SEL, NSAttributedString *, UIControlState);
-static void (*orig_UINavigationItem_setTitle)(id, SEL, NSString *);
-static void (*orig_UIViewController_setTitle)(id, SEL, NSString *);
-static void (*orig_UITabBarItem_setTitle)(id, SEL, NSString *);
-static void (*orig_UISegmentedControl_setTitle)(id, SEL, NSString *, NSUInteger);
-static void (*orig_UITextField_setPlaceholder)(id, SEL, NSString *);
-static void (*orig_UISearchBar_setPlaceholder)(id, SEL, NSString *);
-static void (*orig_UIBarButtonItem_setTitle)(id, SEL, NSString *);
+static NSString *(*)(id, SEL, NSString *, NSString *, NSString *) orig_NSBundle_localizedStringForKey;
+static void (*)(id, SEL, NSString *) orig_UILabel_setText;
+static void (*)(id, SEL, NSAttributedString *) orig_UILabel_setAttributedText;
+static void (*)(id, SEL, NSString *, UIControlState) orig_UIButton_setTitle;
+static void (*)(id, SEL, NSAttributedString *, UIControlState) orig_UIButton_setAttributedTitle;
+static void (*)(id, SEL, NSString *) orig_UINavigationItem_setTitle;
+static void (*)(id, SEL, NSString *) orig_UIViewController_setTitle;
+static void (*)(id, SEL, NSString *) orig_UITabBarItem_setTitle;
+static void (*)(id, SEL, NSString *, NSUInteger) orig_UISegmentedControl_setTitle;
+static void (*)(id, SEL, NSString *) orig_UITextField_setPlaceholder;
+static void (*)(id, SEL, NSString *) orig_UISearchBar_setPlaceholder;
+static void (*)(id, SEL, NSString *) orig_UIBarButtonItem_setTitle;
 
 static NSString *translateString(NSString *text) {
     if (!text || ![text isKindOfClass:[NSString class]] || [text length] == 0) return text;
@@ -112,7 +112,7 @@ static NSString *translateString(NSString *text) {
     return text;
 }
 
-static NSString *hooked_NSBundle_localizedStringForKey(id self, SEL _cmd, NSString *key, NSString *value, NSString *table) {
+static NSString * hooked_NSBundle_localizedStringForKey(id self, SEL _cmd, NSString *key, NSString *value, NSString *table) {
     NSString *result = orig_NSBundle_localizedStringForKey(self, _cmd, key, value, table);
     return translateString(result);
 }
@@ -175,99 +175,99 @@ static void hooked_UIBarButtonItem_setTitle(id self, SEL _cmd, NSString *title) 
     orig_UIBarButtonItem_setTitle(self, _cmd, translateString(title));
 }
 
-static void swizzle_NSBundle_localizedStringForKey_value_table_(void) {
+static void swizzle_NSBundle_localizedStringForKey(void) {
     Method m = class_getInstanceMethod([NSBundle class], @selector(localizedStringForKey:value:table:));
     if (m) {
-        orig_NSBundle_localizedStringForKey_value_table_ = (NSString *(*)(id, SEL, NSString *, NSString *, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_NSBundle_localizedStringForKey_value_table_);
+        orig_NSBundle_localizedStringForKey = (NSString *(*)(id, SEL, NSString *, NSString *, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_NSBundle_localizedStringForKey);
     }
 }
 
-static void swizzle_UILabel_setText_(void) {
+static void swizzle_UILabel_setText(void) {
     Method m = class_getInstanceMethod([UILabel class], @selector(setText:));
     if (m) {
-        orig_UILabel_setText_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UILabel_setText_);
+        orig_UILabel_setText = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UILabel_setText);
     }
 }
 
-static void swizzle_UILabel_setAttributedText_(void) {
+static void swizzle_UILabel_setAttributedText(void) {
     Method m = class_getInstanceMethod([UILabel class], @selector(setAttributedText:));
     if (m) {
-        orig_UILabel_setAttributedText_ = (void (*)(id, SEL, NSAttributedString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UILabel_setAttributedText_);
+        orig_UILabel_setAttributedText = (void (*)(id, SEL, NSAttributedString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UILabel_setAttributedText);
     }
 }
 
-static void swizzle_UIButton_setTitle_forState_(void) {
+static void swizzle_UIButton_setTitle(void) {
     Method m = class_getInstanceMethod([UIButton class], @selector(setTitle:forState:));
     if (m) {
-        orig_UIButton_setTitle_forState_ = (void (*)(id, SEL, NSString *, UIControlState))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UIButton_setTitle_forState_);
+        orig_UIButton_setTitle = (void (*)(id, SEL, NSString *, UIControlState))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UIButton_setTitle);
     }
 }
 
-static void swizzle_UIButton_setAttributedTitle_forState_(void) {
+static void swizzle_UIButton_setAttributedTitle(void) {
     Method m = class_getInstanceMethod([UIButton class], @selector(setAttributedTitle:forState:));
     if (m) {
-        orig_UIButton_setAttributedTitle_forState_ = (void (*)(id, SEL, NSAttributedString *, UIControlState))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UIButton_setAttributedTitle_forState_);
+        orig_UIButton_setAttributedTitle = (void (*)(id, SEL, NSAttributedString *, UIControlState))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UIButton_setAttributedTitle);
     }
 }
 
-static void swizzle_UINavigationItem_setTitle_(void) {
+static void swizzle_UINavigationItem_setTitle(void) {
     Method m = class_getInstanceMethod([UINavigationItem class], @selector(setTitle:));
     if (m) {
-        orig_UINavigationItem_setTitle_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UINavigationItem_setTitle_);
+        orig_UINavigationItem_setTitle = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UINavigationItem_setTitle);
     }
 }
 
-static void swizzle_UIViewController_setTitle_(void) {
+static void swizzle_UIViewController_setTitle(void) {
     Method m = class_getInstanceMethod([UIViewController class], @selector(setTitle:));
     if (m) {
-        orig_UIViewController_setTitle_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UIViewController_setTitle_);
+        orig_UIViewController_setTitle = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UIViewController_setTitle);
     }
 }
 
-static void swizzle_UITabBarItem_setTitle_(void) {
+static void swizzle_UITabBarItem_setTitle(void) {
     Method m = class_getInstanceMethod([UITabBarItem class], @selector(setTitle:));
     if (m) {
-        orig_UITabBarItem_setTitle_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UITabBarItem_setTitle_);
+        orig_UITabBarItem_setTitle = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UITabBarItem_setTitle);
     }
 }
 
-static void swizzle_UISegmentedControl_setTitle_forSegmentAtIndex_(void) {
+static void swizzle_UISegmentedControl_setTitle(void) {
     Method m = class_getInstanceMethod([UISegmentedControl class], @selector(setTitle:forSegmentAtIndex:));
     if (m) {
-        orig_UISegmentedControl_setTitle_forSegmentAtIndex_ = (void (*)(id, SEL, NSString *, NSUInteger))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UISegmentedControl_setTitle_forSegmentAtIndex_);
+        orig_UISegmentedControl_setTitle = (void (*)(id, SEL, NSString *, NSUInteger))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UISegmentedControl_setTitle);
     }
 }
 
-static void swizzle_UITextField_setPlaceholder_(void) {
+static void swizzle_UITextField_setPlaceholder(void) {
     Method m = class_getInstanceMethod([UITextField class], @selector(setPlaceholder:));
     if (m) {
-        orig_UITextField_setPlaceholder_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UITextField_setPlaceholder_);
+        orig_UITextField_setPlaceholder = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UITextField_setPlaceholder);
     }
 }
 
-static void swizzle_UISearchBar_setPlaceholder_(void) {
+static void swizzle_UISearchBar_setPlaceholder(void) {
     Method m = class_getInstanceMethod([UISearchBar class], @selector(setPlaceholder:));
     if (m) {
-        orig_UISearchBar_setPlaceholder_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UISearchBar_setPlaceholder_);
+        orig_UISearchBar_setPlaceholder = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UISearchBar_setPlaceholder);
     }
 }
 
-static void swizzle_UIBarButtonItem_setTitle_(void) {
+static void swizzle_UIBarButtonItem_setTitle(void) {
     Method m = class_getInstanceMethod([UIBarButtonItem class], @selector(setTitle:));
     if (m) {
-        orig_UIBarButtonItem_setTitle_ = (void (*)(id, SEL, NSString *))method_getImplementation(m);
-        method_setImplementation(m, (IMP)hooked_UIBarButtonItem_setTitle_);
+        orig_UIBarButtonItem_setTitle = (void (*)(id, SEL, NSString *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)hooked_UIBarButtonItem_setTitle);
     }
 }
 
@@ -350,18 +350,18 @@ static void scanAllViews(void) {
 
 __attribute__((constructor))
 static void tailscale_chinese_init(void) {
-    swizzle_NSBundle_localizedStringForKey_value_table_();
-    swizzle_UILabel_setText_();
-    swizzle_UILabel_setAttributedText_();
-    swizzle_UIButton_setTitle_forState_();
-    swizzle_UIButton_setAttributedTitle_forState_();
-    swizzle_UINavigationItem_setTitle_();
-    swizzle_UIViewController_setTitle_();
-    swizzle_UITabBarItem_setTitle_();
-    swizzle_UISegmentedControl_setTitle_forSegmentAtIndex_();
-    swizzle_UITextField_setPlaceholder_();
-    swizzle_UISearchBar_setPlaceholder_();
-    swizzle_UIBarButtonItem_setTitle_();
+    swizzle_NSBundle_localizedStringForKey();
+    swizzle_UILabel_setText();
+    swizzle_UILabel_setAttributedText();
+    swizzle_UIButton_setTitle();
+    swizzle_UIButton_setAttributedTitle();
+    swizzle_UINavigationItem_setTitle();
+    swizzle_UIViewController_setTitle();
+    swizzle_UITabBarItem_setTitle();
+    swizzle_UISegmentedControl_setTitle();
+    swizzle_UITextField_setPlaceholder();
+    swizzle_UISearchBar_setPlaceholder();
+    swizzle_UIBarButtonItem_setTitle();
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         scanAllViews();
