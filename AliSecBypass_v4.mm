@@ -1,8 +1,8 @@
 //
-//  YSB_Pro_Unlock_v55_AntiSuicide.mm
+//  YSB_Pro_Unlock_v56_AntiSuicide.mm
 //  功能: YSBrowser Pro 解锁 (Frida v53 移植) + 防自杀 (YSKit exit 点补丁 + exit 家族 hook)
 //  环境: Theos 编译单文件 .mm, TrollStore 注入 (非越狱)
-//  说明: 全程 ObjC Runtime + MSHookFunction (从 App 自带 CydiaSubstrate.framework dlsym)
+//  说明: Hook 引擎优先 Dobby (支持共享缓存), 退回自带 CydiaSubstrate shim
 //        无 %hook, 无 Logos 语法
 //
 
@@ -41,20 +41,31 @@ static void ysb_log(const char *fmt, ...) {
     }
 }
 
-#pragma mark - MSHookFunction (来自 App 自带的 CydiaSubstrate.framework)
+#pragma mark - Hook 引擎 (优先 Dobby, 退回 CydiaSubstrate shim)
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 static MSHookFunction_t g_msHook = NULL;
 
 static void setup_ms_hook(void) {
+    // 优先 Dobby (项目已链接, 支持钩 dyld 共享缓存里的 libSystem 函数)
+    // App 自带 CydiaSubstrate 是精简 shim, 其 MSHookFunction 不能钩共享缓存函数, 会闪退
+    g_msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "DobbyHook");
+    if (!g_msHook) {
+        void *h = dlopen("libdobby.dylib", RTLD_NOW);
+        if (h) g_msHook = (MSHookFunction_t)dlsym(h, "DobbyHook");
+    }
+    if (g_msHook) {
+        ysb_log("DobbyHook found: %p", g_msHook);
+        return;
+    }
     void *ms = dlopen("CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW | RTLD_GLOBAL);
     if (!ms) ms = dlopen("/Applications/YSBrowser.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW);
     if (!ms) ms = RTLD_DEFAULT;
     g_msHook = (MSHookFunction_t)dlsym(ms, "MSHookFunction");
     if (g_msHook) {
-        ysb_log("MSHookFunction found: %p", g_msHook);
+        ysb_log("MSHookFunction found (shim): %p", g_msHook);
     } else {
-        ysb_log("MSHookFunction NOT found, hooks disabled!");
+        ysb_log("no hook engine found, function hooks disabled (memory patches still active)");
     }
 }
 
@@ -371,7 +382,7 @@ static void patch_yskit_at(uintptr_t base) {
     const uint8_t ret2[8] = { 0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6 }; // LDP x29,x30,[sp],#16 ; RET
 
     // 点1: 真正的 exit 调用是 0x148d4 的 BLR x16 (间接调用)
-    // 0x148e0 是 Swift ARC 指令(AND x8,x8,#-8), 必须恢复, NOP 它会崩溃!
+    // 0x148e0 是 Swift ARC 指令(AND x8,x8,#-8), 必须保持原样, NOP 它会崩溃!
     const uint8_t orig_and[4] = { 0x08, 0xed, 0x7c, 0x92 };
     write_bytes((void *)(base + 0x148e0), orig_and, 4, "YSKit restore AND @0x148e0");
     write_bytes((void *)(base + 0x148d4), nop, 4, "YSKit NOP BLR exit @0x148d4");
@@ -468,7 +479,7 @@ static void ysb_repl_setString(id self, SEL _cmd, NSString *s) {
 #pragma mark - 主入口
 
 __attribute__((constructor)) static void ysb_init(void) {
-    ysb_log("=== YSB Pro Unlock v55 + AntiSuicide init ===");
+    ysb_log("=== YSB Pro Unlock v56 + AntiSuicide init ===");
 
     setup_ms_hook();
     find_ysb_base();
