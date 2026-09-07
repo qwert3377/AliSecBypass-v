@@ -509,7 +509,7 @@ __attribute__((constructor)) static void ysb_init(void) {
     // ---- Pasteboard 监控 ----
     Method pm = class_getInstanceMethod([UIPasteboard class], @selector(setString:));
     if (pm) {
-        ysb_orig_setString = (void *)method_setImplementation(pm, (IMP)ysb_repl_setString);
+        ysb_orig_setString = (void (*)(id, SEL, NSString *))method_setImplementation(pm, (IMP)ysb_repl_setString);
         ysb_log("UIPasteboard.setString: hooked");
     }
 
