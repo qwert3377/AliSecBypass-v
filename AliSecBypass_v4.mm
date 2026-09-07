@@ -133,7 +133,7 @@ extern "C" void ysb_log_ret4e0(uintptr_t v, uintptr_t v2) {
 #pragma mark - 裸函数 Hook 实现 (ARM64, 仅寄存器级操作)
 
 void *ysb_orig_188588 = NULL;
-const char ysb_provcs[] = "YSBrowser.ProViewController";
+extern "C" const char ysb_provcs[] __attribute__((used)) = "YSBrowser.ProViewController";
 
 // 0x188588: onEnter 若 x0 是 ProViewController 则置 nil, 其余寄存器原样透传
 __attribute__((naked)) static void ysb_repl_188588(void) {
