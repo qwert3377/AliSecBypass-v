@@ -6,6 +6,7 @@
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <sys/mman.h>
+#import <libkern/OSCacheControl.h>
 
 static uintptr_t g_base = 0;
 
@@ -35,8 +36,8 @@ static void patch32(uintptr_t offset, uint32_t value) {
     // Restore protection
     mprotect((void *)page, len, PROT_READ | PROT_EXEC);
 
-    // Clear cache
-    __builtin___clear_cache((char *)addr, (char *)(addr + 4));
+    // Flush instruction cache
+    sys_icache_invalidate((void *)addr, 4);
 }
 
 static inline void patchNop(uintptr_t offset) { patch32(offset, 0xd503201f); }
@@ -51,42 +52,24 @@ static void patchFuncReturnTrue(uintptr_t offset) {
 
 static void setupPatches() {
     // === Settings page ===
-    // 0x448668: tbz w22, #0, 0x448854 -> nop
     patchNop(0x448668);
 
     // === Pro detail page ===
-    // 0x448a84: Pro status check -> return 1
     patchFuncReturnTrue(0x448a84);
-
-    // 0x448644: tbz w0, #0, 0x448698 -> nop
     patchNop(0x448644);
 
     // === Export checks ===
-    // 0x3520f8: tbnz w0, #0, 0x352138 -> b 0x352138
-    // Encoding: b imm26=14 -> 0x1400000e
     patch32(0x3520f8, 0x1400000e);
-
-    // 0x3509dc: cbz x0, 0x350ab0 -> nop
     patchNop(0x3509dc);
-
-    // 0x3509f8: cbz x20, 0x350ab0 -> nop
     patchNop(0x3509f8);
-
-    // 0x35f53c: tbz w21, #0, 0x35f598 -> nop
     patchNop(0x35f53c);
-
-    // 0x35f50c: Export permission check -> return 1
     patchFuncReturnTrue(0x35f50c);
 
     // === Export button Pro paths ===
-    // 0x1829f4: tbz w0, #0, 0x182cf4 -> nop
     patchNop(0x1829f4);
-
-    // 0x182a50: tbz w0, #0, 0x182cf4 -> nop
     patchNop(0x182a50);
 
     // === Pro check ===
-    // 0x40e0d8: tbz w0, #32, 0x40e148 -> nop
     patchNop(0x40e0d8);
 
     NSLog(@"[YSB-Pro] All patches applied (base=0x%llx)", (unsigned long long)g_base);
@@ -94,7 +77,6 @@ static void setupPatches() {
 
 __attribute__((constructor))
 static void ysbProInit() {
-    // Delay to ensure YSBrowser module is loaded
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         g_base = getModuleBase("YSBrowser");
