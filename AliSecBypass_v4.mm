@@ -1,8 +1,8 @@
 //
-//  YSB_Pro_Unlock_v56_AntiSuicide.mm
+//  YSB_Pro_Unlock_v57_AntiSuicide.mm
 //  功能: YSBrowser Pro 解锁 (Frida v53 移植) + 防自杀 (YSKit exit 点补丁 + exit 家族 hook)
 //  环境: Theos 编译单文件 .mm, TrollStore 注入 (非越狱)
-//  说明: Hook 引擎优先 Dobby (支持共享缓存), 退回自带 CydiaSubstrate shim
+//  说明: Hook 引擎自动分级: Dobby(全功能) > shim(仅App二进制) > 无(纯补丁+swizzle)
 //        无 %hook, 无 Logos 语法
 //
 
@@ -41,21 +41,32 @@ static void ysb_log(const char *fmt, ...) {
     }
 }
 
-#pragma mark - Hook 引擎 (优先 Dobby, 退回 CydiaSubstrate shim)
+#pragma mark - Hook 引擎 (Dobby 优先, shim 兜底, 自动分级)
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 static MSHookFunction_t g_msHook = NULL;
+static int g_engine = 0;   // 0=无 1=Dobby(可钩共享缓存) 2=shim(只能钩App二进制)
+
+// weak 引用: 链接了 Dobby 就直接用; 没链接 &DobbyHook 为 NULL 不报错
+extern "C" int DobbyHook(void *address, void *replace_func, void **origin_func_ptr) __attribute__((weak));
 
 static void setup_ms_hook(void) {
-    // 优先 Dobby (项目已链接, 支持钩 dyld 共享缓存里的 libSystem 函数)
-    // App 自带 CydiaSubstrate 是精简 shim, 其 MSHookFunction 不能钩共享缓存函数, 会闪退
+    // 优先 Dobby (支持钩 dyld 共享缓存里的 libSystem 函数)
+    // App 自带 CydiaSubstrate 是精简 shim, 其 MSHookFunction 钩共享缓存函数会闪退
+    if (&DobbyHook != NULL) {
+        g_msHook = (MSHookFunction_t)&DobbyHook;
+        g_engine = 1;
+        ysb_log("DobbyHook (linked): %p", g_msHook);
+        return;
+    }
     g_msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "DobbyHook");
     if (!g_msHook) {
         void *h = dlopen("libdobby.dylib", RTLD_NOW);
         if (h) g_msHook = (MSHookFunction_t)dlsym(h, "DobbyHook");
     }
     if (g_msHook) {
-        ysb_log("DobbyHook found: %p", g_msHook);
+        g_engine = 1;
+        ysb_log("DobbyHook (dynamic): %p", g_msHook);
         return;
     }
     void *ms = dlopen("CydiaSubstrate.framework/CydiaSubstrate", RTLD_NOW | RTLD_GLOBAL);
@@ -63,9 +74,11 @@ static void setup_ms_hook(void) {
     if (!ms) ms = RTLD_DEFAULT;
     g_msHook = (MSHookFunction_t)dlsym(ms, "MSHookFunction");
     if (g_msHook) {
-        ysb_log("MSHookFunction found (shim): %p", g_msHook);
+        g_engine = 2;
+        ysb_log("MSHookFunction (shim, app-binary only): %p", g_msHook);
     } else {
-        ysb_log("no hook engine found, function hooks disabled (memory patches still active)");
+        g_engine = 0;
+        ysb_log("no hook engine, all function hooks disabled (patches+swizzles still active)");
     }
 }
 
@@ -118,9 +131,10 @@ static bool patch_branch(uintptr_t pc_rva, uintptr_t tgt_rva, const char *desc) 
 }
 
 static void hook_rva(uintptr_t rva, void *repl, void **orig, const char *desc) {
-    if (!g_ysb_base || !g_msHook) return;
+    if (!g_ysb_base || g_engine == 0) return;
+    ysb_log("HOOK %s @ 0x%lx (engine=%d)", desc, (unsigned long)rva, g_engine);
     g_msHook((void *)(g_ysb_base + rva), repl, orig);
-    ysb_log("HOOK %s @ 0x%lx", desc, (unsigned long)rva);
+    ysb_log("HOOK %s done", desc);
 }
 
 #pragma mark - 0x4054e8 嵌套计数 (C 辅助函数, 供汇编调用)
@@ -316,7 +330,7 @@ __attribute__((naked)) static void ysb_repl_4e0b7c(void) {
     );
 }
 
-#pragma mark - 防自杀: exit 家族 Hook
+#pragma mark - 防自杀: exit 家族 Hook (仅 Dobby 可执行)
 
 static void ysb_repl_exit(int code)    { ysb_log("BLOCKED exit(%d)", code); }
 static void ysb_repl__exit(int code)   { ysb_log("BLOCKED _exit(%d)", code); }
@@ -351,7 +365,7 @@ static int ysb_repl_raise(int sig) {
 }
 
 static void hook_signal_family(void) {
-    if (!g_msHook) return;
+    if (g_engine != 1) { ysb_log("skip signal hooks (need Dobby)"); return; }
     void *p;
     p = dlsym(RTLD_DEFAULT, "kill");           if (p) { g_msHook(p, (void *)ysb_repl_kill, (void **)&o_kill); }
     p = dlsym(RTLD_DEFAULT, "pthread_kill");   if (p) { g_msHook(p, (void *)ysb_repl_pthread_kill, (void **)&o_pthread_kill); }
@@ -361,7 +375,7 @@ static void hook_signal_family(void) {
 }
 
 static void hook_exit_family(void) {
-    if (!g_msHook) return;
+    if (g_engine != 1) { ysb_log("skip exit hooks (need Dobby)"); return; }
     static void *o1, *o2, *o3, *o4;  // orig 占位 (不调用原函数)
     void *p;
     p = dlsym(RTLD_DEFAULT, "exit");   if (p) { g_msHook(p, (void *)ysb_repl_exit,   &o1); ysb_log("HOOK exit"); }
@@ -479,24 +493,14 @@ static void ysb_repl_setString(id self, SEL _cmd, NSString *s) {
 #pragma mark - 主入口
 
 __attribute__((constructor)) static void ysb_init(void) {
-    ysb_log("=== YSB Pro Unlock v56 + AntiSuicide init ===");
+    ysb_log("=== YSB Pro Unlock v57 + AntiSuicide init ===");
 
     setup_ms_hook();
     find_ysb_base();
 
-    // ---- 防自杀 ----
-    hook_exit_family();
-    hook_signal_family();
+    // ---- 防自杀: 内存补丁 (不依赖任何 hook 引擎, 永远安全) ----
     patch_yskit_now();   // YSKit 可能已加载
     _dyld_register_func_for_add_image(ysb_image_added);  // 未加载则等回调
-
-    // ---- Pro 解锁: 函数级 hook ----
-    hook_rva(0x188588, (void *)ysb_repl_188588,      (void **)&ysb_orig_188588, "0x188588 ProVC->nil");
-    hook_rva(0x35f50c, (void *)ysb_repl_ret1_35f50c, (void **)&ysb_orig_35f50c, "0x35f50c ret=1");
-    hook_rva(0x4054e8, (void *)ysb_repl_4054e8,      (void **)&ysb_orig_4054e8, "0x4054e8 ret=1 outermost");
-    hook_rva(0x448a84, (void *)ysb_repl_ret1_448a84, (void **)&ysb_orig_448a84, "0x448a84 ret=1");
-    hook_rva(0x448644, (void *)ysb_repl_448644,      (void **)&ysb_orig_448644, "0x448644 x0=1");
-    hook_rva(0x4e0b7c, (void *)ysb_repl_4e0b7c,      (void **)&ysb_orig_4e0b7c, "0x4e0b7c monitor");
 
     // ---- Pro 解锁: 内存补丁 ----
     patch_branch(0x3520f8, 0x352138, "tbnz->b (export entry)");
@@ -523,6 +527,16 @@ __attribute__((constructor)) static void ysb_init(void) {
         ysb_orig_setString = (void (*)(id, SEL, NSString *))method_setImplementation(pm, (IMP)ysb_repl_setString);
         ysb_log("UIPasteboard.setString: hooked");
     }
+
+    // ---- 函数级 hook (放最后: 防自杀已由内存补丁保证, 这里挂了也能从日志定位) ----
+    hook_exit_family();
+    hook_signal_family();
+    hook_rva(0x188588, (void *)ysb_repl_188588,      (void **)&ysb_orig_188588, "0x188588 ProVC->nil");
+    hook_rva(0x35f50c, (void *)ysb_repl_ret1_35f50c, (void **)&ysb_orig_35f50c, "0x35f50c ret=1");
+    hook_rva(0x4054e8, (void *)ysb_repl_4054e8,      (void **)&ysb_orig_4054e8, "0x4054e8 ret=1 outermost");
+    hook_rva(0x448a84, (void *)ysb_repl_ret1_448a84, (void **)&ysb_orig_448a84, "0x448a84 ret=1");
+    hook_rva(0x448644, (void *)ysb_repl_448644,      (void **)&ysb_orig_448644, "0x448644 x0=1");
+    hook_rva(0x4e0b7c, (void *)ysb_repl_4e0b7c,      (void **)&ysb_orig_4e0b7c, "0x4e0b7c monitor");
 
     ysb_log("=== init done ===");
 }
