@@ -64,7 +64,7 @@ static uintptr_t g_ysb_base = 0;   // YSBrowser 主程序实际加载基址 (sli
 
 static void find_ysb_base(void) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *nm = _dyld_image_name(i);
+        const char *nm = _dyld_get_image_name(i);
         if (nm && strstr(nm, "YSBrowser.app/YSBrowser")) {
             g_ysb_base = (uintptr_t)_dyld_get_image_header(i) + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
             break;
@@ -301,7 +301,11 @@ __attribute__((naked)) static void ysb_repl_4e0b7c(void) {
         "ldr x8, [sp, #0x40]\n"
         "ldp x29, x30, [sp, #0xb0]\n"
         "add sp, sp, #0xc0\n"
-        "ret\#pragma mark - 防自杀: exit 家族 Hook
+        "ret\n"
+    );
+}
+
+#pragma mark - 防自杀: exit 家族 Hook
 
 static void ysb_repl_exit(int code)    { ysb_log("BLOCKED exit(%d)", code); }
 static void ysb_repl__exit(int code)   { ysb_log("BLOCKED _exit(%d)", code); }
@@ -388,7 +392,7 @@ static void patch_yskit_at(uintptr_t base) {
 
 static void patch_yskit_now(void) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *nm = _dyld_image_name(i);
+        const char *nm = _dyld_get_image_name(i);
         if (nm && strstr(nm, "YSKit.framework/YSKit")) {
             uintptr_t base = (uintptr_t)_dyld_get_image_header(i) + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
             patch_yskit_at(base);
@@ -511,5 +515,3 @@ __attribute__((constructor)) static void ysb_init(void) {
 
     ysb_log("=== init done ===");
 }
-
-
