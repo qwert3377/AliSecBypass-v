@@ -671,7 +671,7 @@ static void rewriteObjectIvar(NSAttributedString *o, NSString *hit) {
     Ivar iv = nil;
     if (clsCached && [o isKindOfClass:clsCached]) iv = class_getInstanceVariable(clsCached, "_contents");
     else if (clsMutable && [o isKindOfClass:clsMutable]) iv = class_getInstanceVariable(clsMutable, "mutableString");
-    if (iv) object_setIvar(o, iv, (id)CFBridgingRetain(hit)); // +1 永久持有，两种内存管理模式都安全
+    if (iv) object_setIvar(o, iv, (__bridge id)CFBridgingRetain(hit)); // CFBridgingRetain +1，__bridge 仅转类型不再插手，永久持有
 }
 
 static CTTypesetterRef (*orig_CTTypesetterCreate)(CFAttributedStringRef);
