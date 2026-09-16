@@ -1,12 +1,17 @@
 //
 //  SideStore 运行时汉化 —— TrollStore 注入单文件
-//  无 Logos 语法，纯 ObjC Runtime + MSHookFunction，MRC
+//  无 Logos 语法，纯 ObjC Runtime swizzle + Dobby/dlsym，MRC
 //  翻译表内嵌；CoreText 原生替换 + 排版缓存；CFString/CFBundle 生成端兜底
 //
 #import <Foundation/Foundation.h>
 #import <CoreText/CoreText.h>
 #import <objc/runtime.h>
-#import <substrate.h>
+#import <dlfcn.h>
+#include <dobby.h>
+static void hookFunc(const char *name, void *repl, void **orig) {
+    void *addr = dlsym(RTLD_DEFAULT, name);
+    if (addr) DobbyHook(addr, repl, orig);
+}
 #include <unordered_map>
 #include <string>
 #include <cctype>
@@ -801,10 +806,10 @@ __attribute__((constructor)) static void sidestore_cn_init() {
         swz("CATextLayer", "setString:", (IMP)hook_CATextLayer_setString, (IMP *)&orig_CATextLayer_setString);
         swz("NSBundle", "localizedStringForKey:value:table:", (IMP)hook_NSBundle_localized, (IMP *)&orig_NSBundle_localized);
 
-        MSHookFunction((void *)CTTypesetterCreateWithAttributedString, (void *)hook_CTTypesetterCreate, (void **)&orig_CTTypesetterCreate);
-        MSHookFunction((void *)CTLineCreateWithAttributedString, (void *)hook_CTLineCreate, (void **)&orig_CTLineCreate);
-        MSHookFunction((void *)CTFramesetterCreateWithAttributedString, (void *)hook_CTFramesetterCreate, (void **)&orig_CTFramesetterCreate);
-        MSHookFunction((void *)CFStringCreateWithCString, (void *)hook_CFStringCreateWithCString, (void **)&orig_CFStringCreateWithCString);
-        MSHookFunction((void *)CFBundleCopyLocalizedString, (void *)hook_CFBundleCopyLocalizedString, (void **)&orig_CFBundleCopyLocalizedString);
+        hookFunc("CTTypesetterCreateWithAttributedString", (void *)hook_CTTypesetterCreate, (void **)&orig_CTTypesetterCreate);
+        hookFunc("CTLineCreateWithAttributedString", (void *)hook_CTLineCreate, (void **)&orig_CTLineCreate);
+        hookFunc("CTFramesetterCreateWithAttributedString", (void *)hook_CTFramesetterCreate, (void **)&orig_CTFramesetterCreate);
+        hookFunc("CFStringCreateWithCString", (void *)hook_CFStringCreateWithCString, (void **)&orig_CFStringCreateWithCString);
+        hookFunc("CFBundleCopyLocalizedString", (void *)hook_CFBundleCopyLocalizedString, (void **)&orig_CFBundleCopyLocalizedString);
     }
 }
