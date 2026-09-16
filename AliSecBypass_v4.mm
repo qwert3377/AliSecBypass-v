@@ -596,7 +596,8 @@ DEF_SWZ1(SideStore_InsetGroupTableViewCell, setText_, NSString *)
 DEF_SWZ1(SideStore_AppContentTableViewCell, setText_, NSString *)
 DEF_SWZ1(SideStore_SettingsHeaderFooterView, setText_, NSString *)
 DEF_SWZ1(JetUI_DynamicLabel, setText_, NSString *)
-DEF_SWZ1(JetUI_DynamicLabel_, _setText_, NSString *)
+static void (*orig_JetUI_DynamicLabel__setText_)(id, SEL, NSString *);
+static void hook_JetUI_DynamicLabel__setText_(id self, SEL _cmd, NSString *v) { orig_JetUI_DynamicLabel__setText_(self, _cmd, cn(v) ?: v); }
 DEF_SWZ1(UIListContentConfiguration, setText_, NSString *)
 DEF_SWZ1(UIListContentConfiguration_, setSecondaryText_, NSString *)
 DEF_SWZ1(UIButtonConfiguration, setTitle_, NSString *)
@@ -660,7 +661,7 @@ static NSString *hook_NSBundle_localized(id self, SEL _cmd, NSString *key, NSStr
 // ===================== CoreText 原生替换（缓存 attr→typesetter，滚动零开销）=====================
 static CFHashCode ptrHash(const void *v) { return (CFHashCode)((uintptr_t)v >> 4); }
 static Boolean ptrEqual(const void *a, const void *b) { return a == b; }
-static CFDictionaryKeyCallBacks PtrKeyCB = { 0, NULL, NULL, NULL, NULL, ptrHash, ptrEqual, NULL };
+static CFDictionaryKeyCallBacks PtrKeyCB = { 0, NULL, NULL, NULL, ptrEqual, ptrHash };
 static CFMutableDictionaryRef g_tsCache = NULL;
 
 // 命中后顺手把对象内部 ivar 改成中文：该对象此后永久为中文
@@ -670,7 +671,7 @@ static void rewriteObjectIvar(NSAttributedString *o, NSString *hit) {
     Ivar iv = nil;
     if (clsCached && [o isKindOfClass:clsCached]) iv = class_getInstanceVariable(clsCached, "_contents");
     else if (clsMutable && [o isKindOfClass:clsMutable]) iv = class_getInstanceVariable(clsMutable, "mutableString");
-    if (iv) object_setIvar(o, iv, [[NSString alloc] initWithString:hit]); // retained，永久持有
+    if (iv) object_setIvar(o, iv, (id)CFBridgingRetain(hit)); // +1 永久持有，两种内存管理模式都安全
 }
 
 static CTTypesetterRef (*orig_CTTypesetterCreate)(CFAttributedStringRef);
@@ -678,15 +679,15 @@ static CTTypesetterRef hook_CTTypesetterCreate(CFAttributedStringRef attr) {
     if (!attr) return orig_CTTypesetterCreate(attr);
     CTTypesetterRef cached = (CTTypesetterRef)CFDictionaryGetValue(g_tsCache, attr);
     if (cached) { CFRetain(cached); return cached; }
-    NSString *s = (NSString *)CFAttributedStringGetString(attr);
+    NSString *s = (__bridge NSString *)CFAttributedStringGetString(attr);
     NSString *hit = cn(s);
     if (!hit) return orig_CTTypesetterCreate(attr);
-    NSDictionary *attrs = [(NSAttributedString *)attr length] ? [(NSAttributedString *)attr attributesAtIndex:0 effectiveRange:NULL] : nil;
+    NSDictionary *attrs = [(__bridge NSAttributedString *)attr length] ? [(__bridge NSAttributedString *)attr attributesAtIndex:0 effectiveRange:NULL] : nil;
     NSAttributedString *nattr = [[NSAttributedString alloc] initWithString:hit attributes:attrs];
-    CTTypesetterRef nt = orig_CTTypesetterCreate((CFAttributedStringRef)nattr);
+    CTTypesetterRef nt = orig_CTTypesetterCreate((__bridge CFAttributedStringRef)nattr);
     if (CFDictionaryGetCount(g_tsCache) > 800) CFDictionaryRemoveAllValues(g_tsCache);
     CFDictionarySetValue(g_tsCache, attr, nt);   // value +1 由 dict 持有
-    rewriteObjectIvar((NSAttributedString *)attr, hit);
+    rewriteObjectIvar((__bridge NSAttributedString *)attr, hit);
     return nt;
 }
 static CTLineRef (*orig_CTLineCreate)(CFAttributedStringRef);
@@ -694,15 +695,15 @@ static CTLineRef hook_CTLineCreate(CFAttributedStringRef attr) {
     if (!attr) return orig_CTLineCreate(attr);
     CTLineRef cached = (CTLineRef)CFDictionaryGetValue(g_tsCache, attr);
     if (cached) { CFRetain(cached); return cached; }
-    NSString *s = (NSString *)CFAttributedStringGetString(attr);
+    NSString *s = (__bridge NSString *)CFAttributedStringGetString(attr);
     NSString *hit = cn(s);
     if (!hit) return orig_CTLineCreate(attr);
-    NSDictionary *attrs = [(NSAttributedString *)attr length] ? [(NSAttributedString *)attr attributesAtIndex:0 effectiveRange:NULL] : nil;
+    NSDictionary *attrs = [(__bridge NSAttributedString *)attr length] ? [(__bridge NSAttributedString *)attr attributesAtIndex:0 effectiveRange:NULL] : nil;
     NSAttributedString *nattr = [[NSAttributedString alloc] initWithString:hit attributes:attrs];
-    CTLineRef nt = orig_CTLineCreate((CFAttributedStringRef)nattr);
+    CTLineRef nt = orig_CTLineCreate((__bridge CFAttributedStringRef)nattr);
     if (CFDictionaryGetCount(g_tsCache) > 800) CFDictionaryRemoveAllValues(g_tsCache);
     CFDictionarySetValue(g_tsCache, attr, nt);
-    rewriteObjectIvar((NSAttributedString *)attr, hit);
+    rewriteObjectIvar((__bridge NSAttributedString *)attr, hit);
     return nt;
 }
 static CTFramesetterRef (*orig_CTFramesetterCreate)(CFAttributedStringRef);
@@ -710,15 +711,15 @@ static CTFramesetterRef hook_CTFramesetterCreate(CFAttributedStringRef attr) {
     if (!attr) return orig_CTFramesetterCreate(attr);
     CTFramesetterRef cached = (CTFramesetterRef)CFDictionaryGetValue(g_tsCache, attr);
     if (cached) { CFRetain(cached); return cached; }
-    NSString *s = (NSString *)CFAttributedStringGetString(attr);
+    NSString *s = (__bridge NSString *)CFAttributedStringGetString(attr);
     NSString *hit = cn(s);
     if (!hit) return orig_CTFramesetterCreate(attr);
-    NSDictionary *attrs = [(NSAttributedString *)attr length] ? [(NSAttributedString *)attr attributesAtIndex:0 effectiveRange:NULL] : nil;
+    NSDictionary *attrs = [(__bridge NSAttributedString *)attr length] ? [(__bridge NSAttributedString *)attr attributesAtIndex:0 effectiveRange:NULL] : nil;
     NSAttributedString *nattr = [[NSAttributedString alloc] initWithString:hit attributes:attrs];
-    CTFramesetterRef nt = orig_CTFramesetterCreate((CFAttributedStringRef)nattr);
+    CTFramesetterRef nt = orig_CTFramesetterCreate((__bridge CFAttributedStringRef)nattr);
     if (CFDictionaryGetCount(g_tsCache) > 800) CFDictionaryRemoveAllValues(g_tsCache);
     CFDictionarySetValue(g_tsCache, attr, nt);
-    rewriteObjectIvar((NSAttributedString *)attr, hit);
+    rewriteObjectIvar((__bridge NSAttributedString *)attr, hit);
     return nt;
 }
 
@@ -758,7 +759,7 @@ static CFStringRef hook_CFStringCreateWithCString(CFAllocatorRef a, const char *
 static CFStringRef (*orig_CFBundleCopyLocalizedString)(CFBundleRef, CFStringRef, CFStringRef, CFStringRef);
 static CFStringRef hook_CFBundleCopyLocalizedString(CFBundleRef b, CFStringRef key, CFStringRef value, CFStringRef table) {
     if (key) {
-        NSString *hit = cn((NSString *)key);
+        NSString *hit = cn((__bridge NSString *)key);
         if (hit) return (CFStringRef)CFBridgingRetain(hit);
     }
     return orig_CFBundleCopyLocalizedString(b, key, value, table);
