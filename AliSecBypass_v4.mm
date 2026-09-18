@@ -1,6 +1,7 @@
 // BLKeySniff.mm —— hook CryptoSwift AES.init + GCM.init, 抓解密 key/iv
 // 密文结构: AES-GCM(nonce12 + ct + tag16), key 派生自设备ID
 // 抓到 key 后本地可解 lista 全部密文(含VIP线路)
+// 日志: Documents/key_sniff.log
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
@@ -20,18 +21,19 @@ static void slog(NSString *msg) {
     } @catch (...) {}
 }
 
-// Swift Array<UInt8>: buffer堆对象 +16=count +24=元素
+// Swift Array<UInt8> 解包: buffer堆对象 +16=count +24=元素
 static NSData *swiftU8(void *x) {
     uintptr_t p = (uintptr_t)x;
-    if (!p || (p & 0x400000000000) == 0 && (p < 0x1000 || p > 0x400000000000)) return nil;
+    if (!p || ((p & 0x400000000000) == 0 && (p < 0x1000 || p > 0x400000000000))) return nil;
     int64_t c = *(int64_t *)(p + 16);
     if (c <= 0 || c > 100000) return nil;
     return [NSData dataWithBytesNoCopy:(void *)(p + 24) length:(NSUInteger)c freeWhenDone:NO];
 }
+
 static NSString *hex(NSData *d) {
     if (!d) return @"(nil)";
     NSMutableString *s = [NSMutableString stringWithCapacity:d.length * 2];
-    const uint8_t *b = d.bytes;
+    const uint8_t *b = (const uint8_t *)d.bytes;
     for (NSUInteger i = 0; i < d.length; i++) [s appendFormat:@"%02x", b[i]];
     return s;
 }
