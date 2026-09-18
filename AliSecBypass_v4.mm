@@ -1,12 +1,13 @@
-// AliSecBypass_v4.mm —— 去掉 Security 框架依赖版
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import "dobby.h"
 
-// dlsym 取地址, 不链接 Security.framework
-typedef OSStatus (*SecItemCopyMatchingFn)(CFDictionaryRef query, CFTypeRef *result);
-static SecItemCopyMatchingFn orig_copy = NULL;
+typedef OSStatus (*SecItemFn)(CFDictionaryRef, CFTypeRef *);
+static SecItemFn orig_copy = NULL;
+static SecItemFn orig_add = NULL;
+static SecItemFn orig_update = NULL;
 static NSTimeInterval g_start = 0;
+static BOOL g_newIdWritten = NO;   // 关键: 新ID写入后置位, 此后一律放行
 
 static void log_msg(NSString *msg) {
     @try {
@@ -22,27 +23,48 @@ static void log_msg(NSString *msg) {
     } @catch (NSException *e) {}
 }
 
-// 启动后 8 秒内, abitounid 查询一律返回 errSecItemNotFound(-25300)
-// App: 查→无→generateDeviceID 新UUID→写Keychain→注册新设备→新10分钟
+static BOOL isAbitQuery(CFDictionaryRef dict) {
+    CFStringRef acct = (CFStringRef)CFDictionaryGetValue(dict, CFSTR("acct"));
+    return acct && CFGetTypeID(acct) == CFStringGetTypeID()
+        && CFStringCompare(acct, CFSTR("abitounid"), 0) == kCFCompareEqualTo;
+}
+
+// 读: 新ID未写入前, 启动8秒内的查询返回"不存在" → 触发App重新生成
 static OSStatus my_copy(CFDictionaryRef query, CFTypeRef *result) {
-    CFStringRef acct = (CFStringRef)CFDictionaryGetValue(query, CFSTR("acct"));
-    if (acct && CFGetTypeID(acct) == CFStringGetTypeID()
-        && CFStringCompare(acct, CFSTR("abitounid"), 0) == kCFCompareEqualTo) {
-        if ([NSDate timeIntervalSinceReferenceDate] - g_start < 8.0) {
-            static int n = 0;
-            if (++n <= 3) log_msg(@"[hook] abitounid→不存在(触发重新生成)");
-            return (OSStatus)-25300;   // errSecItemNotFound, 硬编码不依赖 Security
-        }
+    if (!g_newIdWritten && [NSDate timeIntervalSinceReferenceDate] - g_start < 8.0
+        && isAbitQuery(query)) {
+        static int n = 0;
+        if (++n <= 3) log_msg(@"[hook] 查询→不存在(触发重新生成)");
+        return (OSStatus)-25300;
     }
     return orig_copy(query, result);
 }
 
+// 写: App 把新生成的ID写入Keychain → 置位放行, 保证后续读写一致
+static OSStatus my_add(CFDictionaryRef attrs, CFTypeRef *result) {
+    OSStatus s = orig_add(attrs, result);
+    if ((s == 0 || s == -25299) && isAbitQuery(attrs)) {  // 0=成功 -25299=已存在
+        if (!g_newIdWritten) log_msg(@"[hook] 新ID已写入, 此后放行");
+        g_newIdWritten = YES;
+    }
+    return s;
+}
+static OSStatus my_update(CFDictionaryRef query, CFDictionaryRef attrs) {
+    OSStatus s = orig_update(query, attrs);
+    if (s == 0 && isAbitQuery(query)) g_newIdWritten = YES;
+    return s;
+}
+
 __attribute__((constructor)) static void tp_init(void) {
     g_start = [NSDate timeIntervalSinceReferenceDate];
-    void *sec = dlsym(RTLD_DEFAULT, "SecItemCopyMatching");
-    if (!sec) { log_msg(@"[失败] dlsym SecItemCopyMatching"); return; }
-    int err = DobbyHook(sec, (void *)my_copy, (void **)&orig_copy);
-    log_msg([NSString stringWithFormat:@"[Dobby] hook %s", err == 0 ? "成功" : "失败"]);
+    int e1 = 0, e2 = 0, e3 = 0;
+    void *p = dlsym(RTLD_DEFAULT, "SecItemCopyMatching");
+    if (p) e1 = DobbyHook(p, (void *)my_copy, (void **)&orig_copy);
+    p = dlsym(RTLD_DEFAULT, "SecItemAdd");
+    if (p) e2 = DobbyHook(p, (void *)my_add, (void **)&orig_add);
+    p = dlsym(RTLD_DEFAULT, "SecItemUpdate");
+    if (p) e3 = DobbyHook(p, (void *)my_update, (void **)&orig_update);
+    log_msg([NSString stringWithFormat:@"[Dobby] copy=%d add=%d update=%d", e1, e2, e3]);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0*NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
