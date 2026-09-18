@@ -4,6 +4,7 @@
 //   第二遍(有标记): 删标记 → 纯监听 → App冷启动无缓存必请求lista → 解密自动捕获
 // 日志: Documents/sniff.log
 #import <Foundation/Foundation.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import "dobby.h"
@@ -33,7 +34,8 @@ static NSString *docsPath(void) {
     return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
 }
 
-#pragma mark Swift 值解包
+#pragma mark - Swift 值解包
+// Array<UInt8>: buffer堆对象, +16=count, +24=元素数据
 static NSData *swiftU8(void *x) {
     uintptr_t p = (uintptr_t)x;
     if (!p || p < 0x1000 || p > 0x400000000000) return nil;
@@ -41,7 +43,10 @@ static NSData *swiftU8(void *x) {
     if (c <= 0 || c > 300000) return nil;
     return [NSData dataWithBytesNoCopy:(void *)(p + 24) length:(NSUInteger)c freeWhenDone:NO];
 }
+
+// String: 大字符串 hi=堆指针, +24=count, +32=UTF8数据
 static NSString *swiftStr(uint64_t lo, uint64_t hi) {
+    (void)lo;
     if (hi > 0x100000000ULL && hi < 0x400000000000ULL) {
         int64_t cnt = *(int64_t *)(uintptr_t)(hi + 24);
         if (cnt > 0 && cnt < 5000) {
@@ -51,6 +56,7 @@ static NSString *swiftStr(uint64_t lo, uint64_t hi) {
     }
     return nil;
 }
+
 static NSString *hexStr(NSData *d, NSUInteger n) {
     if (!d) return @"";
     NSMutableString *s = [NSMutableString string];
@@ -59,13 +65,14 @@ static NSString *hexStr(NSData *d, NSUInteger n) {
     return s;
 }
 
-#pragma mark hook 1: Cipher.decrypt (底层, 所有解密必经) @ base+0xfc28
+#pragma mark - hook 1: Cipher.decrypt @ base+0xfc28 (所有解密必经)
 typedef void (*VoidFn)(void);
 static VoidFn orig_cipher = NULL;
+
 static void my_cipher(void) {
     void *in1 = NULL;
     __asm__ volatile("mov %0, x1" : "=r"(in1));
-    ((VoidFn)orig_cipher)();                 // trampoline, 返回后 x0=输出buffer
+    ((VoidFn)orig_cipher)();                       // trampoline, 返回后 x0=输出buffer
     uintptr_t ret = 0;
     __asm__ volatile("mov %0, x0" : "=r"(ret));
     NSData *inD = swiftU8(in1);
@@ -76,13 +83,15 @@ static void my_cipher(void) {
         slog([NSString stringWithFormat:@"[Cipher#%d] in=%luB %@ → out=%luB",
               g_n, (unsigned long)inD.length, hexStr(inD, 20), (unsigned long)outD.length]);
         if (outS && ([outS containsString:@"server"] || [outS containsString:@"vless"])) {
-            slog([NSString stringWithFormat:@"★★明文: %@", [outS substringToIndex:MIN(250, outS.length)]]);
+            slog([NSString stringWithFormat:@"★★明文: %@",
+                  [outS substringToIndex:MIN(250, outS.length)]]);
         }
     }
 }
 
-#pragma mark hook 2: quickDecrypt (拿 passphrase) @ base+0xf958
+#pragma mark - hook 2: BLAESDecryptor.quickDecrypt @ base+0xf958 (拿 passphrase)
 static VoidFn orig_quick = NULL;
+
 static void my_quick(void) {
     uint64_t lo = 0, hi = 0;
     __asm__ volatile("mov %0, x3\n\tmov %1, x4" : "=r"(lo), "=r"(hi));
@@ -92,7 +101,7 @@ static void my_quick(void) {
     ((VoidFn)orig_quick)();
 }
 
-#pragma mark hook 3: 丢弃列表缓存写入 (磁盘永无缓存)
+#pragma mark - hook 3: 丢弃列表缓存写入 (磁盘永无缓存)
 static id (*orig_setObj)(NSUserDefaults *, SEL, id, id);
 static id my_setObj(NSUserDefaults *self, SEL _cmd, id v, id k) {
     if ([k isKindOfClass:[NSString class]] && [g_cacheKeys containsObject:(NSString *)k]) {
@@ -132,8 +141,8 @@ __attribute__((constructor)) static void init(void) {
         int e1 = DobbyHook((void *)(base + 0xfc28), (void *)my_cipher, (void **)&orig_cipher);
         int e2 = DobbyHook((void *)(base + 0xf958), (void *)my_quick, (void **)&orig_quick);
 
-        Class udCls = objc_getClass("NSUserDefaults");
         int e3 = -1;
+        Class udCls = objc_getClass("NSUserDefaults");
         if (udCls) {
             Method m = class_getInstanceMethod(udCls, @selector(setObject:forKey:));
             if (m) {
@@ -145,7 +154,7 @@ __attribute__((constructor)) static void init(void) {
               e1, e2, e3, second ? @"②监听" : @"①清缓存"]);
 
         if (!second) {
-            // 第一遍: 3秒后清缓存 + 写标记 + 自杀
+            // 第一遍: 3秒后清缓存 + 写标记 + 自杀(不再重复)
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 clearServerCache();
@@ -156,7 +165,7 @@ __attribute__((constructor)) static void init(void) {
             });
         } else {
             [[NSFileManager defaultManager] removeItemAtPath:marker error:nil];
-            slog(@"[第二遍] 纯监听中 —— App冷启动将自动请求并解密, 无需任何操作");
+            slog(@"[第二遍] 纯监听中 —— 冷启动自动请求解密, 无需任何操作");
         }
     });
 }
