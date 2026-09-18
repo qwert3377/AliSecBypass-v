@@ -1,7 +1,7 @@
 // BLSniff_v6.mm —— 冷启动抓解密: Cipher.decrypt + quickDecrypt + 缓存写入拦截
-// 两遍机制(标记文件 sniff2nd 区分, 只自杀一次):
-//   第一遍: 装hook → 3秒清缓存+写标记 → 自杀
-//   第二遍: 删标记 → 纯监听 → App冷启动无缓存必请求lista → 解密自动捕获
+// 模式控制(手动, 标记文件 sniff2nd 只增不删):
+//   无标记 = 第一遍: 3秒清缓存+写标记 → 自杀 → 再开即监听
+//   有标记 = 监听模式: 纯捕获, 标记保留; 手动删标记可重置回第一遍
 // 日志: Documents/sniff.log
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
@@ -170,18 +170,18 @@ __attribute__((constructor)) static void init(void) {
               e1, e2, e3, second ? @"②监听" : @"①清缓存"]);
 
         if (!second) {
-            // 第一遍: 3秒后清缓存 + 写标记 + 自杀(只此一次)
+            // 第一遍: 3秒后清缓存 + 写标记 + 自杀(之后每次启动都是监听, 直到手动删标记)
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 clearServerCache();
                 [@"" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
-                slog(@"[第一遍] 缓存已清+标记已写 → 1秒后自杀, 请重新打开App");
+                slog(@"[第一遍] 缓存已清+标记已写 → 1秒后自杀, 再开即监听模式");
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{ exit(0); });
             });
         } else {
-            [[NSFileManager defaultManager] removeItemAtPath:marker error:nil];
-            slog(@"[第二遍] 纯监听中 —— 冷启动自动请求解密, 无需任何操作");
+            // 监听模式: 保留标记不删, 手动删除 sniff2nd 文件才能回到第一遍
+            slog(@"[第二遍] 纯监听中 —— 标记保留; 想重新清缓存请手动删除 sniff2nd");
         }
     });
 }
