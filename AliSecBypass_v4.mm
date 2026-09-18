@@ -1,20 +1,12 @@
-// AliSecBypass_v7.mm —— ButterflyLinker 无限试用 (需配合换IP)
-// 已验证: IDFV随机化 → 新设备注册 → 服务器发10分钟试用
-// 风控: 同一IP短时间多次注册会被拒 → 试用到期后需换IP(飞行模式5秒)再重开App
+// BLConnSniff.mm —— 拦截连接/会员线路相关请求
+// 日志: Documents/conn_req.log
 #import <Foundation/Foundation.h>
-#import <dlfcn.h>
-#import "dobby.h"
+#import <objc/runtime.h>
 
-typedef OSStatus (*SecItemFn)(CFDictionaryRef, CFTypeRef *);
-static SecItemFn orig_copy = NULL;
-static NSUUID *g_fakeIdfv = nil;
-static BOOL g_kcTriggered = NO;
-static NSTimeInterval g_start = 0;
-
-static void log_msg(NSString *msg) {
+static void clog(NSString *msg) {
     @try {
         NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-        NSString *path = [doc stringByAppendingPathComponent:@"trial_patch.log"];
+        NSString *path = [doc stringByAppendingPathComponent:@"conn_req.log"];
         NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
         NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!h) { [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
@@ -25,50 +17,82 @@ static void log_msg(NSString *msg) {
     } @catch (NSException *e) {}
 }
 
-static NSString *randomUUID(void) {
-    NSMutableString *s = [NSMutableString stringWithString:@"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"];
-    for (NSInteger i = 0; i < s.length; i++) {
-        unichar c = [s characterAtIndex:i];
-        if (c == 'x' || c == 'y') {
-            u_int32_t r = arc4random_uniform(16);
-            if (c == 'y') r = (r & 0x3) | 0x8;
-            [s replaceCharactersInRange:NSMakeRange(i, 1)
-                             withString:[NSString stringWithFormat:@"%X", r]];
+static NSString *bodyOf(NSURLRequest *req, NSData *extraData) {
+    NSData *d = req.HTTPBody;
+    if ((!d || d.length == 0) && extraData) d = extraData;
+    if (!d || d.length == 0) {
+        // HTTPBodyStream 尝试读
+        NSInputStream *st = req.HTTPBodyStream;
+        if (st) {
+            [st open];
+            NSMutableData *md = [NSMutableData data];
+            uint8_t buf[4096]; NSInteger n;
+            while ((n = [st read:buf maxLength:sizeof(buf)]) > 0) [md appendBytes:buf length:n];
+            [st close];
+            d = md;
         }
     }
-    return s;
+    if (!d || d.length == 0) return @"(无body)";
+    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!s) return [NSString stringWithFormat:@"(二进制 %lu 字节)", (unsigned long)d.length];
+    return [s length] > 600 ? [s substringToIndex:600] : s;
 }
 
-static id (*orig_idfv)(UIDevice *, SEL);
-static id my_idfv(UIDevice *self, SEL _cmd) {
-    if (!g_fakeIdfv) {
-        g_fakeIdfv = [[NSUUID alloc] initWithUUIDString:randomUUID()];
-        log_msg([NSString stringWithFormat:@"[IDFV] %@", g_fakeIdfv.UUIDString]);
-    }
-    return g_fakeIdfv;
-}
-
-static OSStatus my_copy(CFDictionaryRef query, CFTypeRef *result) {
-    if (!g_kcTriggered && [NSDate timeIntervalSinceReferenceDate] - g_start < 10.0) {
-        CFStringRef acct = (CFStringRef)CFDictionaryGetValue(query, CFSTR("acct"));
-        if (acct && CFGetTypeID(acct) == CFStringGetTypeID()
-            && CFStringCompare(acct, CFSTR("abitounid"), 0) == kCFCompareEqualTo) {
-            g_kcTriggered = YES;
-            log_msg(@"[KC] 旧ID屏蔽");
-            return (OSStatus)-25300;
+static void dumpReq(NSURLRequest *req, NSData *extra, NSString *via) {
+    @try {
+        NSString *url = req.URL.absoluteString ?: @"(nil)";
+        // 只记录 API 请求
+        if (![url containsString:@"/lukso/"]) return;
+        NSString *api = [url componentsSeparatedByString:@"/lukso/"].lastObject;
+        clog(@"━━━━━━━━━━━━━━━━━━━━━━");
+        clog([NSString stringWithFormat:@"[%@] %@ %@", via, req.HTTPMethod ?: @"?", api]);
+        // Header 逐 key(防止被 description 吞 entry)
+        NSDictionary *hs = req.allHTTPHeaderFields;
+        for (NSString *k in hs) {
+            clog([NSString stringWithFormat:@"  H %@ = %@", k, [hs[k] description].length > 80 ?
+                  [[hs[k] description] substringToIndex:80] : [hs[k] description]]);
         }
-    }
-    return orig_copy(query, result);
+        clog([NSString stringWithFormat:@"  BODY: %@", bodyOf(req, extra)]);
+    } @catch (NSException *e) {}
 }
 
-__attribute__((constructor)) static void tp_init(void) {
-    g_start = [NSDate timeIntervalSinceReferenceDate];
-    Class devCls = objc_getClass("UIDevice");
-    if (devCls) {
-        Method m = class_getInstanceMethod(devCls, @selector(identifierForVendor));
-        if (m) orig_idfv = (id (*)(UIDevice *, SEL))method_setImplementation(m, (IMP)my_idfv);
-    }
-    void *p = dlsym(RTLD_DEFAULT, "SecItemCopyMatching");
-    int e = p ? DobbyHook(p, (void *)my_copy, (void **)&orig_copy) : -1;
-    log_msg([NSString stringWithFormat:@"[v7] idfv=%@ kc=%d", g_fakeIdfv ? @"ok" : @"fail", e]);
+// ---- hook 1: dataTaskWithRequest:completionHandler: ----
+typedef id (*DT1)(id, SEL, NSURLRequest *, id);
+static DT1 orig_dt1 = NULL;
+static id my_dt1(id self, SEL _cmd, NSURLRequest *req, id completionHandler) {
+    dumpReq(req, nil, @"dt1");
+    return orig_dt1(self, _cmd, req, completionHandler);
+}
+
+// ---- hook 2: dataTaskWithRequest: (delegate 模式, 之前抓到的是这条) ----
+typedef id (*DT2)(id, SEL, NSURLRequest *);
+static DT2 orig_dt2 = NULL;
+static id my_dt2(id self, SEL _cmd, NSURLRequest *req) {
+    dumpReq(req, nil, @"dt2");
+    return orig_dt2(self, _cmd, req);
+}
+
+// ---- hook 3: uploadTaskWithRequest:fromData: (multipart POST 走这条) ----
+typedef id (*DT3)(id, SEL, NSURLRequest *, NSData *);
+static DT3 orig_dt3 = NULL;
+static id my_dt3(id self, SEL _cmd, NSURLRequest *req, NSData *body) {
+    dumpReq(req, body, @"upload");
+    return orig_dt3(self, _cmd, req, body);
+}
+
+__attribute__((constructor)) static void init(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        int n = 0;
+        Class cls = objc_getClass("NSURLSession");
+        if (cls) {
+            Method m;
+            m = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
+            if (m) { orig_dt1 = (DT1)method_setImplementation(m, (IMP)my_dt1); n++; }
+            m = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:));
+            if (m) { orig_dt2 = (DT2)method_setImplementation(m, (IMP)my_dt2); n++; }
+            m = class_getInstanceMethod(cls, @selector(uploadTaskWithRequest:fromData:));
+            if (m) { orig_dt3 = (DT3)method_setImplementation(m, (IMP)my_dt3); n++; }
+        }
+        clog([NSString stringWithFormat:@"[init] hooked %d 个入口", n]);
+    });
 }
