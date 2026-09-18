@@ -1,9 +1,8 @@
-// ButterflyTrialPatch.mm v2
-// 每次启动: 0.5秒后删Keychain设备ID + 记录 + exit(0)
-// 使用: 连点两次App图标 —— 第1次:删ID自杀; 第2次:新ID注册, 全新10分钟试用
+// ButterflyTrialPatch.mm v3 —— hook SecItemCopyMatching, App 每次启动都"找不到"设备ID → 重新生成 → 新试用
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
-#import <dispatch/dispatch.h>
+#import <dlfcn.h>
+#import "dobby.h"
 
 static void log_msg(NSString *msg) {
     @try {
@@ -19,32 +18,38 @@ static void log_msg(NSString *msg) {
     } @catch (NSException *e) {}
 }
 
-static void swapAndExit(void) {
-    // 1. 删 Keychain 设备ID
-    NSDictionary *q = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrAccount: @"abitounid",
-        (__bridge id)kSecAttrService: @"com.xiongying.ButterflyLinker"
-    };
-    OSStatus s = SecItemDelete((__bridge CFDictionaryRef)q);
-    log_msg([NSString stringWithFormat:@"[Keychain] err=%d", (int)s]);
-    // 2. 清服务器响应缓存
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    for (NSString *k in @[@"Dugayon",@"Mansanas",@"Mearind",@"Klase",@"Usuario",
-                          @"Sausuario",@"Tandaan",@"Abitcoifugs",@"Session",@"Sesyon",@"Basihanan"]) {
-        [ud removeObjectForKey:k];
+// 关键: 启动后 8 秒内的 abitounid 查询一律返回"不存在"
+// App 流程: 查→无→generateDeviceID 生成新UUID→写Keychain→注册新设备→新10分钟
+// 8 秒后放行(此时 Keychain 里已是新ID, 保持一致性, 避免运行期反复重生成)
+static NSTimeInterval g_startTime = 0;
+static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
+
+static OSStatus my_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+    CFStringRef acct = (CFStringRef)CFDictionaryGetValue(query, kSecAttrAccount);
+    if (acct && CFGetTypeID(acct) == CFStringGetTypeID()
+        && CFStringCompare(acct, CFSTR("abitounid"), 0) == kCFCompareEqualTo) {
+        if ([NSDate timeIntervalSinceReferenceDate] - g_startTime < 8.0) {
+            static int n = 0;
+            if (++n <= 3) log_msg(@"[hook] abitounid 查询 → 返回不存在(触发重新生成)");
+            return errSecItemNotFound;  // -25300
+        }
     }
-    [ud synchronize];
-    log_msg(@"[缓存] 已清, 1秒后自杀");
-    // 3. 给用户看日志的时间后自杀 —— 再次打开即新设备
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        exit(0);
-    });
+    return orig_SecItemCopyMatching(query, result);
 }
 
 __attribute__((constructor)) static void tp_init(void) {
-    // 关键修复: 等 App 完全启动、Security 服务就绪后再删
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5*NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ swapAndExit(); });
+    g_startTime = [NSDate timeIntervalSinceReferenceDate];
+    void *sec = dlsym(RTLD_DEFAULT, "SecItemCopyMatching");
+    if (!sec) { log_msg(@"[失败] 找不到 SecItemCopyMatching"); return; }
+    int err = DobbyHook(sec, (void *)my_SecItemCopyMatching, (void **)&orig_SecItemCopyMatching);
+    log_msg([NSString stringWithFormat:@"[Dobby] hook %s", err == 0 ? "成功" : "失败"]);
+    // 顺手清掉服务器响应缓存, 防止旧会员状态残留
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0*NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        for (NSString *k in @[@"Dugayon",@"Mansanas",@"Mearind",@"Klase",@"Session",@"Sesyon"]) {
+            [ud removeObjectForKey:k];
+        }
+        [ud synchronize];
+    });
 }
