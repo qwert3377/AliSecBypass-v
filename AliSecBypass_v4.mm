@@ -1,11 +1,12 @@
 // BLSniff_v6.mm —— 冷启动抓解密: Cipher.decrypt + quickDecrypt + 缓存写入拦截
-// 两遍机制:
-//   第一遍(无标记): 装hook → 3秒清缓存+写标记 → 自杀
-//   第二遍(有标记): 删标记 → 纯监听 → App冷启动无缓存必请求lista → 解密自动捕获
+// 两遍机制(标记文件 sniff2nd 区分, 只自杀一次):
+//   第一遍: 装hook → 3秒清缓存+写标记 → 自杀
+//   第二遍: 删标记 → 纯监听 → App冷启动无缓存必请求lista → 解密自动捕获
 // 日志: Documents/sniff.log
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <mach/mach.h>
 #import <mach-o/dyld.h>
 #import "dobby.h"
 
@@ -34,25 +35,40 @@ static NSString *docsPath(void) {
     return [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
 }
 
+#pragma mark - 安全内存读(未映射区域返回NO, 绝不SIGSEGV)
+static BOOL safeRead(const void *addr, void *buf, size_t len) {
+    vm_size_t out = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(),
+                        (vm_address_t)addr, len, (vm_address_t)buf, &out);
+    return kr == KERN_SUCCESS && out == len;
+}
+
 #pragma mark - Swift 值解包
 // Array<UInt8>: buffer堆对象, +16=count, +24=元素数据
 static NSData *swiftU8(void *x) {
     uintptr_t p = (uintptr_t)x;
     if (!p || p < 0x1000 || p > 0x400000000000) return nil;
-    int64_t c = *(int64_t *)(p + 16);
+    int64_t c = 0;
+    if (!safeRead((void *)(p + 16), &c, 8)) return nil;
     if (c <= 0 || c > 300000) return nil;
-    return [NSData dataWithBytesNoCopy:(void *)(p + 24) length:(NSUInteger)c freeWhenDone:NO];
+    void *buf = malloc((size_t)c);
+    if (!buf) return nil;
+    if (!safeRead((void *)(p + 24), buf, (size_t)c)) { free(buf); return nil; }
+    return [NSData dataWithBytesNoCopy:buf length:(NSUInteger)c freeWhenDone:YES];
 }
 
 // String: 大字符串 hi=堆指针, +24=count, +32=UTF8数据
 static NSString *swiftStr(uint64_t lo, uint64_t hi) {
     (void)lo;
     if (hi > 0x100000000ULL && hi < 0x400000000000ULL) {
-        int64_t cnt = *(int64_t *)(uintptr_t)(hi + 24);
-        if (cnt > 0 && cnt < 5000) {
-            return [[NSString alloc] initWithBytes:(void *)(uintptr_t)(hi + 32)
-                                            length:(NSUInteger)cnt encoding:NSUTF8StringEncoding];
-        }
+        int64_t cnt = 0;
+        if (!safeRead((void *)(uintptr_t)(hi + 24), &cnt, 8) || cnt <= 0 || cnt > 5000) return nil;
+        void *buf = malloc((size_t)cnt);
+        if (!buf) return nil;
+        if (!safeRead((void *)(uintptr_t)(hi + 32), buf, (size_t)cnt)) { free(buf); return nil; }
+        NSString *s = [[NSString alloc] initWithBytes:buf length:(NSUInteger)cnt encoding:NSUTF8StringEncoding];
+        free(buf);
+        return s;
     }
     return nil;
 }
@@ -154,7 +170,7 @@ __attribute__((constructor)) static void init(void) {
               e1, e2, e3, second ? @"②监听" : @"①清缓存"]);
 
         if (!second) {
-            // 第一遍: 3秒后清缓存 + 写标记 + 自杀(不再重复)
+            // 第一遍: 3秒后清缓存 + 写标记 + 自杀(只此一次)
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 clearServerCache();
