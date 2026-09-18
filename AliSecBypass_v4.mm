@@ -1,7 +1,4 @@
-// BLSwap.mm —— ButterflyLinker 手动换号插件
-// 逻辑: 平时启动身份不变(Keychain保留) → 点悬浮"换"按钮 → 删Keychain旧ID+清凭据 → 自杀
-//       → 手动重开App = 全新IDFV注册新设备 (需配合换IP防风控)
-// 悬浮按钮: 蓝色圆钮"换", 位于屏幕右上, 单击即执行
+// BLSwap v2 —— 修 Scene 兼容 + 全程日志
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <UIKit/UIKit.h>
@@ -9,6 +6,23 @@
 
 static NSUUID *g_fakeIdfv = nil;
 static UIWindow *g_win = nil;
+static NSString *g_logPath = nil;
+
+static void slog(NSString *msg) {
+    @try {
+        if (!g_logPath) {
+            NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            g_logPath = [doc stringByAppendingPathComponent:@"swap.log"];
+        }
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+        NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:g_logPath];
+        if (!h) { [[NSFileManager defaultManager] createFileAtPath:g_logPath contents:nil attributes:nil];
+                  h = [NSFileHandle fileHandleForWritingAtPath:g_logPath]; }
+        [h seekToEndOfFile];
+        [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [h closeFile];
+    } @catch (...) {}
+}
 
 static NSString *randomUUID(void) {
     NSMutableString *s = [NSMutableString stringWithString:@"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"];
@@ -24,86 +38,113 @@ static NSString *randomUUID(void) {
     return s;
 }
 
-#pragma mark - hook: IDFV 每次启动随机 (注册新设备的关键)
+#pragma mark - hook IDFV
 static id (*orig_idfv)(UIDevice *, SEL);
 static id my_idfv(UIDevice *self, SEL _cmd) {
     if (!g_fakeIdfv) {
         g_fakeIdfv = [[NSUUID alloc] initWithUUIDString:randomUUID()];
+        slog([NSString stringWithFormat:@"[IDFV] %@", g_fakeIdfv.UUIDString]);
     }
     return g_fakeIdfv;
 }
 
-#pragma mark - 换号核心: 删Keychain + 清凭据 + 自杀
+#pragma mark - 换号
 static void doSwapAndExit(void) {
-    // 1. 删 Keychain 设备ID (dlsym 免链接 Security)
+    slog(@"[点击] 换号开始");
     typedef int (*SecItemDeleteFn)(CFDictionaryRef);
     void *sec = dlsym(RTLD_DEFAULT, "SecItemDelete");
     if (sec) {
-        NSDictionary *q = @{@"class": @"genp",
-                            @"acct": @"abitounid",
+        NSDictionary *q = @{@"class": @"genp", @"acct": @"abitounid",
                             @"svce": @"com.xiongying.ButterflyLinker"};
-        ((SecItemDeleteFn)sec)((__bridge CFDictionaryRef)q);
+        int err = ((SecItemDeleteFn)sec)((__bridge CFDictionaryRef)q);
+        slog([NSString stringWithFormat:@"[KC] 删除 abitounid err=%d", err]);
+    } else {
+        slog(@"[KC] dlsym SecItemDelete 失败!");
     }
-    // 2. 清服务器响应缓存 + 登录凭据 (v7验证过的全集, 漏一个换号失败)
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    for (NSString *k in @[@"Sausuario", @"Tandaan", @"Usuario",      // 凭据(核心!)
-                          @"Session", @"Sesyon", @"Sessionid",
+    for (NSString *k in @[@"Sausuario", @"Tandaan", @"Usuario", @"Session", @"Sesyon",
                           @"Dugayon", @"Mansanas", @"Mearind", @"Klase",
                           @"Abitcoifugs", @"Bitasyon", @"Libutan", @"Adlaw",
-                          @"Liyente", @"Tananas", @"Abitproducts",
-                          @"Is_today_vip", @"Pay_switch", @"Is_real"]) {
+                          @"Liyente", @"Tananas", @"Abitproducts"]) {
         [ud removeObjectForKey:k];
     }
     [ud synchronize];
-    // 3. 0.4秒后自杀 → 用户手动重开App = 新设备+新试用
+    slog(@"[缓存] 已清 → 0.4秒后自杀");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        exit(0);
-    });
+                   dispatch_get_main_queue(), ^{ exit(0); });
 }
 
 @interface BLSwapper : NSObject
 @end
 @implementation BLSwapper
-- (void)swapTapped {
-    doSwapAndExit();
-}
+- (void)swapTapped { doSwapAndExit(); }
 @end
 
-#pragma mark - 悬浮按钮
+#pragma mark - 悬浮按钮 (修 iOS13+ Scene 兼容)
 static void addFloatingButton(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        UIApplication *app = UIApplication.sharedApplication;
+        // iOS13+ 必须挂 windowScene
+        UIWindowScene *targetScene = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *s in app.connectedScenes) {
+                if ([s isKindOfClass:UIWindowScene.class] &&
+                    s.activationState == UISceneActivationStateForegroundActive) {
+                    targetScene = (UIWindowScene *)s;
+                    break;
+                }
+            }
+            if (!targetScene) {
+                for (UIScene *s in app.connectedScenes) {
+                    if ([s isKindOfClass:UIWindowScene.class]) { targetScene = (UIWindowScene *)s; break; }
+                }
+            }
+        }
+        slog([NSString stringWithFormat:@"[UI] scene=%@ scenes=%lu",
+              targetScene ? @"找到" : @"无!", (unsigned long)app.connectedScenes.count]);
+
         CGRect screen = UIScreen.mainScreen.bounds;
         g_win = [[UIWindow alloc] initWithFrame:CGRectMake(screen.size.width - 70, 130, 56, 56)];
+        if (@available(iOS 13.0, *)) {
+            g_win.windowScene = targetScene;   // ← 关键! 不挂 scene 不显示
+        }
         g_win.windowLevel = UIWindowLevelAlert + 1;
-        g_win.backgroundColor = [UIColor clearColor];
+        g_win.backgroundColor = UIColor.clearColor;
 
         UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
         btn.frame = g_win.bounds;
-        btn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.88];
+        btn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.95 alpha:0.9];
         btn.layer.cornerRadius = 28;
-        btn.layer.borderWidth = 1.5;
-        btn.layer.borderColor = [UIColor whiteColor].CGColor;
+        btn.layer.borderWidth = 2;
+        btn.layer.borderColor = UIColor.whiteColor.CGColor;
         [btn setTitle:@"换" forState:UIControlStateNormal];
         [btn setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         btn.titleLabel.font = [UIFont boldSystemFontOfSize:22];
         static BLSwapper *swapper = nil;
         swapper = [[BLSwapper alloc] init];
-        [btn addTarget:swapper action:@selector(swapTapped)
-      forControlEvents:UIControlEventTouchUpInside];
+        [btn addTarget:swapper action:@selector(swapTapped) forControlEvents:UIControlEventTouchUpInside];
         [g_win addSubview:btn];
         g_win.hidden = NO;
+        [g_win makeKeyAndVisible];
+        slog(@"[UI] 按钮已创建并显示");
     });
 }
 
 __attribute__((constructor)) static void init(void) {
-    // hook IDFV (每次启动新随机身份)
+    slog(@"[init] 插件加载");
     Class devCls = objc_getClass("UIDevice");
     if (devCls) {
         Method m = class_getInstanceMethod(devCls, @selector(identifierForVendor));
-        if (m) orig_idfv = (id (*)(UIDevice *, SEL))method_setImplementation(m, (IMP)my_idfv);
+        if (m) {
+            orig_idfv = (id (*)(UIDevice *, SEL))method_setImplementation(m, (IMP)my_idfv);
+            slog(@"[init] IDFV hooked");
+        }
     }
-    // 2秒后挂悬浮按钮(等App界面起来)
+    // 等 App 完全进入前台再挂按钮, 重试3次防 scene 未激活
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ addFloatingButton(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!g_win || g_win.hidden) { slog(@"[UI] 2秒时未成功,5秒重试"); addFloatingButton(); }
+    });
 }
