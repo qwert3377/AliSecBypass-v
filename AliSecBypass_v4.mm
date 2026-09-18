@@ -1,12 +1,13 @@
-// BLConnSniff.mm —— 拦截连接/会员线路相关请求
-// 日志: Documents/conn_req.log
+// BLConfSniff.mm —— 抓线路配置/订阅链接响应
+// 目标: lista/alita/awtomatiko/bitsang/balangkas 响应 + sing-box 配置 + geliunrip 返回值
+// 日志: Documents/conf_sniff.log
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-static void clog(NSString *msg) {
+static void slog(NSString *msg) {
     @try {
         NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-        NSString *path = [doc stringByAppendingPathComponent:@"conn_req.log"];
+        NSString *path = [doc stringByAppendingPathComponent:@"conf_sniff.log"];
         NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
         NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
         if (!h) { [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
@@ -17,82 +18,80 @@ static void clog(NSString *msg) {
     } @catch (NSException *e) {}
 }
 
-static NSString *bodyOf(NSURLRequest *req, NSData *extraData) {
-    NSData *d = req.HTTPBody;
-    if ((!d || d.length == 0) && extraData) d = extraData;
-    if (!d || d.length == 0) {
-        // HTTPBodyStream 尝试读
-        NSInputStream *st = req.HTTPBodyStream;
-        if (st) {
-            [st open];
-            NSMutableData *md = [NSMutableData data];
-            uint8_t buf[4096]; NSInteger n;
-            while ((n = [st read:buf maxLength:sizeof(buf)]) > 0) [md appendBytes:buf length:n];
-            [st close];
-            d = md;
+// 线路配置特征关键字
+static BOOL looksLikeConf(NSString *s) {
+    if (s.length < 30) return NO;
+    if ([s containsString:@"outbounds"] || [s containsString:@"server_port"] ||
+        [s containsString:@"vmess://"] || [s containsString:@"trojan://"] ||
+        [s containsString:@"vless://"] || [s containsString:@"ss://"] ||
+        [s containsString:@"ssr://"] ||
+        ([s containsString:@"server"] && [s containsString:@"port"] &&
+         ([s containsString:@"uuid"] || [s containsString:@"password"] || [s containsString:@"method"])))
+        return YES;
+    return NO;
+}
+
+typedef id (*JSON_IMP)(Class, SEL, NSData *, NSUInteger, NSError **);
+static JSON_IMP orig_json = NULL;
+static int g_count = 0;
+
+static id my_json(Class self, SEL _cmd, NSData *data, NSUInteger opt, NSError **err) {
+    id result = orig_json(self, _cmd, data, opt, err);
+    @try {
+        if (data && data.length > 30 && data.length < 200000 && g_count < 40) {
+            NSString *s = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (s) {
+                NSString *trim = [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                // 1. 线路配置特征
+                if (looksLikeConf(trim)) {
+                    g_count++;
+                    slog(@"★★★ 线路配置/订阅 ★★★");
+                    slog(trim.length > 3000 ? [trim substringToIndex:3000] : trim);
+                    slog(@"★★★ 结束 ★★★");
+                }
+                // 2. 节点列表特征 (lista 响应: 数组含国家/节点名)
+                else if ([trim hasPrefix:@"["] &&
+                         ([trim containsString:@"\"name\""] || [trim containsString:@"\"country\""] || [trim containsString:@"\"city\""])
+                         && [trim containsString:@"\"id\""]) {
+                    g_count++;
+                    slog(@"★★ 节点列表 ★★");
+                    slog(trim.length > 2500 ? [trim substringToIndex:2500] : trim);
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    return result;
+}
+
+// geliunrip 返回值 (配置URL) —— Swift 符号动态找
+static void hookGeliunrip(void) {
+    uint32_t count = 0;
+    const char *img = NULL;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (nm && strstr(nm, "ButterflyLinker.app/ButterflyLinker")) {
+            img = nm; break;
         }
     }
-    if (!d || d.length == 0) return @"(无body)";
-    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-    if (!s) return [NSString stringWithFormat:@"(二进制 %lu 字节)", (unsigned long)d.length];
-    return [s length] > 600 ? [s substringToIndex:600] : s;
-}
-
-static void dumpReq(NSURLRequest *req, NSData *extra, NSString *via) {
-    @try {
-        NSString *url = req.URL.absoluteString ?: @"(nil)";
-        // 只记录 API 请求
-        if (![url containsString:@"/lukso/"]) return;
-        NSString *api = [url componentsSeparatedByString:@"/lukso/"].lastObject;
-        clog(@"━━━━━━━━━━━━━━━━━━━━━━");
-        clog([NSString stringWithFormat:@"[%@] %@ %@", via, req.HTTPMethod ?: @"?", api]);
-        // Header 逐 key(防止被 description 吞 entry)
-        NSDictionary *hs = req.allHTTPHeaderFields;
-        for (NSString *k in hs) {
-            clog([NSString stringWithFormat:@"  H %@ = %@", k, [hs[k] description].length > 80 ?
-                  [[hs[k] description] substringToIndex:80] : [hs[k] description]]);
-        }
-        clog([NSString stringWithFormat:@"  BODY: %@", bodyOf(req, extra)]);
-    } @catch (NSException *e) {}
-}
-
-// ---- hook 1: dataTaskWithRequest:completionHandler: ----
-typedef id (*DT1)(id, SEL, NSURLRequest *, id);
-static DT1 orig_dt1 = NULL;
-static id my_dt1(id self, SEL _cmd, NSURLRequest *req, id completionHandler) {
-    dumpReq(req, nil, @"dt1");
-    return orig_dt1(self, _cmd, req, completionHandler);
-}
-
-// ---- hook 2: dataTaskWithRequest: (delegate 模式, 之前抓到的是这条) ----
-typedef id (*DT2)(id, SEL, NSURLRequest *);
-static DT2 orig_dt2 = NULL;
-static id my_dt2(id self, SEL _cmd, NSURLRequest *req) {
-    dumpReq(req, nil, @"dt2");
-    return orig_dt2(self, _cmd, req);
-}
-
-// ---- hook 3: uploadTaskWithRequest:fromData: (multipart POST 走这条) ----
-typedef id (*DT3)(id, SEL, NSURLRequest *, NSData *);
-static DT3 orig_dt3 = NULL;
-static id my_dt3(id self, SEL _cmd, NSURLRequest *req, NSData *body) {
-    dumpReq(req, body, @"upload");
-    return orig_dt3(self, _cmd, req, body);
+    if (!img) return;
+    const struct mach_header_64 *hdr = (const struct mach_header_64 *)_dyld_get_image_header(
+        (uint32_t)(strstr(img, "ButterflyLinker") - img)); // 简化, 实际用索引
+    // 用 nlist 遍历太繁, 简化: 直接 dladdr 找不了 Swift 符号
+    // 方案: 遍历符号表找 geliunrip (Mach-O LC_SYMTAB 解析, 略) —— 用另一种方式:
+    // hook 整个 App 模块的 URL 返回不现实; 改为 hook -[NSURL absoluteString] 太吵
+    // 实用方案: 监听 App Group UD 的 ConfUrl key 变化
+    slog(@"[hint] geliunrip 符号hook略, 配置URL会在 UD/AppGroup 出现, 看响应即可");
 }
 
 __attribute__((constructor)) static void init(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        int n = 0;
-        Class cls = objc_getClass("NSURLSession");
+        Class cls = objc_getClass("NSJSONSerialization");
         if (cls) {
-            Method m;
-            m = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-            if (m) { orig_dt1 = (DT1)method_setImplementation(m, (IMP)my_dt1); n++; }
-            m = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:));
-            if (m) { orig_dt2 = (DT2)method_setImplementation(m, (IMP)my_dt2); n++; }
-            m = class_getInstanceMethod(cls, @selector(uploadTaskWithRequest:fromData:));
-            if (m) { orig_dt3 = (DT3)method_setImplementation(m, (IMP)my_dt3); n++; }
+            Method m = class_getClassMethod(cls, @selector(JSONObjectWithData:options:error:));
+            if (m) {
+                orig_json = (JSON_IMP)method_setImplementation(m, (IMP)my_json);
+                slog(@"[init] JSON hooked");
+            }
         }
-        clog([NSString stringWithFormat:@"[init] hooked %d 个入口", n]);
     });
 }
